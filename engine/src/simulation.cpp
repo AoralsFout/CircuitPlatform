@@ -1,6 +1,7 @@
 #include "circuit/simulation.hpp"
 
 #include <algorithm>
+#include <unordered_map>
 #include <utility>
 
 namespace circuit {
@@ -76,6 +77,28 @@ SignalValue xorValue(SignalValue left, SignalValue right) {
     return left == right ? SignalValue::Zero : SignalValue::One;
 }
 
+bool isCombinational(ComponentKind kind) {
+    switch (kind) {
+    case ComponentKind::AndGate:
+    case ComponentKind::OrGate:
+    case ComponentKind::NandGate:
+    case ComponentKind::NorGate:
+    case ComponentKind::XorGate:
+    case ComponentKind::XnorGate:
+    case ComponentKind::NotGate:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// DFS 的访问状态用于区分尚未访问、当前路径和已经完成的组件。
+enum class VisitState {
+    Unvisited,
+    Visiting,
+    Visited,
+};
+
 // 集中分派所有二输入门，保持 settle 只负责读取输入和传播输出。
 std::optional<SignalValue> evaluateBinaryGate(
     ComponentKind kind, SignalValue left, SignalValue right) {
@@ -122,7 +145,41 @@ bool Simulation::setInput(ComponentId inputId, SignalValue value) {
 }
 
 // 反复计算 NOT 门，直到本轮没有输出变化或达到稳定化上限。
-bool Simulation::settle() {
+SimulationResult Simulation::settle() {
+    // 先检查结构环路，再执行求值，避免把“未变化”误判为“已稳定”。
+    std::unordered_map<ComponentId, VisitState> states;
+    const auto visitsLoop = [&](auto&& self, ComponentId componentId) -> bool {
+        auto& state = states[componentId];
+        if (state == VisitState::Visiting) {
+            return true;
+        }
+        if (state == VisitState::Visited) {
+            return false;
+        }
+
+        state = VisitState::Visiting;
+        for (const auto& connection : circuit_.connections_) {
+            if (connection.source.component != componentId) {
+                continue;
+            }
+
+            const auto* target = findComponent(circuit_.components_, connection.target.component);
+            if (target != nullptr && isCombinational(target->kind) &&
+                self(self, target->id)) {
+                return true;
+            }
+        }
+
+        state = VisitState::Visited;
+        return false;
+    };
+
+    for (const auto& component : circuit_.components_) {
+        if (isCombinational(component.kind) && visitsLoop(visitsLoop, component.id)) {
+            return {SimulationError::CombinationalLoop};
+        }
+    }
+
     const auto iterationLimit = circuit_.components_.size() + circuit_.connections_.size() + 1;
 
     for (std::size_t iteration = 0; iteration < iterationLimit; ++iteration) {
@@ -143,11 +200,11 @@ bool Simulation::settle() {
         }
 
         if (!changed) {
-            return true;
+            return {SimulationError::None};
         }
     }
 
-    return false;
+    return {SimulationError::CombinationalLoop};
 }
 
 // 输出端直接读取保存值；输入端沿 Connection 读取来源输出值。

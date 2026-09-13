@@ -67,10 +67,10 @@ C++ 数字电路仿真引擎
 
 - `Simulation(Circuit)`：从 Circuit 创建独立仿真快照；
 - `setInput`：设置 Input 元件的输出值；
-- `settle`：重复求值直到输出稳定；
+- `settle`：重复求值直到输出稳定，并返回 `SimulationResult`；
 - `signal`：读取端口当前的 SignalValue。
 
-当前切片实现 `Input`、`NotGate`、`AndGate`、`OrGate`、`NandGate`、`NorGate`、`XorGate`、`XnorGate` 和 `Output` 的组合行为。未连接输入的值为 `Unknown`；不存在的端口返回空值。组合环路错误和通用仿真错误将在后续切片中加入。
+当前切片实现 `Input`、`NotGate`、`AndGate`、`OrGate`、`NandGate`、`NorGate`、`XorGate`、`XnorGate` 和 `Output` 的组合行为，并能报告组合逻辑环路。未连接输入的值为 `Unknown`；不存在的端口返回空值。更丰富的通用仿真错误将在后续切片中加入。
 
 ## 初始外部接口
 

@@ -14,7 +14,7 @@ void evaluates_input_not_and_output() {
 
     circuit::Simulation simulation(circuit);
     assert(simulation.setInput(inputId, circuit::SignalValue::Zero));
-    assert(simulation.settle());
+    assert(simulation.settle().succeeded());
 
     const auto output = simulation.signal({outputId, "in"});
     assert(output.has_value());
@@ -32,11 +32,11 @@ void updates_the_output_when_the_input_changes() {
 
     circuit::Simulation simulation(circuit);
     assert(simulation.setInput(inputId, circuit::SignalValue::Zero));
-    assert(simulation.settle());
+    assert(simulation.settle().succeeded());
     assert(simulation.signal({outputId, "in"}) == circuit::SignalValue::One);
 
     assert(simulation.setInput(inputId, circuit::SignalValue::One));
-    assert(simulation.settle());
+    assert(simulation.settle().succeeded());
     assert(simulation.signal({outputId, "in"}) == circuit::SignalValue::Zero);
 }
 
@@ -48,7 +48,7 @@ void propagates_unknown_when_a_not_input_is_unconnected() {
     assert(circuit.addConnection({notId, "out"}, {outputId, "in"}).succeeded());
 
     circuit::Simulation simulation(circuit);
-    assert(simulation.settle());
+    assert(simulation.settle().succeeded());
     assert(simulation.signal({outputId, "in"}) == circuit::SignalValue::Unknown);
 }
 
@@ -82,7 +82,7 @@ void evaluates_and_truth_table() {
     for (const auto& testCase : cases) {
         assert(simulation.setInput(firstInputId, testCase.first));
         assert(simulation.setInput(secondInputId, testCase.second));
-        assert(simulation.settle());
+        assert(simulation.settle().succeeded());
         assert(simulation.signal({outputId, "in"}) == testCase.expected);
     }
 }
@@ -117,7 +117,7 @@ void evaluates_or_truth_table() {
     for (const auto& testCase : cases) {
         assert(simulation.setInput(firstInputId, testCase.first));
         assert(simulation.setInput(secondInputId, testCase.second));
-        assert(simulation.settle());
+        assert(simulation.settle().succeeded());
         assert(simulation.signal({outputId, "in"}) == testCase.expected);
     }
 }
@@ -152,7 +152,7 @@ void evaluates_nand_truth_table() {
     for (const auto& testCase : cases) {
         assert(simulation.setInput(firstInputId, testCase.first));
         assert(simulation.setInput(secondInputId, testCase.second));
-        assert(simulation.settle());
+        assert(simulation.settle().succeeded());
         assert(simulation.signal({outputId, "in"}) == testCase.expected);
     }
 }
@@ -187,7 +187,7 @@ void evaluates_nor_truth_table() {
     for (const auto& testCase : cases) {
         assert(simulation.setInput(firstInputId, testCase.first));
         assert(simulation.setInput(secondInputId, testCase.second));
-        assert(simulation.settle());
+        assert(simulation.settle().succeeded());
         assert(simulation.signal({outputId, "in"}) == testCase.expected);
     }
 }
@@ -222,7 +222,7 @@ void evaluates_xor_truth_table() {
     for (const auto& testCase : cases) {
         assert(simulation.setInput(firstInputId, testCase.first));
         assert(simulation.setInput(secondInputId, testCase.second));
-        assert(simulation.settle());
+        assert(simulation.settle().succeeded());
         assert(simulation.signal({outputId, "in"}) == testCase.expected);
     }
 }
@@ -257,9 +257,40 @@ void evaluates_xnor_truth_table() {
     for (const auto& testCase : cases) {
         assert(simulation.setInput(firstInputId, testCase.first));
         assert(simulation.setInput(secondInputId, testCase.second));
-        assert(simulation.settle());
+        assert(simulation.settle().succeeded());
         assert(simulation.signal({outputId, "in"}) == testCase.expected);
     }
+}
+
+void evaluates_a_multilevel_not_chain_independently_of_creation_order() {
+    circuit::Circuit circuit;
+    const auto inputId = circuit.addComponent(circuit::ComponentKind::Input);
+    const auto secondNotId = circuit.addComponent(circuit::ComponentKind::NotGate);
+    const auto firstNotId = circuit.addComponent(circuit::ComponentKind::NotGate);
+    const auto outputId = circuit.addComponent(circuit::ComponentKind::Output);
+
+    assert(circuit.addConnection({inputId, "out"}, {firstNotId, "in"}).succeeded());
+    assert(circuit.addConnection({firstNotId, "out"}, {secondNotId, "in"}).succeeded());
+    assert(circuit.addConnection({secondNotId, "out"}, {outputId, "in"}).succeeded());
+
+    circuit::Simulation simulation(circuit);
+    assert(simulation.setInput(inputId, circuit::SignalValue::Zero));
+    assert(simulation.settle().succeeded());
+    assert(simulation.signal({outputId, "in"}) == circuit::SignalValue::Zero);
+}
+
+void rejects_a_combinational_feedback_loop() {
+    circuit::Circuit circuit;
+    const auto firstNotId = circuit.addComponent(circuit::ComponentKind::NotGate);
+    const auto secondNotId = circuit.addComponent(circuit::ComponentKind::NotGate);
+
+    assert(circuit.addConnection({firstNotId, "out"}, {secondNotId, "in"}).succeeded());
+    assert(circuit.addConnection({secondNotId, "out"}, {firstNotId, "in"}).succeeded());
+
+    circuit::Simulation simulation(circuit);
+    const auto result = simulation.settle();
+    assert(!result.succeeded());
+    assert(result.error == circuit::SimulationError::CombinationalLoop);
 }
 
 int main() {
@@ -272,5 +303,7 @@ int main() {
     evaluates_nor_truth_table();
     evaluates_xor_truth_table();
     evaluates_xnor_truth_table();
+    evaluates_a_multilevel_not_chain_independently_of_creation_order();
+    rejects_a_combinational_feedback_loop();
     return 0;
 }

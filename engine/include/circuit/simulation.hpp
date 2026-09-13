@@ -13,6 +13,23 @@ enum class SignalValue {
     Unknown,
 };
 
+enum class SimulationError {
+    None,
+    CombinationalLoop,
+};
+
+struct SimulationResult {
+    SimulationError error{SimulationError::None};
+
+    /**
+     * 判断本次仿真求值是否成功达到稳定状态。
+     * @return 没有检测到仿真错误时返回 true。
+     */
+    [[nodiscard]] bool succeeded() const noexcept {
+        return error == SimulationError::None;
+    }
+};
+
 class Simulation {
 public:
     /**
@@ -31,9 +48,9 @@ public:
 
     /**
      * 求值并传播组合逻辑，直到所有输出稳定。
-     * @return 在求值上限内达到稳定时返回 true，否则返回 false。
+     * @return 成功时返回 None；检测到组合逻辑环路时返回 CombinationalLoop。
      */
-    bool settle();
+    [[nodiscard]] SimulationResult settle();
 
     /**
      * 读取指定端口当前的信号值。
