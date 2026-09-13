@@ -6,6 +6,7 @@
 namespace circuit {
 namespace {
 
+// 集中定义每种元件的端口形状，确保创建元件和后续连接校验使用同一份规则。
 std::vector<Port> portsFor(ComponentKind kind) {
     switch (kind) {
     case ComponentKind::Input:
@@ -37,6 +38,7 @@ std::vector<Port> portsFor(ComponentKind kind) {
     return {};
 }
 
+// 在当前元件集合中查找端口；找不到时返回空指针，供结构校验使用。
 const Port* findPort(const std::vector<Component>& components, const PortId& portId) {
     const auto component = std::find_if(
         components.begin(), components.end(),
@@ -53,18 +55,21 @@ const Port* findPort(const std::vector<Component>& components, const PortId& por
     return port == component->ports.end() ? nullptr : &*port;
 }
 
+// 比较两个端口引用是否指向同一个元件端口。
 bool samePort(const PortId& left, const PortId& right) {
     return left.component == right.component && left.name == right.name;
 }
 
 }  // namespace
 
+// 生成单调递增的元件身份，并根据元件类型创建其端口。
 ComponentId Circuit::addComponent(ComponentKind kind) {
     const auto id = nextComponentId_++;
     components_.push_back({id, kind, portsFor(kind)});
     return id;
 }
 
+// 返回元件副本，避免调用者直接修改 Circuit 内部保存的结构。
 std::optional<Component> Circuit::component(ComponentId id) const {
     const auto found = std::find_if(
         components_.begin(), components_.end(),
@@ -77,6 +82,7 @@ std::optional<Component> Circuit::component(ComponentId id) const {
     return *found;
 }
 
+// 只移除元件本身；连接的独立生命周期由领域规则保证。
 bool Circuit::removeComponent(ComponentId id) {
     const auto found = std::find_if(
         components_.begin(), components_.end(),
@@ -90,6 +96,7 @@ bool Circuit::removeComponent(ComponentId id) {
     return true;
 }
 
+// 校验端点后保存连接；输入端的单来源规则在连接写入前检查。
 ConnectionResult Circuit::addConnection(PortId source, PortId target) {
     const auto* sourcePort = findPort(components_, source);
     if (sourcePort == nullptr) {
@@ -121,6 +128,7 @@ ConnectionResult Circuit::addConnection(PortId source, PortId target) {
     return {id, ConnectionError::None};
 }
 
+// 删除指定连接，不联动修改连接两端的元件。
 bool Circuit::removeConnection(ConnectionId id) {
     const auto found = std::find_if(
         connections_.begin(), connections_.end(),
@@ -134,6 +142,7 @@ bool Circuit::removeConnection(ConnectionId id) {
     return true;
 }
 
+// 返回连接副本，避免调用者绕过 Circuit 的规则直接修改连接。
 std::optional<Connection> Circuit::connection(ConnectionId id) const {
     const auto found = std::find_if(
         connections_.begin(), connections_.end(),
@@ -146,10 +155,12 @@ std::optional<Connection> Circuit::connection(ConnectionId id) const {
     return *found;
 }
 
+// 连接数量包含有效连接和悬空连接，因为两者都仍然保存在 Circuit 中。
 std::size_t Circuit::connectionCount() const noexcept {
     return connections_.size();
 }
 
+// 悬空状态由连接端点当前能否解析得到，而不是由独立的可变标志保存。
 bool Circuit::isDangling(ConnectionId id) const noexcept {
     const auto found = std::find_if(
         connections_.begin(), connections_.end(),

@@ -5,15 +5,18 @@ const path = require("node:path");
 const engineFileName = process.platform === "win32" ? "circuit-engine.exe" : "circuit-engine";
 
 function getEnginePath() {
+  // 允许测试或打包环境通过环境变量替换引擎位置。
   return process.env.CIRCUIT_ENGINE_PATH || path.resolve(__dirname, "../../../engine/build", engineFileName);
 }
 
+// 启动一次独立的 C++ 进程，通过 JSON 行消息确认引擎可用。
 function checkEngineHealth() {
   return new Promise((resolve) => {
     const engine = spawn(getEnginePath(), [], { stdio: ["pipe", "pipe", "pipe"] });
     let output = "";
     let settled = false;
 
+    // 统一结束进程、清理计时器并只兑现一次 Promise。
     const finish = (result) => {
       if (settled) return;
       settled = true;
@@ -48,6 +51,7 @@ function checkEngineHealth() {
 }
 
 function createWindow() {
+  // 主进程只负责窗口和桥接，页面逻辑通过 preload 暴露的最小接口访问引擎。
   const window = new BrowserWindow({
     width: 1280,
     height: 800,

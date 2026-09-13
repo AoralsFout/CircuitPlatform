@@ -3,6 +3,7 @@
 #include <iostream>
 #include <string>
 
+// 持续读取 JSON 行消息，并为桌面层返回对应的引擎结果。
 int main() {
     const circuit::Engine engine;
     std::string line;

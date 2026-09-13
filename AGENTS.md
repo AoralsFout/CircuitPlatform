@@ -13,6 +13,7 @@ CircuitPlatform 不只是一个能运行的应用，也是一个用于系统学�
 5. 重要设计选择记录在 `docs/decisions/` 中。
 6. 每个阶段结束时更新学习记录和复盘内容。
 7. 执行教学任务时，遵守 [AI 协作约定](docs/ai/working-agreement.md) 中的教学目标优先级和提问策略。
+8. 编写或修改函数时，遵守 [AI 协作约定](docs/ai/working-agreement.md) 中的注释规范。
 
 ## 目录职责
 

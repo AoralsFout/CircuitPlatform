@@ -8,6 +8,7 @@ const engineMessage = ref("点击下方按钮验证 C++ 仿真引擎连接。");
 const isChecking = ref(false);
 
 async function checkEngine() {
+  // 通过 preload 暴露的安全接口检查 Electron 到 C++ 引擎的完整链路。
   isChecking.value = true;
   try {
     const result = await window.circuitPlatform.checkEngine();
