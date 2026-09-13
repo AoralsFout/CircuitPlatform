@@ -72,19 +72,11 @@ C++ 数字电路仿真引擎
 
 当前切片实现 `Input`、`NotGate`、`AndGate`、`OrGate`、`NandGate`、`NorGate`、`XorGate`、`XnorGate` 和 `Output` 的组合行为，并能报告组合逻辑环路。未连接输入的值为 `Unknown`；不存在的端口返回空值。更丰富的通用仿真错误将在后续切片中加入。
 
-## 初始外部接口
+## 当前外部接口
 
-引擎接口计划保持为少量高层操作：
+Electron 主进程通过 JSON Lines 长连接调用引擎。当前协议提供 `health_check`、`add_component`、`add_connection`、`set_input`、`settle` 和 `get_signal` 六类请求，详细字段和错误格式见 [引擎 JSON Lines 协议](protocol.md)。
 
-- `loadCircuit`
-- `setInput`
-- `reset`
-- `step`
-- `run`
-- `pause`
-- `getSnapshot`
-
-本阶段只实现健康检查消息，用于验证进程和通信链路。
+这是一个刻意偏小的垂直切片：先让“创建结构 → 设置输入 → 稳定求值 → 读取输出”跑通，再扩展删除、时钟、时序状态和持久化。桌面 UI 目前只使用健康检查，业务 IPC 已经准备好供后续编辑器接入。
 
 ## 仿真模型
 

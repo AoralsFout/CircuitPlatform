@@ -1,11 +1,23 @@
 /// <reference types="vite/client" />
 
-interface Window {
-  circuitPlatform: {
-    checkEngine: () => Promise<{
-      status: "ok" | "error" | "unavailable";
-      message?: string;
-      engine?: string;
-    }>;
-  };
+import type { ComponentKindName, EngineResponse, Signal } from "@circuit-platform/protocol";
+
+declare global {
+  interface Window {
+    circuitPlatform: {
+      checkEngine: () => Promise<{
+        status: "ok" | "error" | "unavailable";
+        message?: string;
+        engine?: string;
+      }>;
+      addComponent: (kind: ComponentKindName) => Promise<EngineResponse>;
+      addConnection: (
+        source: { componentId: number; port: string },
+        target: { componentId: number; port: string },
+      ) => Promise<EngineResponse>;
+      setInput: (componentId: number, value: Signal) => Promise<EngineResponse>;
+      settle: () => Promise<EngineResponse>;
+      getSignal: (componentId: number, port: string) => Promise<EngineResponse>;
+    };
+  }
 }

@@ -1,6 +1,6 @@
 const { app, BrowserWindow, ipcMain } = require("electron");
-const { spawn } = require("node:child_process");
 const path = require("node:path");
+const { EngineClient } = require("./engine-client.cjs");
 
 const engineFileName = process.platform === "win32" ? "circuit-engine.exe" : "circuit-engine";
 
@@ -9,45 +9,27 @@ function getEnginePath() {
   return process.env.CIRCUIT_ENGINE_PATH || path.resolve(__dirname, "../../../engine/build", engineFileName);
 }
 
-// 启动一次独立的 C++ 进程，通过 JSON 行消息确认引擎可用。
-function checkEngineHealth() {
-  return new Promise((resolve) => {
-    const engine = spawn(getEnginePath(), [], { stdio: ["pipe", "pipe", "pipe"] });
-    let output = "";
-    let settled = false;
+const engineClient = new EngineClient(getEnginePath());
 
-    // 统一结束进程、清理计时器并只兑现一次 Promise。
-    const finish = (result) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      resolve(result);
-      if (!engine.killed) engine.kill();
+// 健康检查复用正式长连接，确保检查成功后下一次业务请求不会重新启动进程。
+async function checkEngineHealth() {
+  try {
+    const response = await engineClient.request({ type: "health_check" });
+    if (response.type === "health_check_result") return response;
+    return { status: "error", message: response.message || "C++ 引擎返回了错误" };
+  } catch (error) {
+    return {
+      status: error?.code === "ENOENT" ? "unavailable" : "error",
+      message: error?.code === "ENOENT"
+        ? "尚未找到 C++ 引擎，请先执行 pnpm build:engine"
+        : error instanceof Error ? error.message : "无法连接到 C++ 引擎",
     };
+  }
+}
 
-    const timeout = setTimeout(() => {
-      finish({ status: "error", message: "C++ 引擎响应超时" });
-    }, 2000);
-
-    engine.stdout.on("data", (chunk) => {
-      output += chunk.toString();
-      const lineEnd = output.indexOf("\n");
-      if (lineEnd >= 0) {
-        const line = output.slice(0, lineEnd).trim();
-        try {
-          finish(JSON.parse(line));
-        } catch {
-          finish({ status: "error", message: "C++ 引擎返回了无效消息" });
-        }
-      }
-    });
-
-    engine.on("error", () => {
-      finish({ status: "unavailable", message: "尚未找到 C++ 引擎，请先执行 pnpm build:engine" });
-    });
-
-    engine.stdin.write('{"type":"health_check","requestId":"desktop-startup"}\n');
-  });
+// 只把协议业务操作转发给 EngineClient；领域规则仍由 C++ 引擎负责。
+function requestEngine(message) {
+  return engineClient.request(message);
 }
 
 function createWindow() {
@@ -73,6 +55,21 @@ function createWindow() {
 
 app.whenReady().then(() => {
   ipcMain.handle("engine:health", checkEngineHealth);
+  ipcMain.handle("engine:add-component", (_event, kind) =>
+    requestEngine({ type: "add_component", kind }));
+  ipcMain.handle("engine:add-connection", (_event, source, target) =>
+    requestEngine({
+      type: "add_connection",
+      sourceComponentId: source.componentId,
+      sourcePort: source.port,
+      targetComponentId: target.componentId,
+      targetPort: target.port,
+    }));
+  ipcMain.handle("engine:set-input", (_event, componentId, value) =>
+    requestEngine({ type: "set_input", componentId, value }));
+  ipcMain.handle("engine:settle", () => requestEngine({ type: "settle" }));
+  ipcMain.handle("engine:get-signal", (_event, componentId, port) =>
+    requestEngine({ type: "get_signal", componentId, port }));
   createWindow();
 
   app.on("activate", () => {
@@ -83,3 +80,5 @@ app.whenReady().then(() => {
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
+
+app.on("before-quit", () => engineClient.close());
