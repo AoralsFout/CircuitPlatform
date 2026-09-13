@@ -46,6 +46,28 @@ SignalValue invert(SignalValue value) {
     return SignalValue::Unknown;
 }
 
+// AND 的三值逻辑：0 可以确定结果，只有没有 0 且全部为 1 时结果才是 1。
+SignalValue andValue(SignalValue left, SignalValue right) {
+    if (left == SignalValue::Zero || right == SignalValue::Zero) {
+        return SignalValue::Zero;
+    }
+    if (left == SignalValue::One && right == SignalValue::One) {
+        return SignalValue::One;
+    }
+    return SignalValue::Unknown;
+}
+
+// OR 的三值逻辑：1 可以确定结果，只有没有 1 且全部为 0 时结果才是 0。
+SignalValue orValue(SignalValue left, SignalValue right) {
+    if (left == SignalValue::One || right == SignalValue::One) {
+        return SignalValue::One;
+    }
+    if (left == SignalValue::Zero && right == SignalValue::Zero) {
+        return SignalValue::Zero;
+    }
+    return SignalValue::Unknown;
+}
+
 }  // namespace
 
 // 建立仿真快照，并将所有输出端初始化为 Unknown。
@@ -66,7 +88,8 @@ bool Simulation::setInput(ComponentId inputId, SignalValue value) {
         return false;
     }
 
-    return setOutputSignal({inputId, "out"}, value);
+    setOutputSignal({inputId, "out"}, value);
+    return true;
 }
 
 // 反复计算 NOT 门，直到本轮没有输出变化或达到稳定化上限。
@@ -77,12 +100,18 @@ bool Simulation::settle() {
         bool changed = false;
 
         for (const auto& component : circuit_.components_) {
-            if (component.kind != ComponentKind::NotGate) {
-                continue;
+            if (component.kind == ComponentKind::NotGate) {
+                const auto input = signal({component.id, "in"}).value_or(SignalValue::Unknown);
+                changed = setOutputSignal({component.id, "out"}, invert(input)) || changed;
+            } else if (component.kind == ComponentKind::AndGate) {
+                const auto first = signal({component.id, "in1"}).value_or(SignalValue::Unknown);
+                const auto second = signal({component.id, "in2"}).value_or(SignalValue::Unknown);
+                changed = setOutputSignal({component.id, "out"}, andValue(first, second)) || changed;
+            } else if (component.kind == ComponentKind::OrGate) {
+                const auto first = signal({component.id, "in1"}).value_or(SignalValue::Unknown);
+                const auto second = signal({component.id, "in2"}).value_or(SignalValue::Unknown);
+                changed = setOutputSignal({component.id, "out"}, orValue(first, second)) || changed;
             }
-
-            const auto input = signal({component.id, "in"}).value_or(SignalValue::Unknown);
-            changed = setOutputSignal({component.id, "out"}, invert(input)) || changed;
         }
 
         if (!changed) {
