@@ -6,13 +6,17 @@ CircuitPlatform 是一个简易数字电路仿真桌面应用。
 
 ## 当前阶段
 
-当前是 Phase 0：项目脚手架。
+当前处于 Phase 3：图形编辑器（进行中）。
 
-本阶段的目标是建立一个可验证的最小闭环：
+Phase 0–2.5 已完成：项目脚手架、领域模型、组合逻辑和跨进程协议的最小闭环均已建立。前端已经完成编辑器式工作区的结构重构；当前阶段继续把静态工作区推进为可编辑的图形电路编辑器。
+
+当前阶段的目标是逐步实现：
 
 ```text
-Vue 页面 → Electron 主进程 → C++ 引擎 → 健康检查结果 → Vue 页面
+元件操作 → SVG 画布 → 编辑器模型 → Electron IPC → C++ 引擎
 ```
+
+具体切片顺序和验收标准见[项目路线图](docs/roadmap.md)。
 
 ## 开发环境
 
@@ -39,6 +43,7 @@ pnpm verify
 ## 文档
 
 - [项目愿景](docs/vision.md)
+- [项目路线图](docs/roadmap.md)
 - [架构设计](docs/architecture.md)
 - [协作约定](docs/ai/working-agreement.md)
 - [架构决策记录](docs/decisions/0001-initial-architecture.md)

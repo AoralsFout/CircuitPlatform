@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "pnpm --filter @circuit-platform/desktop dev",
     "build": "pnpm --filter @circuit-platform/protocol build && pnpm --filter @circuit-platform/desktop build",
-    "test": "pnpm --filter @circuit-platform/protocol test",
+    "test": "pnpm --filter @circuit-platform/protocol test && pnpm --filter @circuit-platform/desktop test",
     "typecheck": "pnpm --filter @circuit-platform/protocol typecheck && pnpm --filter @circuit-platform/desktop typecheck",
     "build:engine": "cmake -S engine -B engine/build -G \"MinGW Makefiles\" && cmake --build engine/build",
     "test:engine": "ctest --test-dir engine/build --output-on-failure",

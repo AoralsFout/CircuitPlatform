@@ -12,6 +12,7 @@ struct Request {
     std::string requestId;
     std::optional<std::string> kind;
     std::optional<std::uint64_t> componentId;
+    std::optional<std::uint64_t> connectionId;
     std::optional<std::string> port;
     std::optional<std::uint64_t> sourceComponentId;
     std::optional<std::string> sourcePort;

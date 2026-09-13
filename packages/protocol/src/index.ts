@@ -37,6 +37,18 @@ export interface ConnectionAddedResponse {
   connectionId: number;
 }
 
+export interface ComponentRemovedResponse {
+  type: "component_removed";
+  requestId: string;
+  componentId: number;
+}
+
+export interface ConnectionRemovedResponse {
+  type: "connection_removed";
+  requestId: string;
+  connectionId: number;
+}
+
 export interface InputSetResponse {
   type: "input_set";
   requestId: string;
@@ -63,6 +75,18 @@ export interface AddConnectionRequest {
   targetPort: string;
 }
 
+export interface RemoveComponentRequest {
+  type: "remove_component";
+  requestId: string;
+  componentId: number;
+}
+
+export interface RemoveConnectionRequest {
+  type: "remove_connection";
+  requestId: string;
+  connectionId: number;
+}
+
 export interface SetInputRequest {
   type: "set_input";
   requestId: string;
@@ -86,6 +110,8 @@ export type EngineRequest =
   | HealthCheckRequest
   | AddComponentRequest
   | AddConnectionRequest
+  | RemoveComponentRequest
+  | RemoveConnectionRequest
   | SetInputRequest
   | SettleRequest
   | GetSignalRequest;
@@ -107,6 +133,8 @@ export type EngineResponse =
   | HealthCheckResponse
   | ComponentAddedResponse
   | ConnectionAddedResponse
+  | ComponentRemovedResponse
+  | ConnectionRemovedResponse
   | InputSetResponse
   | SettledResponse
   | SignalResponse
@@ -122,6 +150,88 @@ export function createHealthCheck(requestId: string): HealthCheckRequest {
     type: "health_check",
     requestId,
   };
+}
+
+/**
+ * 创建删除 Component 的请求。
+ * @param requestId 用于匹配请求和响应的调用方身份。
+ * @param componentId 要删除的 Component 身份。
+ * @returns 一个可发送给 C++ 引擎的删除 Component 请求。
+ */
+export function createRemoveComponent(
+  requestId: string,
+  componentId: number,
+): RemoveComponentRequest {
+  return {
+    type: "remove_component",
+    requestId,
+    componentId,
+  };
+}
+
+/**
+ * 创建删除 Connection 的请求。
+ * @param requestId 用于匹配请求和响应的调用方身份。
+ * @param connectionId 要删除的 Connection 身份。
+ * @returns 一个可发送给 C++ 引擎的删除 Connection 请求。
+ */
+export function createRemoveConnection(
+  requestId: string,
+  connectionId: number,
+): RemoveConnectionRequest {
+  return {
+    type: "remove_connection",
+    requestId,
+    connectionId,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isRequestWithType(value: unknown, type: string): value is Record<string, unknown> {
+  return isRecord(value) && value.type === type && typeof value.requestId === "string";
+}
+
+function isValidId(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+/**
+ * 判断未知值是否为删除 Component 请求。
+ * @param value 待检查的未知值。
+ * @returns 当 value 包含有效的请求身份和 Component 身份时返回 true。
+ */
+export function isRemoveComponentRequest(value: unknown): value is RemoveComponentRequest {
+  return isRequestWithType(value, "remove_component") && isValidId(value.componentId);
+}
+
+/**
+ * 判断未知值是否为删除 Connection 请求。
+ * @param value 待检查的未知值。
+ * @returns 当 value 包含有效的请求身份和 Connection 身份时返回 true。
+ */
+export function isRemoveConnectionRequest(value: unknown): value is RemoveConnectionRequest {
+  return isRequestWithType(value, "remove_connection") && isValidId(value.connectionId);
+}
+
+/**
+ * 判断未知值是否为删除 Component 的成功响应。
+ * @param value 待检查的未知值。
+ * @returns 当 value 是带有 Component 身份的删除成功响应时返回 true。
+ */
+export function isComponentRemovedResponse(value: unknown): value is ComponentRemovedResponse {
+  return isRequestWithType(value, "component_removed") && isValidId(value.componentId);
+}
+
+/**
+ * 判断未知值是否为删除 Connection 的成功响应。
+ * @param value 待检查的未知值。
+ * @returns 当 value 是带有 Connection 身份的删除成功响应时返回 true。
+ */
+export function isConnectionRemovedResponse(value: unknown): value is ConnectionRemovedResponse {
+  return isRequestWithType(value, "connection_removed") && isValidId(value.connectionId);
 }
 
 /**

@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron electron/main.cjs\"",
     "build": "vite build",
-    "typecheck": "vue-tsc --noEmit -p tsconfig.json"
+    "typecheck": "vue-tsc --noEmit -p tsconfig.json && tsc -p tsconfig.test.json --noEmit",
+    "test": "node --test --experimental-strip-types tests/*.test.ts tests/*.test.cjs"
   },
   "dependencies": {
     "@circuit-platform/protocol": "workspace:*",

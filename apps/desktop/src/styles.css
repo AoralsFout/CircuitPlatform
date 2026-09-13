@@ -272,6 +272,7 @@ button:disabled { cursor: not-allowed; }
 .circuit-node--gate { top: 39%; left: 44%; width: 150px; border-color: color-mix(in srgb, var(--color-signal-high) 58%, transparent); }
 .circuit-node--output { top: 41%; right: 9%; width: 156px; }
 .circuit-node:hover { border-color: var(--color-text-muted); }
+.circuit-node:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 3px; }
 .circuit-node--active { border-color: var(--color-status-success); box-shadow: 0 0 25px color-mix(in srgb, var(--color-status-success) 14%, transparent); }
 .circuit-node--selected { border-color: var(--color-focus); box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-focus) 28%, transparent), 0 10px 25px var(--theme-shadow); }
 .output-signal { position: absolute; top: 12px; right: 14px; font-family: var(--font-data); font-size: 22px; }
@@ -294,7 +295,8 @@ button:disabled { cursor: not-allowed; }
 .legend-line--live { background: var(--color-signal-high); box-shadow: 0 0 6px color-mix(in srgb, var(--color-signal-high) 60%, transparent); }
 .legend-line--unknown { height: 0; border-top: 2px dashed var(--color-signal-unknown); background: transparent; }
 
-.bottom-panel { min-height: 0; border-top: 1px solid var(--color-border); background: var(--theme-panel); }
+.bottom-panel { position: relative; min-height: 0; border-top: 1px solid var(--color-border); background: var(--theme-panel); }
+.bottom-error { position: absolute; z-index: 2; top: 7px; right: 15px; max-width: 42%; margin: 0; overflow: hidden; color: var(--color-status-error); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .bottom-tabs { display: flex; gap: 19px; height: 35px; padding: 0 15px; border-bottom: 1px solid var(--color-border); }
 .bottom-tabs button { height: 35px; padding: 0; font-size: 10px; }
 .tab-count { display: inline-grid; height: 15px; min-width: 15px; margin-left: 5px; vertical-align: -3px; font-size: 8px; }

@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain } = require("electron");
 const path = require("node:path");
 const { EngineClient } = require("./engine-client.cjs");
+const { requirePositiveId } = require("./request-validation.cjs");
 
 const engineFileName = process.platform === "win32" ? "circuit-engine.exe" : "circuit-engine";
 
@@ -64,6 +65,16 @@ app.whenReady().then(() => {
       sourcePort: source.port,
       targetComponentId: target.componentId,
       targetPort: target.port,
+    }));
+  ipcMain.handle("engine:remove-component", (_event, componentId) =>
+    requestEngine({
+      type: "remove_component",
+      componentId: requirePositiveId(componentId, "componentId"),
+    }));
+  ipcMain.handle("engine:remove-connection", (_event, connectionId) =>
+    requestEngine({
+      type: "remove_connection",
+      connectionId: requirePositiveId(connectionId, "connectionId"),
     }));
   ipcMain.handle("engine:set-input", (_event, componentId, value) =>
     requestEngine({ type: "set_input", componentId, value }));

@@ -74,9 +74,9 @@ C++ 数字电路仿真引擎
 
 ## 当前外部接口
 
-Electron 主进程通过 JSON Lines 长连接调用引擎。当前协议提供 `health_check`、`add_component`、`add_connection`、`set_input`、`settle` 和 `get_signal` 六类请求，详细字段和错误格式见 [引擎 JSON Lines 协议](protocol.md)。
+Electron 主进程通过 JSON Lines 长连接调用引擎。当前协议提供 `health_check`、`add_component`、`add_connection`、`remove_component`、`remove_connection`、`set_input`、`settle` 和 `get_signal` 八类请求，详细字段和错误格式见 [引擎 JSON Lines 协议](protocol.md)。
 
-这是一个刻意偏小的垂直切片：先让“创建结构 → 设置输入 → 稳定求值 → 读取输出”跑通，再扩展删除、时钟、时序状态和持久化。桌面 UI 目前只使用健康检查，业务 IPC 已经准备好供后续编辑器接入。
+这是一个刻意偏小的垂直切片：先让“创建结构 → 设置输入 → 稳定求值 → 读取输出”跑通，目前已扩展删除协议，后续继续实现时钟、时序状态和持久化。当前桌面 UI 已通过业务 IPC 创建并运行 AND 示例、切换输入、稳定求值和读取输出；画布位置与视觉连线仍只属于编辑器模型，不会进入仿真引擎。后续图形编辑器切片和验收顺序见[项目路线图](roadmap.md)。
 
 ## 仿真模型
 

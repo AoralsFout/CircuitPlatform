@@ -75,6 +75,11 @@ std::optional<std::uint64_t> numberField(std::string_view json, std::string_view
         return std::nullopt;
     }
 
+    const auto tokenEnd = skipWhitespace(json, position);
+    if (tokenEnd < json.size() && json[tokenEnd] != ',' && json[tokenEnd] != '}') {
+        return std::nullopt;
+    }
+
     std::uint64_t value{};
     const auto parsed = std::from_chars(json.data() + begin, json.data() + position, value);
     return parsed.ec == std::errc{} ? std::optional{value} : std::nullopt;
@@ -104,6 +109,7 @@ std::optional<Request> parseRequest(std::string_view json) {
         .requestId = *requestId,
         .kind = stringField(json, "kind"),
         .componentId = numberField(json, "componentId"),
+        .connectionId = numberField(json, "connectionId"),
         .port = stringField(json, "port"),
         .sourceComponentId = numberField(json, "sourceComponentId"),
         .sourcePort = stringField(json, "sourcePort"),

@@ -10,6 +10,7 @@ add_library(circuit_engine_core STATIC
     src/circuit.cpp
     src/engine.cpp
     src/protocol.cpp
+    src/request_handler.cpp
     src/simulation.cpp
 )
 
