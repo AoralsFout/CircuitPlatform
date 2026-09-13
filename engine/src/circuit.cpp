@@ -15,6 +15,10 @@ std::vector<Port> portsFor(ComponentKind kind) {
         return {{"in", PortDirection::Input}};
     case ComponentKind::AndGate:
     case ComponentKind::OrGate:
+    case ComponentKind::NandGate:
+    case ComponentKind::NorGate:
+    case ComponentKind::XorGate:
+    case ComponentKind::XnorGate:
         return {
             {"in1", PortDirection::Input},
             {"in2", PortDirection::Input},

@@ -68,6 +68,35 @@ SignalValue orValue(SignalValue left, SignalValue right) {
     return SignalValue::Unknown;
 }
 
+// XOR 在任一输入未知时无法确定结果；两个确定值相异时输出 1，否则输出 0。
+SignalValue xorValue(SignalValue left, SignalValue right) {
+    if (left == SignalValue::Unknown || right == SignalValue::Unknown) {
+        return SignalValue::Unknown;
+    }
+    return left == right ? SignalValue::Zero : SignalValue::One;
+}
+
+// 集中分派所有二输入门，保持 settle 只负责读取输入和传播输出。
+std::optional<SignalValue> evaluateBinaryGate(
+    ComponentKind kind, SignalValue left, SignalValue right) {
+    switch (kind) {
+    case ComponentKind::AndGate:
+        return andValue(left, right);
+    case ComponentKind::OrGate:
+        return orValue(left, right);
+    case ComponentKind::NandGate:
+        return invert(andValue(left, right));
+    case ComponentKind::NorGate:
+        return invert(orValue(left, right));
+    case ComponentKind::XorGate:
+        return xorValue(left, right);
+    case ComponentKind::XnorGate:
+        return invert(xorValue(left, right));
+    default:
+        return std::nullopt;
+    }
+}
+
 }  // namespace
 
 // 建立仿真快照，并将所有输出端初始化为 Unknown。
@@ -103,14 +132,13 @@ bool Simulation::settle() {
             if (component.kind == ComponentKind::NotGate) {
                 const auto input = signal({component.id, "in"}).value_or(SignalValue::Unknown);
                 changed = setOutputSignal({component.id, "out"}, invert(input)) || changed;
-            } else if (component.kind == ComponentKind::AndGate) {
+            } else {
                 const auto first = signal({component.id, "in1"}).value_or(SignalValue::Unknown);
                 const auto second = signal({component.id, "in2"}).value_or(SignalValue::Unknown);
-                changed = setOutputSignal({component.id, "out"}, andValue(first, second)) || changed;
-            } else if (component.kind == ComponentKind::OrGate) {
-                const auto first = signal({component.id, "in1"}).value_or(SignalValue::Unknown);
-                const auto second = signal({component.id, "in2"}).value_or(SignalValue::Unknown);
-                changed = setOutputSignal({component.id, "out"}, orValue(first, second)) || changed;
+                const auto output = evaluateBinaryGate(component.kind, first, second);
+                if (output.has_value()) {
+                    changed = setOutputSignal({component.id, "out"}, *output) || changed;
+                }
             }
         }
 

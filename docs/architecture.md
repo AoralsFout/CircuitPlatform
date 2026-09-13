@@ -70,7 +70,7 @@ C++ 数字电路仿真引擎
 - `settle`：重复求值直到输出稳定；
 - `signal`：读取端口当前的 SignalValue。
 
-当前切片实现 `Input`、`NotGate`、`AndGate`、`OrGate` 和 `Output` 的组合行为。未连接输入的值为 `Unknown`；不存在的端口返回空值。组合环路错误和通用仿真错误将在后续切片中加入。
+当前切片实现 `Input`、`NotGate`、`AndGate`、`OrGate`、`NandGate`、`NorGate`、`XorGate`、`XnorGate` 和 `Output` 的组合行为。未连接输入的值为 `Unknown`；不存在的端口返回空值。组合环路错误和通用仿真错误将在后续切片中加入。
 
 ## 初始外部接口
 

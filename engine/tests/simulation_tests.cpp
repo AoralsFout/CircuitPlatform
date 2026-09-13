@@ -122,11 +122,155 @@ void evaluates_or_truth_table() {
     }
 }
 
+void evaluates_nand_truth_table() {
+    circuit::Circuit circuit;
+    const auto firstInputId = circuit.addComponent(circuit::ComponentKind::Input);
+    const auto secondInputId = circuit.addComponent(circuit::ComponentKind::Input);
+    const auto nandId = circuit.addComponent(circuit::ComponentKind::NandGate);
+    const auto outputId = circuit.addComponent(circuit::ComponentKind::Output);
+
+    assert(circuit.addConnection({firstInputId, "out"}, {nandId, "in1"}).succeeded());
+    assert(circuit.addConnection({secondInputId, "out"}, {nandId, "in2"}).succeeded());
+    assert(circuit.addConnection({nandId, "out"}, {outputId, "in"}).succeeded());
+
+    circuit::Simulation simulation(circuit);
+    struct TestCase {
+        circuit::SignalValue first;
+        circuit::SignalValue second;
+        circuit::SignalValue expected;
+    };
+    const std::array cases{
+        TestCase{circuit::SignalValue::Zero, circuit::SignalValue::Zero, circuit::SignalValue::One},
+        TestCase{circuit::SignalValue::Zero, circuit::SignalValue::One, circuit::SignalValue::One},
+        TestCase{circuit::SignalValue::One, circuit::SignalValue::Zero, circuit::SignalValue::One},
+        TestCase{circuit::SignalValue::One, circuit::SignalValue::One, circuit::SignalValue::Zero},
+        TestCase{circuit::SignalValue::One, circuit::SignalValue::Unknown, circuit::SignalValue::Unknown},
+        TestCase{circuit::SignalValue::Unknown, circuit::SignalValue::One, circuit::SignalValue::Unknown},
+        TestCase{circuit::SignalValue::Zero, circuit::SignalValue::Unknown, circuit::SignalValue::One},
+    };
+
+    for (const auto& testCase : cases) {
+        assert(simulation.setInput(firstInputId, testCase.first));
+        assert(simulation.setInput(secondInputId, testCase.second));
+        assert(simulation.settle());
+        assert(simulation.signal({outputId, "in"}) == testCase.expected);
+    }
+}
+
+void evaluates_nor_truth_table() {
+    circuit::Circuit circuit;
+    const auto firstInputId = circuit.addComponent(circuit::ComponentKind::Input);
+    const auto secondInputId = circuit.addComponent(circuit::ComponentKind::Input);
+    const auto norId = circuit.addComponent(circuit::ComponentKind::NorGate);
+    const auto outputId = circuit.addComponent(circuit::ComponentKind::Output);
+
+    assert(circuit.addConnection({firstInputId, "out"}, {norId, "in1"}).succeeded());
+    assert(circuit.addConnection({secondInputId, "out"}, {norId, "in2"}).succeeded());
+    assert(circuit.addConnection({norId, "out"}, {outputId, "in"}).succeeded());
+
+    circuit::Simulation simulation(circuit);
+    struct TestCase {
+        circuit::SignalValue first;
+        circuit::SignalValue second;
+        circuit::SignalValue expected;
+    };
+    const std::array cases{
+        TestCase{circuit::SignalValue::Zero, circuit::SignalValue::Zero, circuit::SignalValue::One},
+        TestCase{circuit::SignalValue::Zero, circuit::SignalValue::One, circuit::SignalValue::Zero},
+        TestCase{circuit::SignalValue::One, circuit::SignalValue::Zero, circuit::SignalValue::Zero},
+        TestCase{circuit::SignalValue::One, circuit::SignalValue::One, circuit::SignalValue::Zero},
+        TestCase{circuit::SignalValue::Zero, circuit::SignalValue::Unknown, circuit::SignalValue::Unknown},
+        TestCase{circuit::SignalValue::Unknown, circuit::SignalValue::Zero, circuit::SignalValue::Unknown},
+        TestCase{circuit::SignalValue::One, circuit::SignalValue::Unknown, circuit::SignalValue::Zero},
+    };
+
+    for (const auto& testCase : cases) {
+        assert(simulation.setInput(firstInputId, testCase.first));
+        assert(simulation.setInput(secondInputId, testCase.second));
+        assert(simulation.settle());
+        assert(simulation.signal({outputId, "in"}) == testCase.expected);
+    }
+}
+
+void evaluates_xor_truth_table() {
+    circuit::Circuit circuit;
+    const auto firstInputId = circuit.addComponent(circuit::ComponentKind::Input);
+    const auto secondInputId = circuit.addComponent(circuit::ComponentKind::Input);
+    const auto xorId = circuit.addComponent(circuit::ComponentKind::XorGate);
+    const auto outputId = circuit.addComponent(circuit::ComponentKind::Output);
+
+    assert(circuit.addConnection({firstInputId, "out"}, {xorId, "in1"}).succeeded());
+    assert(circuit.addConnection({secondInputId, "out"}, {xorId, "in2"}).succeeded());
+    assert(circuit.addConnection({xorId, "out"}, {outputId, "in"}).succeeded());
+
+    circuit::Simulation simulation(circuit);
+    struct TestCase {
+        circuit::SignalValue first;
+        circuit::SignalValue second;
+        circuit::SignalValue expected;
+    };
+    const std::array cases{
+        TestCase{circuit::SignalValue::Zero, circuit::SignalValue::Zero, circuit::SignalValue::Zero},
+        TestCase{circuit::SignalValue::Zero, circuit::SignalValue::One, circuit::SignalValue::One},
+        TestCase{circuit::SignalValue::One, circuit::SignalValue::Zero, circuit::SignalValue::One},
+        TestCase{circuit::SignalValue::One, circuit::SignalValue::One, circuit::SignalValue::Zero},
+        TestCase{circuit::SignalValue::Zero, circuit::SignalValue::Unknown, circuit::SignalValue::Unknown},
+        TestCase{circuit::SignalValue::Unknown, circuit::SignalValue::One, circuit::SignalValue::Unknown},
+        TestCase{circuit::SignalValue::Unknown, circuit::SignalValue::Unknown, circuit::SignalValue::Unknown},
+    };
+
+    for (const auto& testCase : cases) {
+        assert(simulation.setInput(firstInputId, testCase.first));
+        assert(simulation.setInput(secondInputId, testCase.second));
+        assert(simulation.settle());
+        assert(simulation.signal({outputId, "in"}) == testCase.expected);
+    }
+}
+
+void evaluates_xnor_truth_table() {
+    circuit::Circuit circuit;
+    const auto firstInputId = circuit.addComponent(circuit::ComponentKind::Input);
+    const auto secondInputId = circuit.addComponent(circuit::ComponentKind::Input);
+    const auto xnorId = circuit.addComponent(circuit::ComponentKind::XnorGate);
+    const auto outputId = circuit.addComponent(circuit::ComponentKind::Output);
+
+    assert(circuit.addConnection({firstInputId, "out"}, {xnorId, "in1"}).succeeded());
+    assert(circuit.addConnection({secondInputId, "out"}, {xnorId, "in2"}).succeeded());
+    assert(circuit.addConnection({xnorId, "out"}, {outputId, "in"}).succeeded());
+
+    circuit::Simulation simulation(circuit);
+    struct TestCase {
+        circuit::SignalValue first;
+        circuit::SignalValue second;
+        circuit::SignalValue expected;
+    };
+    const std::array cases{
+        TestCase{circuit::SignalValue::Zero, circuit::SignalValue::Zero, circuit::SignalValue::One},
+        TestCase{circuit::SignalValue::Zero, circuit::SignalValue::One, circuit::SignalValue::Zero},
+        TestCase{circuit::SignalValue::One, circuit::SignalValue::Zero, circuit::SignalValue::Zero},
+        TestCase{circuit::SignalValue::One, circuit::SignalValue::One, circuit::SignalValue::One},
+        TestCase{circuit::SignalValue::Zero, circuit::SignalValue::Unknown, circuit::SignalValue::Unknown},
+        TestCase{circuit::SignalValue::Unknown, circuit::SignalValue::One, circuit::SignalValue::Unknown},
+        TestCase{circuit::SignalValue::Unknown, circuit::SignalValue::Unknown, circuit::SignalValue::Unknown},
+    };
+
+    for (const auto& testCase : cases) {
+        assert(simulation.setInput(firstInputId, testCase.first));
+        assert(simulation.setInput(secondInputId, testCase.second));
+        assert(simulation.settle());
+        assert(simulation.signal({outputId, "in"}) == testCase.expected);
+    }
+}
+
 int main() {
     evaluates_input_not_and_output();
     updates_the_output_when_the_input_changes();
     propagates_unknown_when_a_not_input_is_unconnected();
     evaluates_and_truth_table();
     evaluates_or_truth_table();
+    evaluates_nand_truth_table();
+    evaluates_nor_truth_table();
+    evaluates_xor_truth_table();
+    evaluates_xnor_truth_table();
     return 0;
 }
