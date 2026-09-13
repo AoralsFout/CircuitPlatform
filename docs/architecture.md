@@ -48,6 +48,19 @@ C++ 数字电路仿真引擎
 - 没有 Clock 连接的 DFlipFlop 不会在时钟沿更新，可以产生结构提示。
 - 组合逻辑环路在仿真稳定化时报告错误；包含状态元件的反馈回路不属于同一种组合环路。
 
+## 当前 Circuit 接口
+
+当前 C++ 领域模块提供以下操作：
+
+- `addComponent`：添加指定类型的 Component，并返回身份；
+- `removeComponent`：删除 Component，但保留相关 Connection；
+- `addConnection`：添加合法的输出到输入连接，并返回结果或具体错误；
+- `removeConnection`：按身份删除 Connection；
+- `component` 和 `connection`：查询领域对象；
+- `isDangling`：判断 Connection 是否因端点缺失而悬空。
+
+该接口暂时不负责逻辑求值、信号传播或编辑器位置。那些行为将在后续垂直切片中加入。
+
 ## 初始外部接口
 
 引擎接口计划保持为少量高层操作：

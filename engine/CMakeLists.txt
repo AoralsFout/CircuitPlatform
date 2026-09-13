@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(circuit_engine_core STATIC
+    src/circuit.cpp
     src/engine.cpp
 )
 
@@ -33,3 +34,11 @@ add_executable(circuit_engine_tests
 target_link_libraries(circuit_engine_tests PRIVATE circuit_engine_core)
 
 add_test(NAME circuit_engine_tests COMMAND circuit_engine_tests)
+
+add_executable(circuit_model_tests
+    tests/circuit_tests.cpp
+)
+
+target_link_libraries(circuit_model_tests PRIVATE circuit_engine_core)
+
+add_test(NAME circuit_model_tests COMMAND circuit_model_tests)
