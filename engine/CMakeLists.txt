@@ -9,6 +9,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(circuit_engine_core STATIC
     src/circuit.cpp
     src/engine.cpp
+    src/simulation.cpp
 )
 
 target_include_directories(circuit_engine_core PUBLIC include)
@@ -42,3 +43,11 @@ add_executable(circuit_model_tests
 target_link_libraries(circuit_model_tests PRIVATE circuit_engine_core)
 
 add_test(NAME circuit_model_tests COMMAND circuit_model_tests)
+
+add_executable(circuit_simulation_tests
+    tests/simulation_tests.cpp
+)
+
+target_link_libraries(circuit_simulation_tests PRIVATE circuit_engine_core)
+
+add_test(NAME circuit_simulation_tests COMMAND circuit_simulation_tests)

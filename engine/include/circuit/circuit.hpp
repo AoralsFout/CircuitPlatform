@@ -7,6 +7,8 @@
 
 namespace circuit {
 
+class Simulation;
+
 using ComponentId = std::uint64_t;
 using ConnectionId = std::uint64_t;
 
@@ -128,6 +130,8 @@ public:
     [[nodiscard]] bool isDangling(ConnectionId id) const noexcept;
 
 private:
+    friend class Simulation;
+
     ComponentId nextComponentId_{1};
     ConnectionId nextConnectionId_{1};
     std::vector<Component> components_;

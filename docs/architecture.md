@@ -61,6 +61,17 @@ C++ 数字电路仿真引擎
 
 该接口暂时不负责逻辑求值、信号传播或编辑器位置。那些行为将在后续垂直切片中加入。
 
+## 当前 Simulation 接口
+
+组合逻辑仿真通过独立的 `Simulation` 模块进行：
+
+- `Simulation(Circuit)`：从 Circuit 创建独立仿真快照；
+- `setInput`：设置 Input 元件的输出值；
+- `settle`：重复求值直到输出稳定；
+- `signal`：读取端口当前的 SignalValue。
+
+当前切片只实现 `Input`、`NotGate` 和 `Output` 的组合行为。未连接输入的值为 `Unknown`；不存在的端口返回空值。AND、OR、组合环路错误和通用仿真错误将在后续切片中加入。
+
 ## 初始外部接口
 
 引擎接口计划保持为少量高层操作：
