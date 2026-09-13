@@ -2,7 +2,7 @@
   "name": "circuit-platform",
   "version": "0.1.0",
   "private": true,
-  "description": "用于学习软件工程的数字电路仿真桌面应用",
+  "description": "简易数字电路仿真桌面应用",
   "scripts": {
     "dev": "pnpm --filter @circuit-platform/desktop dev",
     "build": "pnpm --filter @circuit-platform/protocol build && pnpm --filter @circuit-platform/desktop build",

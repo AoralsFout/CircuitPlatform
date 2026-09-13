@@ -1,6 +1,6 @@
 # CircuitPlatform
 
-CircuitPlatform 是一个用于学习软件工程的简易数字电路仿真桌面应用。
+CircuitPlatform 是一个简易数字电路仿真桌面应用。
 
 项目采用 Vue、TypeScript、Electron 和 C++ 构建。C++ 仿真引擎作为独立进程运行，桌面应用通过 JSON 消息与它通信。
 
@@ -40,8 +40,6 @@ pnpm verify
 
 - [项目愿景](docs/vision.md)
 - [架构设计](docs/architecture.md)
-- [学习路线](docs/learning/roadmap.md)
-- [AI 角色约定](docs/ai/roles.md)
 - [协作约定](docs/ai/working-agreement.md)
 - [架构决策记录](docs/decisions/0001-initial-architecture.md)
 - [开发环境说明](docs/getting-started.md)
