@@ -2,6 +2,10 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "moduleResolution": "Bundler",
+    "baseUrl": ".",
+    "paths": {
+      "@circuit-platform/protocol": ["../../packages/protocol/src/index.ts"]
+    },
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "types": ["vite/client"]
   },
