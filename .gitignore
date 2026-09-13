@@ -1,0 +1,17 @@
+node_modules/
+dist/
+build/
+engine/build/
+*.log
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+
+# IDE and OS files
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+Thumbs.db
+Desktop.ini

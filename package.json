@@ -1,0 +1,26 @@
+{
+  "name": "circuit-platform",
+  "version": "0.1.0",
+  "private": true,
+  "description": "用于学习软件工程的数字电路仿真桌面应用",
+  "scripts": {
+    "dev": "pnpm --filter @circuit-platform/desktop dev",
+    "build": "pnpm --filter @circuit-platform/protocol build && pnpm --filter @circuit-platform/desktop build",
+    "test": "pnpm --filter @circuit-platform/protocol test",
+    "typecheck": "pnpm --filter @circuit-platform/protocol typecheck && pnpm --filter @circuit-platform/desktop typecheck",
+    "build:engine": "cmake -S engine -B engine/build -G \"MinGW Makefiles\" && cmake --build engine/build",
+    "test:engine": "ctest --test-dir engine/build --output-on-failure",
+    "verify": "pnpm typecheck && pnpm test && pnpm build && pnpm build:engine && pnpm test:engine"
+  },
+  "packageManager": "pnpm@11.19.0",
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@vitejs/plugin-vue": "^6.0.0",
+    "concurrently": "^9.0.0",
+    "electron": "^38.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.9.0",
+    "vite": "^7.0.0",
+    "wait-on": "^8.0.0"
+  }
+}
