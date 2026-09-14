@@ -33,6 +33,7 @@ const {
   placeComponent: placeComponentCommand,
   addComponent,
   editRoute,
+  createConnection,
 } = useWorkspace();
 const {
   selectedNode,
@@ -76,7 +77,13 @@ const {
   moveRouteEdit,
   endRouteEdit,
   cancelRouteEdit,
-} = useEditorState(state, editorState, select, moveComponent, updatePlacement, editRoute);
+  startConnection,
+  moveConnection,
+  placeConnectionWaypoint,
+  finishConnection,
+  toggleConnectionAxis,
+  cancelConnection,
+} = useEditorState(state, editorState, select, moveComponent, updatePlacement, editRoute, createConnection);
 const {
   preference: themePreference,
   label: themeLabel,
@@ -90,6 +97,12 @@ async function placeComponent(center: { x: number; y: number }, altKey: boolean)
   const kind = editorState.value?.pendingPlacement?.kind;
   const succeeded = await placeComponentCommand(center, altKey);
   if (succeeded && kind) rememberComponentKind(kind);
+}
+
+/** 布线草稿存在时冻结元件放置，避免两种结构意图同时进行。 */
+async function beginPlacementFromSidebar(kind: Parameters<typeof beginPlacement>[0], continuous = false): Promise<void> {
+  if (interaction.value.connectionDraft) return;
+  await beginPlacement(kind, continuous);
 }
 
 function onEditorKeydown(event: KeyboardEvent): void {
@@ -146,7 +159,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
         @close="showSidebar = false"
         @select-node="selectNode"
         @toggle-input="toggleInput"
-        @place-component="beginPlacement"
+        @place-component="beginPlacementFromSidebar"
       />
 
       <section v-if="activeRailPage !== 'settings'" class="editor-main" aria-label="电路编辑器">
@@ -185,6 +198,12 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           @route-edit-move="moveRouteEdit($event.pointerWorld, $event.altKey)"
           @route-edit-end="endRouteEdit()"
           @route-edit-cancel="cancelRouteEdit()"
+          @connection-start="startConnection"
+          @connection-move="moveConnection($event.point, $event.altKey)"
+          @connection-waypoint="placeConnectionWaypoint($event.point, $event.altKey)"
+          @connection-end="finishConnection"
+          @connection-axis-toggle="toggleConnectionAxis"
+          @connection-cancel="cancelConnection"
           @viewport-change="setViewport"
           @resize="resizeCanvas"
           @placement-move="placementMoved"

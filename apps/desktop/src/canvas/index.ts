@@ -239,6 +239,8 @@ export interface InteractionState {
   /** 拖动期间的临时世界坐标；只存在于交互层，不写入 EditorSnapshot。 */
   dragPreview?: { nodeId: string; position: Point } | null;
   connectionDraft: readonly Point[] | null;
+  /** 草稿提交失败时的持久错误提示，Esc 或换目标前不会自动丢失。 */
+  connectionDraftError?: string | null;
   /** Wire Route 拖动时的临时预览；释放后才进入 EditorSession 历史。 */
   routeEditPreview?: { connectionId: string; route: readonly Point[] } | null;
   pendingPlacement?: { kind: ComponentKindName; position: Point; size: { width: number; height: number } } | null;

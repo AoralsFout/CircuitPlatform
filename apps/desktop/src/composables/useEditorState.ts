@@ -20,6 +20,13 @@ import {
   writeRecentComponentKind,
 } from "../editor/component-menu";
 import { positionFromPlacementCenter } from "../editor/placement.ts";
+import {
+  connectionDraftRoute,
+  createConnectionDraft,
+  reduceConnectionDraft,
+  type ConnectionDraftPort,
+  type ConnectionDraftState,
+} from "../editor/connection-draft.ts";
 
 export type NodeKey = "inputA" | "inputB" | "andGate" | "output";
 export type RailPage = "components" | "inputs" | "layers" | "settings";
@@ -71,6 +78,7 @@ export function useEditorState(
   moveComponent: (componentId: EditorComponentId, position: Point) => Promise<void> = async () => undefined,
   updatePlacement?: (center: Point, altKey?: boolean) => Promise<void>,
   editRoute: (connectionId: EditorConnectionId, route: readonly Point[]) => Promise<void> = async () => undefined,
+  createConnection: (left: ConnectionDraftPort, right: ConnectionDraftPort, route?: readonly Point[]) => Promise<{ ok: boolean; error?: string }> = async () => ({ ok: false }),
 ) {
   const showDetails = ref(false);
   const showSidebar = ref(true);
@@ -115,6 +123,7 @@ export function useEditorState(
     },
   });
   const routeEditPreview = ref<{ connectionId: string; route: readonly Point[] } | null>(null);
+  const connectionDraft = ref<ConnectionDraftState>(createConnectionDraft());
   const routeEditController = createRouteEditController({
     onPreview(preview) {
       routeEditPreview.value = preview;
@@ -179,13 +188,55 @@ export function useEditorState(
       focusedId: editorState.value.selection?.id ?? null,
       draggingNodeId: draggingNodeId.value,
       dragPreview: dragPreview.value,
-      connectionDraft: null,
+      connectionDraft: connectionDraft.value.origin ? connectionDraftRoute(connectionDraft.value) : null,
+      connectionDraftError: connectionDraft.value.error?.message ?? null,
       routeEditPreview: routeEditPreview.value,
       pendingPlacement: pending && pending.center && definition
         ? { kind: pending.kind, position: positionFromPlacementCenter(pending.center, definition.size, pending.altKey), size: definition.size }
         : null,
     };
   });
+
+  /** 从任意方向的端口开始临时连接；提交前不会改动 EditorDocument。 */
+  function startConnection(port: ConnectionDraftPort): void {
+    if (editorState.value?.pendingPlacement || editorState.value?.operation !== "idle") return;
+    connectionDraft.value = reduceConnectionDraft(connectionDraft.value, { type: "start", port });
+  }
+
+  /** 更新草稿指针预览；不创建快照或历史记录。 */
+  function moveConnection(point: Point, altKey = false): void {
+    connectionDraft.value = reduceConnectionDraft(connectionDraft.value, { type: "move", point, altKey });
+  }
+
+  /** 点击或拖拽释放到空白处时保留一个首个 Waypoint，继续点击式布线。 */
+  function placeConnectionWaypoint(point: Point, altKey = false): void {
+    connectionDraft.value = reduceConnectionDraft(connectionDraft.value, { type: "place-waypoint", point, altKey });
+  }
+
+  /** 释放到端口时提交一个结构事务；失败保留草稿和用户 Route。 */
+  async function finishConnection(port: ConnectionDraftPort): Promise<void> {
+    const draft = connectionDraft.value;
+    if (!draft.origin) return;
+    const route = connectionDraftRoute(draft, port);
+    const result = await createConnection(draft.origin, port, route);
+    if (result.ok) {
+      connectionDraft.value = createConnectionDraft();
+    } else {
+      connectionDraft.value = reduceConnectionDraft(connectionDraft.value, {
+        type: "fail",
+        error: { code: "engine-failed", message: result.error ?? "连接提交失败。" },
+      });
+    }
+  }
+
+  /** Space 在布线期间只切换当前段轴向；Esc 由工作区命令清除草稿。 */
+  function toggleConnectionAxis(): void {
+    connectionDraft.value = reduceConnectionDraft(connectionDraft.value, { type: "toggle-axis" });
+  }
+
+  function cancelConnection(): void {
+    connectionDraft.value = reduceConnectionDraft(connectionDraft.value, { type: "cancel" });
+  }
 
   const componentVisibility = computed<Record<NodeKey, boolean>>(() => ({
     inputA: editorState.value?.document.components.some((component) => component.id === "input-a") ?? false,
@@ -411,5 +462,12 @@ export function useEditorState(
     endRouteEdit,
     cancelRouteEdit,
     placementMoved,
+    connectionDraft,
+    startConnection,
+    moveConnection,
+    placeConnectionWaypoint,
+    finishConnection,
+    toggleConnectionAxis,
+    cancelConnection,
   };
 }
