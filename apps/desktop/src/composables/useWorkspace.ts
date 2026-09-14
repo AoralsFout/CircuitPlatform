@@ -39,7 +39,9 @@ interface WorkspaceBinding {
     port: string;
     direction: "input" | "output";
     point: Point;
-  }, route?: readonly Point[]): Promise<{ ok: boolean; error?: string }>;
+  }, route?: readonly Point[], connectionId?: string): Promise<{ ok: boolean; error?: string }>;
+  /** 使用稳定 Editor Connection ID 修复悬空端点或替换已占用输入。 */
+  reconnectConnection(connectionId: string, left: Parameters<WorkspaceBinding["createConnection"]>[0], right: Parameters<WorkspaceBinding["createConnection"]>[1], route?: readonly Point[]): Promise<{ ok: boolean; error?: string }>;
   resetRoute(connectionId: string): Promise<void>;
   deleteWaypoint(connectionId: string, pointIndex: number): Promise<void>;
   deleteSelection(): Promise<void>;
@@ -191,14 +193,21 @@ export function useWorkspace(): WorkspaceBinding {
   }
 
   /** 提交一次完成的连接意图；失败只返回错误，草稿由画布交互层继续保留。 */
-  async function createConnection(left: Parameters<WorkspaceBinding["createConnection"]>[0], right: Parameters<WorkspaceBinding["createConnection"]>[1], route?: readonly Point[]): Promise<{ ok: boolean; error?: string }> {
+  /** 创建或安全重接连接；调用者只传稳定编辑器 ID，不接触引擎身份。 */
+  async function createConnection(left: Parameters<WorkspaceBinding["createConnection"]>[0], right: Parameters<WorkspaceBinding["createConnection"]>[1], route?: readonly Point[], connectionId?: string): Promise<{ ok: boolean; error?: string }> {
     if (!editor) return { ok: false, error: "编辑器尚未准备好。" };
-    const pending = editor.dispatch({ type: "create-connection", left, right, route });
+    const pending = editor.dispatch(connectionId
+      ? { type: "reconnect-connection", connectionId, left, right, route }
+      : { type: "create-connection", left, right, route });
     editorState.value = editor.snapshot();
     const result = await pending;
     editorState.value = result.snapshot;
     state.value = workspace.snapshot();
     return result.ok ? { ok: true } : { ok: false, error: result.error.message };
+  }
+
+  async function reconnectConnection(connectionId: string, left: Parameters<WorkspaceBinding["createConnection"]>[0], right: Parameters<WorkspaceBinding["createConnection"]>[1], route?: readonly Point[]): Promise<{ ok: boolean; error?: string }> {
+    return createConnection(left, right, route, connectionId);
   }
 
   return {
@@ -212,6 +221,7 @@ export function useWorkspace(): WorkspaceBinding {
     moveComponent: (componentId, position) => dispatch({ type: "move-component", componentId, position }),
     editRoute: (connectionId, route) => dispatch({ type: "edit-route", connectionId, route }),
     createConnection,
+    reconnectConnection,
     resetRoute: (connectionId) => dispatch({ type: "reset-route", connectionId }),
     deleteWaypoint: (connectionId, pointIndex) => dispatch({ type: "delete-waypoint", connectionId, pointIndex }),
     deleteSelection: () => dispatch({ type: "delete-selected" }),

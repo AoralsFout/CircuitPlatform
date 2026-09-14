@@ -156,6 +156,10 @@ export type EditorCommand =
   | { type: "reset-route"; connectionId: EditorConnectionId }
   | { type: "create-connection"; left: ConnectionDraftPort; right: ConnectionDraftPort; route?: readonly Point[]; waypoints?: readonly Point[] }
   | { type: "add-connection"; left: ConnectionDraftPort; right: ConnectionDraftPort; route?: readonly Point[]; waypoints?: readonly Point[] }
+  /** 用同一个稳定 Editor Connection ID 替换连接端点，提交过程由会话补偿管理。 */
+  | { type: "reconnect-connection"; connectionId: EditorConnectionId; left: ConnectionDraftPort; right: ConnectionDraftPort; route?: readonly Point[]; waypoints?: readonly Point[] }
+  /** `repair-connection` 是重接命令的语义别名，供悬空端点交互使用。 */
+  | { type: "repair-connection"; connectionId: EditorConnectionId; left: ConnectionDraftPort; right: ConnectionDraftPort; route?: readonly Point[]; waypoints?: readonly Point[] }
   | { type: "begin-placement"; kind: ComponentKindName; center?: Point; altKey?: boolean; continuous?: boolean }
   | { type: "start-placement"; kind: ComponentKindName; center?: Point; altKey?: boolean; continuous?: boolean }
   | { type: "update-placement"; center: Point; altKey?: boolean }
@@ -301,6 +305,21 @@ interface CreateConnectionFrame {
   selectionBefore: EditorSelection;
 }
 
+interface ReconnectConnectionFrame {
+  type: "reconnect-connection";
+  connectionId: EditorConnectionId;
+  oldSource: EditorConnection["source"];
+  oldTarget: EditorConnection["target"];
+  oldRoute?: readonly Point[];
+  oldWaypoints?: readonly Point[];
+  oldWasLive: boolean;
+  source: EditorConnection["source"];
+  target: EditorConnection["target"];
+  route: readonly Point[];
+  waypoints: readonly Point[];
+  selectionBefore: EditorSelection;
+}
+
 interface EditRouteFrame {
   type: "edit-route";
   connectionId: EditorConnectionId;
@@ -311,7 +330,7 @@ interface EditRouteFrame {
   selectionBefore: EditorSelection;
 }
 
-type HistoryFrame = DeleteComponentFrame | DeleteConnectionFrame | ClearDocumentFrame | MoveComponentFrame | AddComponentFrame | CreateConnectionFrame | EditRouteFrame;
+type HistoryFrame = DeleteComponentFrame | DeleteConnectionFrame | ClearDocumentFrame | MoveComponentFrame | AddComponentFrame | CreateConnectionFrame | ReconnectConnectionFrame | EditRouteFrame;
 
 const busyError: EngineError = {
   code: "editor_busy",
@@ -714,6 +733,7 @@ export function createEditorSession(
         source: { ...connection.source, point: { ...connection.source.point } },
         target: { ...connection.target, point: { ...connection.target.point } },
         ...(connection.route ? { route: connection.route.map((point) => ({ ...point })) } : {}),
+        ...(connection.waypoints ? { waypoints: connection.waypoints.map((point) => ({ ...point })) } : {}),
       }));
     return {
       type: "delete-component",
@@ -1036,6 +1056,75 @@ export function createEditorSession(
     };
   }
 
+  function reconnectFrame(
+    connectionId: EditorConnectionId,
+    left: ConnectionDraftPort,
+    right: ConnectionDraftPort,
+    route?: readonly Point[],
+    waypoints?: readonly Point[],
+  ): ReconnectConnectionFrame | EngineError {
+    const connection = document.connections.get(connectionId);
+    if (!connection || connection.lifecycle === "deleted") {
+      return { code: "connection_not_found", message: "要重接的连接不存在。", retryable: false };
+    }
+    const oldSource = cloneEndpoint(connection.source);
+    const oldTarget = cloneEndpoint(connection.target);
+    const oldDangling = new Set<EditorEndpointSide>();
+    if (!requireComponent(oldSource.componentId)) oldDangling.add("source");
+    if (!requireComponent(oldTarget.componentId)) oldDangling.add("target");
+    const leftIsActive = requireComponent(left.componentId) !== null;
+    const rightIsActive = requireComponent(right.componentId) !== null;
+    const endpoints = normalizeConnectionEndpoints(left, right);
+    let source = { componentId: endpoints.source.componentId, port: endpoints.source.port, point: { ...endpoints.source.point } };
+    let target = { componentId: endpoints.target.componentId, port: endpoints.target.port, point: { ...endpoints.target.point } };
+
+    // 拖动冻结的 source/target 端点时，两端方向相同；新端点只替换对应悬空侧，另一侧继续沿用旧连接。
+    if (oldDangling.has("source") && left.direction === "output" && right.direction === "output") {
+      const replacement = leftIsActive ? left : rightIsActive ? right : null;
+      if (!replacement) return { code: "component_not_found", message: "修复连接需要一个仍然存在的输出端口。", retryable: false };
+      source = { componentId: replacement.componentId, port: replacement.port, point: { ...replacement.point } };
+      target = cloneEndpoint(oldTarget);
+    } else if (oldDangling.has("target") && left.direction === "input" && right.direction === "input") {
+      const replacement = leftIsActive ? left : rightIsActive ? right : null;
+      if (!replacement) return { code: "component_not_found", message: "修复连接需要一个仍然存在的输入端口。", retryable: false };
+      source = cloneEndpoint(oldSource);
+      target = { componentId: replacement.componentId, port: replacement.port, point: { ...replacement.point } };
+    } else {
+      const targetError = validateConnectionDraftTarget(left, right, false);
+      if (targetError) {
+        return { code: targetError.code === "same-port" ? "same_port" : targetError.code === "same-direction" ? "same_direction" : targetError.code, message: targetError.message, retryable: false };
+      }
+      if (!leftIsActive || !rightIsActive) {
+        return { code: "component_not_found", message: "重接端点所属的元件不存在或已被删除。", retryable: false };
+      }
+      // 允许把一个 live 连接的输入端重新接到新的来源；旧连接本身不计入占用判断。
+      if ([...document.connections.values()].some((candidate) => candidate.id !== connectionId && isLiveConnection(candidate) && candidate.target.componentId === endpoints.target.componentId && candidate.target.port === endpoints.target.port)) {
+        return { code: "input_already_connected", message: "目标输入端口已被另一条有效连接占用。", retryable: false };
+      }
+    }
+    if (!requireComponent(source.componentId) || !requireComponent(target.componentId)) {
+      return { code: "component_not_found", message: "重接端点所属的元件不存在或已被删除。", retryable: false };
+    }
+    const normalizedRoute = route && route.length >= 2 ? normalizeOrthogonalRoute(route) : createDefaultOrthogonalRoute(source.point, target.point);
+    const routeAfter = (normalizedRoute.length >= 2 ? normalizedRoute : [source.point, target.point]).map((point) => ({ ...point }));
+    routeAfter[0] = { ...source.point };
+    routeAfter[routeAfter.length - 1] = { ...target.point };
+    return {
+      type: "reconnect-connection",
+      connectionId,
+      oldSource,
+      oldTarget,
+      oldRoute: connection.route?.map((point) => ({ ...point })),
+      oldWaypoints: connection.waypoints?.map((point) => ({ ...point })),
+      oldWasLive: isLiveConnection(connection),
+      source,
+      target,
+      route: routeAfter,
+      waypoints: (waypoints ?? routeAfter.slice(1, -1)).map((point) => ({ ...point })),
+      selectionBefore: selection ? { ...selection } : null,
+    };
+  }
+
   async function createConnection(frame: CreateConnectionFrame): Promise<CommandResult> {
     const sourceEngineId = bindings.components[frame.source.componentId];
     const targetEngineId = bindings.components[frame.target.componentId];
@@ -1063,6 +1152,117 @@ export function createEditorSession(
     undoStack.push(frame);
     redoStack.length = 0;
     selection = { kind: "connection", id: frame.connectionId };
+    publishBindings();
+    return { ok: true, snapshot: finishOperation() };
+  }
+
+  function applyReconnectGeometry(frame: ReconnectConnectionFrame, useNew: boolean): void {
+    const connection = document.connections.get(frame.connectionId);
+    if (!connection) return;
+    const source = useNew ? frame.source : frame.oldSource;
+    const target = useNew ? frame.target : frame.oldTarget;
+    connection.source = cloneEndpoint(source);
+    connection.target = cloneEndpoint(target);
+    const route = useNew ? frame.route : frame.oldRoute;
+    const waypoints = useNew ? frame.waypoints : frame.oldWaypoints;
+    if (route) connection.route = route.map((point) => ({ ...point }));
+    else delete connection.route;
+    if (waypoints) connection.waypoints = waypoints.map((point) => ({ ...point }));
+    else delete connection.waypoints;
+    connection.lifecycle = "visible";
+    delete connection.hiddenReason;
+  }
+
+  /**
+   * 以补偿事务替换一条 Connection 的端点；旧 Wire 在整个异步事务期间保持可见。
+   * @param frame 重接前后的编辑器几何与稳定连接身份。
+   * @param redo 是否按重做方向执行（当前连接已是旧几何）。
+   * @returns 成功后的结果；补偿失败时进入 recovery-required。
+   */
+  async function reconnectConnection(frame: ReconnectConnectionFrame, undoDirection = false, redoHistory = false): Promise<CommandResult> {
+    const connection = document.connections.get(frame.connectionId);
+    if (!connection) return fail(recoveryError("重接所需的连接不存在。"));
+    const currentIsNew = undoDirection;
+    const currentWasLive = currentIsNew || frame.oldWasLive;
+    const currentSource = currentIsNew ? frame.source : frame.oldSource;
+    const currentTarget = currentIsNew ? frame.target : frame.oldTarget;
+    const currentEngineId = bindings.connections[frame.connectionId];
+    const currentSourceId = bindings.components[currentSource.componentId];
+    const currentTargetId = bindings.components[currentTarget.componentId];
+    const desiredSource = currentIsNew ? frame.oldSource : frame.source;
+    const desiredTarget = currentIsNew ? frame.oldTarget : frame.target;
+    const desiredSourceId = bindings.components[desiredSource.componentId];
+    const desiredTargetId = bindings.components[desiredTarget.componentId];
+    const oldBinding = currentEngineId;
+
+    // 当前有效连接必须先解绑，才能满足引擎的单输入规则；Wire 的编辑器投影不隐藏。
+    if (currentWasLive && currentEngineId !== undefined) {
+      const removed = await call(() => engine.removeConnection(currentEngineId));
+      if (!removed.ok && !isAlreadyAbsent(removed.error)) return fail(removed.error);
+      delete bindings.connections[frame.connectionId];
+    } else if (currentWasLive && currentEngineId === undefined) {
+      return fail(recoveryError("重接所需的有效连接没有引擎绑定。"));
+    }
+
+    const desiredWasLive = undoDirection ? frame.oldWasLive : true;
+    const desiredCanExist = desiredSourceId !== undefined && desiredTargetId !== undefined;
+    let added: EngineResult<{ connectionId: EngineConnectionId }> | null = null;
+    if (desiredWasLive && desiredCanExist) {
+      added = await call(() => engine.addConnection({
+        sourceComponentId: desiredSourceId!,
+        sourcePort: desiredSource.port,
+        targetComponentId: desiredTargetId!,
+        targetPort: desiredTarget.port,
+      }));
+    }
+    if (desiredWasLive && (!added || !added.ok)) {
+      // 新连接失败时恢复旧有效连接；悬空旧连接则仍保留本地投影和原有绑定。
+      if (currentWasLive && currentSourceId !== undefined && currentTargetId !== undefined) {
+        const restored = await call(() => engine.addConnection({
+          sourceComponentId: currentSourceId,
+          sourcePort: currentSource.port,
+          targetComponentId: currentTargetId,
+          targetPort: currentTarget.port,
+        }));
+        if (!restored.ok) return enterRecovery(recoveryError(`重接失败且旧连接补偿未完成：${restored.error.message}`));
+        bindings.connections[frame.connectionId] = restored.value.connectionId;
+      } else if (oldBinding !== undefined && !currentWasLive) {
+        bindings.connections[frame.connectionId] = oldBinding;
+      }
+      return fail(added?.error ?? recoveryError("重接端点没有有效引擎绑定。"));
+    }
+
+    const newEngineId = added?.ok ? added.value.connectionId : undefined;
+    if (!currentWasLive && currentEngineId !== undefined) {
+      if (newEngineId === undefined) return enterRecovery(recoveryError("重接补偿缺少新连接身份。"));
+      const removed = await call(() => engine.removeConnection(currentEngineId));
+      if (!removed.ok && !isAlreadyAbsent(removed.error)) {
+        const compensated = await call(() => engine.removeConnection(newEngineId));
+        if (!compensated.ok && !isAlreadyAbsent(compensated.error)) return enterRecovery(recoveryError(`重接完成后清理旧悬空连接失败，且新连接补偿未完成：${compensated.error.message}`));
+        bindings.connections[frame.connectionId] = oldBinding!;
+        return fail(removed.error);
+      }
+    }
+    if (newEngineId === undefined) delete bindings.connections[frame.connectionId];
+    else bindings.connections[frame.connectionId] = newEngineId;
+    applyReconnectGeometry(frame, !undoDirection);
+    selection = { kind: "connection", id: frame.connectionId };
+    if (!undoDirection && !redoHistory) {
+      undoStack.push(frame);
+      redoStack.length = 0;
+    }
+    publishBindings();
+    return { ok: true, snapshot: finishOperation() };
+  }
+
+  async function undoReconnectConnection(frame: ReconnectConnectionFrame): Promise<CommandResult> {
+    const result = await reconnectConnection(frame, true);
+    if (!result.ok) return result;
+    // 撤销方向可能无法在引擎重建原 dangling 端点，因此仅恢复本地悬空投影。
+    applyReconnectGeometry(frame, false);
+    selection = frame.selectionBefore;
+    undoStack.pop();
+    redoStack.push(frame);
     publishBindings();
     return { ok: true, snapshot: finishOperation() };
   }
@@ -1530,6 +1730,7 @@ export function createEditorSession(
     if (frame.type === "clear-document") return undoClearDocument(frame);
     if (frame.type === "move-component") return undoMoveComponent(frame);
     if (frame.type === "create-connection") return undoCreateConnection(frame);
+    if (frame.type === "reconnect-connection") return undoReconnectConnection(frame);
     if (frame.type === "edit-route") return undoEditRoute(frame);
     return undoDeleteConnection(frame);
   }
@@ -1555,6 +1756,14 @@ export function createEditorSession(
     }
     if (frame.type === "move-component") return redoMoveComponent(frame, remainingRedo);
     if (frame.type === "create-connection") return redoCreateConnection(frame, remainingRedo);
+    if (frame.type === "reconnect-connection") {
+      const result = await reconnectConnection(frame, false, true);
+      if (result.ok) {
+        redoStack.length = 0;
+        redoStack.push(...remainingRedo);
+      }
+      return result;
+    }
     if (frame.type === "edit-route") return redoEditRoute(frame, remainingRedo);
     const connection = document.connections.get(frame.connectionId);
     if (!connection) return fail(recoveryError("重做所需的连接不存在。"));
@@ -1654,6 +1863,11 @@ export function createEditorSession(
         nextRoute = resetOrthogonalRoute(connection.source.point, connection.target.point);
       }
       return editRoute(makeEditRouteFrame(connection, nextRoute));
+    }
+    if (command.type === "reconnect-connection" || command.type === "repair-connection") {
+      const frame = reconnectFrame(command.connectionId, command.left, command.right, command.route, command.waypoints);
+      if ("code" in frame) return fail(frame);
+      return reconnectConnection(frame);
     }
     if (command.type === "create-connection" || command.type === "add-connection") {
       const frame = connectionFrame(command.left, command.right, command.route, command.waypoints);

@@ -78,7 +78,7 @@ export function useEditorState(
   moveComponent: (componentId: EditorComponentId, position: Point) => Promise<void> = async () => undefined,
   updatePlacement?: (center: Point, altKey?: boolean) => Promise<void>,
   editRoute: (connectionId: EditorConnectionId, route: readonly Point[]) => Promise<void> = async () => undefined,
-  createConnection: (left: ConnectionDraftPort, right: ConnectionDraftPort, route?: readonly Point[]) => Promise<{ ok: boolean; error?: string }> = async () => ({ ok: false }),
+  createConnection: (left: ConnectionDraftPort, right: ConnectionDraftPort, route?: readonly Point[], connectionId?: string) => Promise<{ ok: boolean; error?: string }> = async () => ({ ok: false }),
 ) {
   const showDetails = ref(false);
   const showSidebar = ref(true);
@@ -200,7 +200,14 @@ export function useEditorState(
   /** 从任意方向的端口开始临时连接；提交前不会改动 EditorDocument。 */
   function startConnection(port: ConnectionDraftPort): void {
     if (editorState.value?.pendingPlacement || editorState.value?.operation !== "idle") return;
-    connectionDraft.value = reduceConnectionDraft(connectionDraft.value, { type: "start", port });
+    const connectionId = editorState.value.document.connections.find((connection) => {
+      const endpointMatches = (endpoint: { componentId: string; port: string }): boolean => endpoint.componentId === port.componentId && endpoint.port === port.port;
+      return connection.lifecycle === "visible" && (
+        (port.direction === "input" && endpointMatches(connection.target)) ||
+        connection.danglingEndpoints.some((side) => endpointMatches(side === "source" ? connection.source : connection.target))
+      );
+    })?.id;
+    connectionDraft.value = reduceConnectionDraft(connectionDraft.value, { type: "start", port, connectionId });
   }
 
   /** 更新草稿指针预览；不创建快照或历史记录。 */
@@ -218,7 +225,12 @@ export function useEditorState(
     const draft = connectionDraft.value;
     if (!draft.origin) return;
     const route = connectionDraftRoute(draft, port);
-    const result = await createConnection(draft.origin, port, route);
+    // 输出端拖到已占用输入时也自动进入重接模式；输入端起笔时 connectionId 已在 startConnection 标记。
+    const targetConnectionId = editorState.value?.document.connections.find((connection) =>
+      connection.lifecycle === "visible" && connection.target.componentId === (draft.origin?.direction === "input" ? draft.origin.componentId : port.componentId) &&
+      connection.target.port === (draft.origin?.direction === "input" ? draft.origin.port : port.port),
+    )?.id;
+    const result = await createConnection(draft.origin, port, route, draft.connectionId ?? targetConnectionId);
     if (result.ok) {
       connectionDraft.value = createConnectionDraft();
     } else {

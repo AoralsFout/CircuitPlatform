@@ -404,6 +404,24 @@ function onPortClick(event: MouseEvent, node: CanvasNode, port: CanvasNode["port
   if (!props.interaction.connectionDraft) emit("connectionStart", connectionPort(node, port));
 }
 
+/** 从悬空 Wire 的冻结端点发起修复草稿，保留原 Connection 的稳定身份。 */
+function onDanglingEndpointPointerDown(event: PointerEvent, wire: CanvasWire, side: "source" | "target"): void {
+  if (event.button !== 0 || spacePressed || props.interaction.pendingPlacement) return;
+  connectionPointer = { pointerId: event.pointerId, ended: false };
+  canvasElement.value?.setPointerCapture(event.pointerId);
+  const endpoint = side === "source" ? wire.source : wire.target;
+  emit("connectionStart", {
+    componentId: endpoint.componentId,
+    port: endpoint.port,
+    direction: side === "source" ? "output" : "input",
+    point: { ...endpoint.point },
+    outward: side === "source" ? "right" : "left",
+  });
+  emit("connectionMove", { point: pointerInWorld(event), altKey: event.altKey });
+  event.preventDefault();
+  event.stopPropagation();
+}
+
 function onKeyup(event: KeyboardEvent): void {
   if (event.key === " ") spacePressed = false;
 }
@@ -455,8 +473,8 @@ onBeforeUnmount(() => {
               <circle class="route-waypoint-handle" :cx="point.x" :cy="point.y" r="7" role="button" tabindex="0" :aria-label="`编辑连线 ${wire.id} 折点 ${pointIndex + 1}`" @pointerdown.stop="onRouteWaypointPointerDown($event, wire, pointIndex + 1)" />
             </template>
             <path class="signal-wire" :class="[wireClass(wire.signal), { 'signal-wire--dangling': wire.danglingEndpoints.length > 0, 'signal-wire--selected': wire.selected }]" :d="pathFor(wire.route)" />
-            <circle v-if="wire.danglingEndpoints.includes('source')" class="dangling-endpoint" :cx="wire.source.point.x" :cy="wire.source.point.y" r="6" />
-            <circle v-if="wire.danglingEndpoints.includes('target')" class="dangling-endpoint" :cx="wire.target.point.x" :cy="wire.target.point.y" r="6" />
+            <circle v-if="wire.danglingEndpoints.includes('source')" class="dangling-endpoint" :cx="wire.source.point.x" :cy="wire.source.point.y" r="6" role="button" tabindex="0" :aria-label="`修复悬空连接 ${wire.id} 的来源端点`" @pointerdown.stop="onDanglingEndpointPointerDown($event, wire, 'source')" />
+            <circle v-if="wire.danglingEndpoints.includes('target')" class="dangling-endpoint" :cx="wire.target.point.x" :cy="wire.target.point.y" r="6" role="button" tabindex="0" :aria-label="`修复悬空连接 ${wire.id} 的目标端点`" @pointerdown.stop="onDanglingEndpointPointerDown($event, wire, 'target')" />
           </template>
           <path v-if="interaction.connectionDraft" class="signal-wire signal-wire--draft" :d="pathFor(interaction.connectionDraft)" />
         </svg>
