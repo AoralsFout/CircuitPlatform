@@ -15,6 +15,7 @@ import {
   type InteractionState,
   type ViewportState,
 } from "../canvas";
+import { createInspectorModel, type InspectorModel } from "../editor/inspector.ts";
 import {
   readRecentComponentKinds,
   writeRecentComponentKind,
@@ -168,6 +169,11 @@ export function useEditorState(
     }
     return projectCanvasScene(snapshot, { signals }, registry, previewPositions.value, routeEditPreview.value ? { [routeEditPreview.value.connectionId]: routeEditPreview.value.route } : undefined);
   });
+  const inspector = computed<InspectorModel>(() => createInspectorModel(
+    canvasScene.value,
+    editorState.value?.selection ?? null,
+    registry,
+  ));
   const viewport = computed<ViewportState>(() => viewportState.value);
   const interaction = computed<InteractionState>(() => {
     if (workspaceState.value.engineState !== "ready") {
@@ -453,6 +459,7 @@ export function useEditorState(
     selectedNodeId,
     zoomLabel,
     canvasScene,
+    inspector,
     viewport,
     interaction,
     componentDefinitions: registry.list(),

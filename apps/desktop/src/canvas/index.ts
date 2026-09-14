@@ -222,6 +222,8 @@ export interface CanvasWire {
   source: CanvasWireEndpoint;
   target: CanvasWireEndpoint;
   route: readonly Point[];
+  /** 用户可见的有序折点；默认 Route 的派生折线不重复计入。 */
+  waypoints?: readonly Point[];
   signal: Signal;
   danglingEndpoints: readonly EditorEndpointSide[];
   selected: boolean;
@@ -375,6 +377,11 @@ export function projectCanvasScene(
     const sourcePoint = previewEndpoint(connection.source, componentsById, previewPositions);
     const targetPoint = previewEndpoint(connection.target, componentsById, previewPositions);
     const previewRoute = previewRoutes?.[connection.id];
+    const waypoints = connection.waypoints
+      ? connection.waypoints.map((point) => ({ ...point }))
+      : connection.route && connection.route.length > 2
+        ? connection.route.slice(1, -1).map((point) => ({ ...point }))
+        : [];
     const route = previewRoute
       ? previewRoute.map((point) => ({ ...point }))
       : connection.route
@@ -387,6 +394,7 @@ export function projectCanvasScene(
     source: { ...connection.source, point: sourcePoint },
     target: { ...connection.target, point: targetPoint },
     route,
+    waypoints,
     signal: getSignal(simulationSnapshot, connection.source.componentId, connection.source.port),
     danglingEndpoints: [...connection.danglingEndpoints],
     selected: selected?.kind === "connection" && selected.id === connection.id,
@@ -453,3 +461,10 @@ export {
   type RouteEditPreview,
   type RouteEditTarget,
 } from "./route-edit.ts";
+
+export {
+  hitTestCanvas,
+  hitTest,
+  type CanvasHitTarget,
+  type HitTestOptions,
+} from "./hit-testing.ts";
