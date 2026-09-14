@@ -30,7 +30,8 @@ const {
   redo,
   beginPlacement,
   updatePlacement,
-  placeComponent,
+  placeComponent: placeComponentCommand,
+  addComponent,
 } = useWorkspace();
 const {
   selectedNode,
@@ -56,6 +57,8 @@ const {
   viewport,
   interaction,
   componentDefinitions,
+  recentComponentKinds,
+  rememberComponentKind,
   selectNode,
   selectConnection,
   selectRailPage,
@@ -76,6 +79,13 @@ const {
   setPreference: setThemePreference,
   cycle: cycleTheme,
 } = useThemePreference();
+
+/** 提交画布待放置元件；成功后与右键菜单添加共用最近使用记录。 */
+async function placeComponent(center: { x: number; y: number }, altKey: boolean): Promise<void> {
+  const kind = editorState.value?.pendingPlacement?.kind;
+  const succeeded = await placeComponentCommand(center, altKey);
+  if (succeeded && kind) rememberComponentKind(kind);
+}
 
 function onEditorKeydown(event: KeyboardEvent): void {
   const target = event.target;
@@ -156,6 +166,10 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           :scene="canvasScene"
           :viewport="viewport"
           :interaction="interaction"
+          :component-definitions="componentDefinitions"
+          :recent-component-kinds="recentComponentKinds"
+          :add-component="addComponent"
+          :remember-component-kind="rememberComponentKind"
           @select-node="select({ kind: 'component', id: $event })"
           @select-connection="select({ kind: 'connection', id: $event })"
           @node-drag-start="startNodeDrag($event.nodeId, $event.pointerWorld)"
