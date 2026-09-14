@@ -8,13 +8,17 @@ class Engine implements CircuitEnginePort {
   nextComponent = 10;
   nextConnection = 20;
   failAddConnection = false;
+  failNextAddConnection = 0;
   async addComponent(kind: ComponentKindName): Promise<EngineResult<{ componentId: number }>> {
     this.calls.push(`addComponent:${kind}`);
     return { ok: true, value: { componentId: this.nextComponent++ } };
   }
   async addConnection(input: { sourceComponentId: number; sourcePort: string; targetComponentId: number; targetPort: string }): Promise<EngineResult<{ connectionId: number }>> {
     this.calls.push(`addConnection:${input.sourcePort}->${input.targetPort}`);
-    if (this.failAddConnection) return { ok: false, error: { code: "engine_rejected", message: "引擎拒绝了这条连接。", retryable: true } };
+    if (this.failAddConnection || this.failNextAddConnection > 0) {
+      if (this.failNextAddConnection > 0) this.failNextAddConnection -= 1;
+      return { ok: false, error: { code: "engine_rejected", message: "引擎拒绝了这条连接。", retryable: true } };
+    }
     return { ok: true, value: { connectionId: this.nextConnection++ } };
   }
   async removeComponent(componentId: number): Promise<EngineResult<{ componentId: number }>> { this.calls.push(`removeComponent:${componentId}`); return { ok: true, value: { componentId } }; }
@@ -75,4 +79,63 @@ test("created wire is one history frame and undo/redo keeps its editor identity"
   const redone = await session.dispatch({ type: "redo" });
   assert.equal(redone.ok, true);
   assert.equal(redone.snapshot.document.connections[0].id, id);
+});
+
+test("reconnects an occupied input in one transaction while retaining the editor connection identity", async () => {
+  const { engine, session } = createSession();
+  const created = await session.dispatch({ type: "create-connection", left: port("source", "output", { x: 148, y: 42 }), right: port("target", "input", { x: 160, y: 42 }) });
+  assert.equal(created.ok, true);
+  const id = created.snapshot.document.connections[0].id;
+  const reconnected = await session.dispatch({ type: "reconnect-connection", connectionId: id, left: port("source-2", "output", { x: 148, y: 202 }), right: port("target", "input", { x: 160, y: 42 }) });
+  assert.equal(reconnected.ok, true);
+  assert.equal(reconnected.snapshot.document.connections[0].id, id);
+  assert.equal(reconnected.snapshot.document.connections[0].source.componentId, "source-2");
+  assert.deepEqual(engine.calls.slice(-2), ["removeConnection:20", "addConnection:out->in"]);
+  await session.dispatch({ type: "undo" });
+  const redone = await session.dispatch({ type: "redo" });
+  assert.equal(redone.ok, true);
+  assert.equal(redone.snapshot.document.connections[0].id, id);
+});
+
+test("repairs a dangling endpoint by adding the replacement before deleting the old engine connection", async () => {
+  const engine = new Engine();
+  const session = createEditorSession({
+    document: {
+      components: [components[1], components[2]],
+      connections: [{ id: "wire", source: { componentId: "deleted-source", port: "out", point: { x: 0, y: 42 } }, target: { componentId: "target", port: "in", point: { x: 160, y: 42 } }, lifecycle: "visible", danglingEndpoints: ["source"] }],
+    },
+    bindings: { components: { "source-2": 2, target: 3 }, connections: { wire: 77 } },
+  }, engine);
+  const repaired = await session.dispatch({ type: "repair-connection", connectionId: "wire", left: port("deleted-source", "output", { x: 0, y: 42 }), right: port("source-2", "output", { x: 148, y: 202 }) });
+  assert.equal(repaired.ok, true);
+  assert.deepEqual(repaired.snapshot.document.connections[0].danglingEndpoints, []);
+  assert.equal(repaired.snapshot.document.connections[0].source.componentId, "source-2");
+  assert.deepEqual(engine.calls.slice(-2), ["addConnection:out->in", "removeConnection:77"]);
+});
+
+test("failed occupied-input reconnect restores the old binding and remains retryable", async () => {
+  const { engine, session } = createSession();
+  await session.dispatch({ type: "create-connection", left: port("source", "output", { x: 148, y: 42 }), right: port("target", "input", { x: 160, y: 42 }) });
+  engine.failNextAddConnection = 1;
+  const failed = await session.dispatch({ type: "reconnect-connection", connectionId: "connection-1", left: port("source-2", "output", { x: 148, y: 202 }), right: port("target", "input", { x: 160, y: 42 }) });
+  assert.equal(failed.ok, false);
+  assert.equal(failed.snapshot.operation, "idle");
+  assert.equal(failed.snapshot.document.connections[0].source.componentId, "source");
+  assert.equal(failed.snapshot.canUndo, true);
+  const retry = await session.dispatch({ type: "reconnect-connection", connectionId: "connection-1", left: port("source-2", "output", { x: 148, y: 202 }), right: port("target", "input", { x: 160, y: 42 }) });
+  assert.equal(retry.ok, true);
+  assert.equal(retry.snapshot.document.connections[0].source.componentId, "source-2");
+});
+
+test("compensation failure puts reconnect into recovery-required without exposing engine IDs", async () => {
+  const { engine, session } = createSession();
+  await session.dispatch({ type: "create-connection", left: port("source", "output", { x: 148, y: 42 }), right: port("target", "input", { x: 160, y: 42 }) });
+  engine.failAddConnection = true;
+  const failed = await session.dispatch({ type: "reconnect-connection", connectionId: "connection-1", left: port("source-2", "output", { x: 148, y: 202 }), right: port("target", "input", { x: 160, y: 42 }) });
+  assert.equal(failed.ok, false);
+  assert.equal(failed.snapshot.operation, "recovery-required");
+  assert.equal(JSON.stringify(failed.snapshot).includes("engineId"), false);
+  const blocked = await session.dispatch({ type: "reconnect-connection", connectionId: "connection-1", left: port("source-2", "output", { x: 148, y: 202 }), right: port("target", "input", { x: 160, y: 42 }) });
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.error.code, "editor_recovery_required");
 });

@@ -32,10 +32,12 @@ export interface ConnectionDraftState {
   /** 释放到空白处后仍保留的首个折点；用于区分拖拽直连与持续点击布线。 */
   hasPlacedFirstWaypoint: boolean;
   error: ConnectionDraftError | null;
+  /** 重接/修复模式下沿用的稳定 Editor Connection ID；创建新连接时为空。 */
+  connectionId?: string | null;
 }
 
 export type ConnectionDraftAction =
-  | { type: "start"; port: ConnectionDraftPort }
+  | { type: "start"; port: ConnectionDraftPort; connectionId?: string }
   | { type: "move"; point: Point; altKey?: boolean }
   | { type: "place-waypoint"; point: Point; altKey?: boolean }
   | { type: "toggle-axis" }
@@ -56,6 +58,7 @@ export const EMPTY_CONNECTION_DRAFT: ConnectionDraftState = {
   axis: "horizontal",
   hasPlacedFirstWaypoint: false,
   error: null,
+  connectionId: null,
 };
 
 function copyPoint(point: Point): Point {
@@ -133,6 +136,7 @@ export function reduceConnectionDraft(
       axis: "horizontal",
       hasPlacedFirstWaypoint: false,
       error: null,
+      connectionId: action.connectionId ?? null,
     };
   }
   if (state.phase === "idle" || !state.origin) return copyState(state);
