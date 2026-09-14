@@ -232,13 +232,6 @@ export interface CanvasScene {
   bounds: { min: Point; max: Point };
 }
 
-export interface ViewportState {
-  x: number;
-  y: number;
-  zoom: number;
-  visibleRect: { width: number; height: number };
-}
-
 export interface InteractionState {
   focusedId: string | null;
   draggingNodeId: string | null;
@@ -375,3 +368,30 @@ export function createCanvasScene(
 export function emptyCanvasScene(): CanvasScene {
   return { nodes: [], wires: [], bounds: { min: { x: 0, y: 0 }, max: { x: 0, y: 0 } } };
 }
+
+export {
+  DEFAULT_VIEWPORT_PADDING,
+  DEFAULT_VIEWPORT_ZOOM,
+  MAX_VIEWPORT_ZOOM,
+  MIN_VIEWPORT_ZOOM,
+  applyWheelViewport,
+  applyViewportWheel,
+  clampViewportZoom,
+  createViewportState,
+  fitViewportToBounds,
+  fitToWindow,
+  isViewportPanPointer,
+  normalizeWheelDelta,
+  panViewport,
+  resizeViewport,
+  screenToWorld,
+  setViewportZoomAt,
+  worldToScreen,
+  zoomAt,
+  zoomViewportAt,
+  zoomViewportAtCenter,
+  type ViewportBounds,
+  type ViewportSize,
+  type ViewportState,
+  type ViewportTransform,
+} from "./viewport.ts";

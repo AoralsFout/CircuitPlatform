@@ -1,11 +1,15 @@
-import { computed, ref, type DeepReadonly, type Ref } from "vue";
+import { computed, ref, watch, type DeepReadonly, type Ref } from "vue";
 import type { Signal } from "@circuit-platform/protocol";
 import type { EditorComponentId, EditorConnectionId, EditorSelection, EditorSnapshot } from "../editor";
 import type { InputKey, WorkspaceSnapshot } from "../workspace";
 import {
   createComponentDefinitionRegistry,
+  createViewportState,
   emptyCanvasScene,
+  fitViewportToBounds,
   projectCanvasScene,
+  resizeViewport,
+  setViewportZoomAt,
   type InteractionState,
   type ViewportState,
 } from "../canvas";
@@ -62,7 +66,19 @@ export function useEditorState(
   const showSidebar = ref(true);
   const activeRailPage = ref<RailPage>("components");
   const bottomTab = ref<BottomTab>("outputs");
-  const zoom = ref(100);
+  // 视口是临时交互状态，独立于 EditorDocument，因此不会进入撤销或项目持久化。
+  const viewportState = ref(createViewportState());
+  const hasFittedInitialScene = ref(false);
+  const zoom = computed({
+    get: () => Math.round(viewportState.value.zoom * 100),
+    set: (value: number) => {
+      const center = {
+        x: viewportState.value.visibleRect.width / 2,
+        y: viewportState.value.visibleRect.height / 2,
+      };
+      viewportState.value = setViewportZoomAt(viewportState.value, value / 100, center);
+    },
+  });
   const registry = createComponentDefinitionRegistry();
 
   const canvasScene = computed(() => {
@@ -85,12 +101,7 @@ export function useEditorState(
     }
     return projectCanvasScene(snapshot, { signals }, registry);
   });
-  const viewport = computed<ViewportState>(() => ({
-    x: 0,
-    y: 0,
-    zoom: zoom.value / 100,
-    visibleRect: { width: 1000, height: 560 },
-  }));
+  const viewport = computed<ViewportState>(() => viewportState.value);
   const interaction = computed<InteractionState>(() => {
     if (workspaceState.value.engineState !== "ready") {
       return { focusedId: null, draggingNodeId: null, connectionDraft: null, emptyState: { title: "等待仿真引擎", message: workspaceState.value.message } };
@@ -211,8 +222,29 @@ export function useEditorState(
   }
 
   function adjustZoom(delta: number): void {
-    zoom.value = Math.min(140, Math.max(60, zoom.value + delta));
+    zoom.value = zoom.value + delta;
   }
+
+  /** 让整个场景在当前画布中居中显示；只改变视口，不创建编辑器历史记录。 */
+  function fitViewport(): void {
+    viewportState.value = fitViewportToBounds(viewportState.value, canvasScene.value.bounds);
+  }
+
+  /** 在 DOM 尺寸变化时更新视口，保持原视口中心的世界坐标不变。 */
+  function resizeCanvas(width: number, height: number): void {
+    viewportState.value = resizeViewport(viewportState.value, { width, height });
+  }
+
+  /** 应用画布交互层计算出的新视口；不会触碰编辑器文档或历史栈。 */
+  function setViewport(next: ViewportState): void {
+    viewportState.value = next;
+  }
+
+  watch(canvasScene, (scene) => {
+    if (hasFittedInitialScene.value || scene.nodes.length === 0) return;
+    hasFittedInitialScene.value = true;
+    viewportState.value = fitViewportToBounds(viewportState.value, scene.bounds);
+  }, { immediate: true });
 
   return {
     selectedNode,
@@ -241,5 +273,8 @@ export function useEditorState(
     selectConnection,
     selectRailPage,
     adjustZoom,
+    fitViewport,
+    resizeCanvas,
+    setViewport,
   };
 }

@@ -1,5 +1,15 @@
 <script setup lang="ts">
-import type { CanvasNode, CanvasScene, CanvasWire, InteractionState, ViewportState } from "../canvas";
+import { onBeforeUnmount, onMounted, ref } from "vue";
+import {
+  applyWheelViewport,
+  isViewportPanPointer,
+  panViewport,
+  type CanvasNode,
+  type CanvasScene,
+  type CanvasWire,
+  type InteractionState,
+  type ViewportState,
+} from "../canvas";
 
 const props = defineProps<{
   scene: CanvasScene;
@@ -10,7 +20,14 @@ const props = defineProps<{
 const emit = defineEmits<{
   selectNode: [nodeId: string];
   selectConnection: [connectionId: string];
+  viewportChange: [viewport: ViewportState];
+  resize: [width: number, height: number];
 }>();
+
+const canvasElement = ref<HTMLElement | null>(null);
+let resizeObserver: ResizeObserver | null = null;
+let spacePressed = false;
+let panPointer: { pointerId: number; x: number; y: number } | null = null;
 
 function signalClass(value: 0 | 1 | "X"): string {
   if (value === 1) return "signal-state--high";
@@ -47,15 +64,90 @@ function onConnectionKeydown(event: KeyboardEvent, connectionId: string): void {
 function viewportStyle(): Record<string, string> {
   return { transform: `translate(${props.viewport.x}px, ${props.viewport.y}px) scale(${props.viewport.zoom})`, transformOrigin: "0 0" };
 }
+
+function gridStyle(): Record<string, string> {
+  const spacing = 24 * props.viewport.zoom;
+  return {
+    backgroundSize: `${spacing}px ${spacing}px`,
+    backgroundPosition: `${props.viewport.x}px ${props.viewport.y}px`,
+  };
+}
+
+function pointerInCanvas(event: PointerEvent | WheelEvent): { x: number; y: number } {
+  const rect = canvasElement.value?.getBoundingClientRect();
+  return {
+    x: event.clientX - (rect?.left ?? 0),
+    y: event.clientY - (rect?.top ?? 0),
+  };
+}
+
+function onWheel(event: WheelEvent): void {
+  event.preventDefault();
+  emit("viewportChange", applyWheelViewport(props.viewport, event, pointerInCanvas(event)));
+}
+
+function onPointerDown(event: PointerEvent): void {
+  if (!isViewportPanPointer(event.button, spacePressed)) return;
+  panPointer = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+  canvasElement.value?.setPointerCapture(event.pointerId);
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function onPointerMove(event: PointerEvent): void {
+  if (!panPointer || panPointer.pointerId !== event.pointerId) return;
+  const delta = { x: event.clientX - panPointer.x, y: event.clientY - panPointer.y };
+  panPointer = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+  emit("viewportChange", panViewport(props.viewport, delta));
+  event.preventDefault();
+}
+
+function onPointerUp(event: PointerEvent): void {
+  if (!panPointer || panPointer.pointerId !== event.pointerId) return;
+  if (canvasElement.value?.hasPointerCapture(event.pointerId)) canvasElement.value.releasePointerCapture(event.pointerId);
+  panPointer = null;
+}
+
+function onKeydown(event: KeyboardEvent): void {
+  if (event.key === " ") {
+    spacePressed = true;
+    event.preventDefault();
+  }
+}
+
+function onKeyup(event: KeyboardEvent): void {
+  if (event.key === " ") spacePressed = false;
+}
+
+function reportResize(): void {
+  const element = canvasElement.value;
+  if (element) emit("resize", element.clientWidth, element.clientHeight);
+}
+
+onMounted(() => {
+  reportResize();
+  if (typeof ResizeObserver !== "undefined" && canvasElement.value) {
+    resizeObserver = new ResizeObserver(reportResize);
+    resizeObserver.observe(canvasElement.value);
+  }
+  window.addEventListener("keydown", onKeydown);
+  window.addEventListener("keyup", onKeyup);
+});
+
+onBeforeUnmount(() => {
+  resizeObserver?.disconnect();
+  window.removeEventListener("keydown", onKeydown);
+  window.removeEventListener("keyup", onKeyup);
+});
 </script>
 
 <template>
   <div class="editor-canvas-wrap">
     <div class="canvas-info"><span class="canvas-mode"><span class="mode-dot" aria-hidden="true"></span>场景模式</span><span>Delete 删除 · Ctrl/Cmd+Z 撤销 · Esc 取消</span></div>
-    <div class="circuit-canvas" role="application" aria-label="电路画布">
-      <div class="canvas-grid" aria-hidden="true"></div>
+    <div ref="canvasElement" class="circuit-canvas" role="application" tabindex="0" aria-label="电路画布" @wheel="onWheel" @pointerdown="onPointerDown" @pointermove="onPointerMove" @pointerup="onPointerUp" @pointercancel="onPointerUp">
+      <div class="canvas-grid" :style="gridStyle()" aria-hidden="true"></div>
       <div class="canvas-viewport" :style="viewportStyle()">
-        <svg class="signal-map" :viewBox="`${scene.bounds.min.x - 40} ${scene.bounds.min.y - 40} ${Math.max(scene.bounds.max.x - scene.bounds.min.x + 80, 1)} ${Math.max(scene.bounds.max.y - scene.bounds.min.y + 80, 1)}`" preserveAspectRatio="none" aria-label="电路连接">
+        <svg class="signal-map" aria-label="电路连接">
           <template v-for="wire in scene.wires" :key="wire.id">
             <path class="signal-wire-hit" :d="pathFor(wire.route)" role="button" tabindex="0" :aria-label="`选择连线 ${wire.id}`" @click.stop="emit('selectConnection', wire.id)" @keydown="onConnectionKeydown($event, wire.id)" />
             <path class="signal-wire" :class="[wireClass(wire.signal), { 'signal-wire--dangling': wire.danglingEndpoints.length > 0, 'signal-wire--selected': wire.selected }]" :d="pathFor(wire.route)" />
