@@ -27,6 +27,10 @@ const emit = defineEmits<{
   nodeDragMove: [payload: { pointerWorld: { x: number; y: number }; altKey: boolean }];
   nodeDragEnd: [];
   nodeDragCancel: [];
+  routeEditStart: [payload: { connectionId: string; route: readonly { x: number; y: number }[]; target: { kind: "waypoint" | "segment"; index: number }; pointerWorld: { x: number; y: number } }];
+  routeEditMove: [payload: { pointerWorld: { x: number; y: number }; altKey: boolean }];
+  routeEditEnd: [];
+  routeEditCancel: [];
   placementMove: [center: { x: number; y: number }, altKey: boolean];
   placeComponent: [center: { x: number; y: number }, altKey: boolean];
 }>();
@@ -38,6 +42,7 @@ let panPointer: { pointerId: number; x: number; y: number } | null = null;
 let nodeDragPointer: { pointerId: number; nodeId: string } | null = null;
 let nodeDidMove = false;
 let suppressNodeClick = false;
+let routeEditPointer: { pointerId: number; connectionId: string; route: readonly { x: number; y: number }[]; target: { kind: "waypoint" | "segment"; index: number } } | null = null;
 
 function signalClass(value: 0 | 1 | "X"): string {
   if (value === 1) return "signal-state--high";
@@ -53,6 +58,12 @@ function wireClass(value: 0 | 1 | "X"): string {
 
 function pathFor(points: readonly { x: number; y: number }[]): string {
   return points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" ");
+}
+
+function segmentPath(points: readonly { x: number; y: number }[], index: number): string {
+  const start = points[index];
+  const end = points[index + 1];
+  return start && end ? pathFor([start, end]) : "";
 }
 
 function nodeStyle(node: CanvasNode): Record<string, string> {
@@ -105,6 +116,24 @@ function onNodePointerDown(event: PointerEvent, node: CanvasNode): void {
   event.stopPropagation();
 }
 
+function onRouteWaypointPointerDown(event: PointerEvent, wire: CanvasWire, pointIndex: number): void {
+  if (event.button !== 0) return;
+  routeEditPointer = { pointerId: event.pointerId, connectionId: wire.id, route: wire.route, target: { kind: "waypoint", index: pointIndex } };
+  canvasElement.value?.setPointerCapture(event.pointerId);
+  emit("routeEditStart", { connectionId: wire.id, route: wire.route, target: { kind: "waypoint", index: pointIndex }, pointerWorld: pointerInWorld(event) });
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function onRouteSegmentPointerDown(event: PointerEvent, wire: CanvasWire, segmentIndex: number): void {
+  if (event.button !== 0 || !wire.selected) return;
+  routeEditPointer = { pointerId: event.pointerId, connectionId: wire.id, route: wire.route, target: { kind: "segment", index: segmentIndex } };
+  canvasElement.value?.setPointerCapture(event.pointerId);
+  emit("routeEditStart", { connectionId: wire.id, route: wire.route, target: { kind: "segment", index: segmentIndex }, pointerWorld: pointerInWorld(event) });
+  event.preventDefault();
+  event.stopPropagation();
+}
+
 function onWheel(event: WheelEvent): void {
   event.preventDefault();
   emit("viewportChange", applyWheelViewport(props.viewport, event, pointerInCanvas(event)));
@@ -126,6 +155,11 @@ function onPointerDown(event: PointerEvent): void {
 }
 
 function onPointerMove(event: PointerEvent): void {
+  if (routeEditPointer?.pointerId === event.pointerId) {
+    emit("routeEditMove", { pointerWorld: pointerInWorld(event), altKey: event.altKey });
+    event.preventDefault();
+    return;
+  }
   if (nodeDragPointer?.pointerId === event.pointerId) {
     nodeDidMove = true;
     emit("nodeDragMove", { pointerWorld: pointerInWorld(event), altKey: event.altKey });
@@ -143,6 +177,14 @@ function onPointerMove(event: PointerEvent): void {
 }
 
 function onPointerUp(event: PointerEvent): void {
+  if (routeEditPointer?.pointerId === event.pointerId) {
+    if (canvasElement.value?.hasPointerCapture(event.pointerId)) canvasElement.value.releasePointerCapture(event.pointerId);
+    if (event.type === "pointercancel") emit("routeEditCancel");
+    else emit("routeEditEnd");
+    routeEditPointer = null;
+    event.preventDefault();
+    return;
+  }
   if (nodeDragPointer?.pointerId === event.pointerId) {
     if (canvasElement.value?.hasPointerCapture(event.pointerId)) canvasElement.value.releasePointerCapture(event.pointerId);
     if (event.type === "pointercancel") emit("nodeDragCancel");
@@ -208,6 +250,12 @@ onBeforeUnmount(() => {
         <svg class="signal-map" aria-label="电路连接">
           <template v-for="wire in scene.wires" :key="wire.id">
             <path class="signal-wire-hit" :d="pathFor(wire.route)" role="button" tabindex="0" :aria-label="`选择连线 ${wire.id}`" @click.stop="emit('selectConnection', wire.id)" @keydown="onConnectionKeydown($event, wire.id)" />
+            <template v-if="wire.selected" v-for="(_, segmentIndex) in wire.route.slice(0, -1)" :key="`${wire.id}-segment-${segmentIndex}`">
+              <path class="route-segment-hit" :d="segmentPath(wire.route, segmentIndex)" :aria-label="`移动连线 ${wire.id} 线段 ${segmentIndex + 1}`" @pointerdown.stop="onRouteSegmentPointerDown($event, wire, segmentIndex)" />
+            </template>
+            <template v-if="wire.selected" v-for="(point, pointIndex) in wire.route.slice(1, -1)" :key="`${wire.id}-waypoint-${pointIndex}`">
+              <circle class="route-waypoint-handle" :cx="point.x" :cy="point.y" r="7" role="button" tabindex="0" :aria-label="`编辑连线 ${wire.id} 折点 ${pointIndex + 1}`" @pointerdown.stop="onRouteWaypointPointerDown($event, wire, pointIndex + 1)" />
+            </template>
             <path class="signal-wire" :class="[wireClass(wire.signal), { 'signal-wire--dangling': wire.danglingEndpoints.length > 0, 'signal-wire--selected': wire.selected }]" :d="pathFor(wire.route)" />
             <circle v-if="wire.danglingEndpoints.includes('source')" class="dangling-endpoint" :cx="wire.source.point.x" :cy="wire.source.point.y" r="6" />
             <circle v-if="wire.danglingEndpoints.includes('target')" class="dangling-endpoint" :cx="wire.target.point.x" :cy="wire.target.point.y" r="6" />

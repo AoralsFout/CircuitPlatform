@@ -31,6 +31,7 @@ const {
   beginPlacement,
   updatePlacement,
   placeComponent,
+  editRoute,
 } = useWorkspace();
 const {
   selectedNode,
@@ -68,7 +69,11 @@ const {
   endNodeDrag,
   cancelNodeDrag,
   placementMoved,
-} = useEditorState(state, editorState, select, moveComponent, updatePlacement);
+  startRouteEdit,
+  moveRouteEdit,
+  endRouteEdit,
+  cancelRouteEdit,
+} = useEditorState(state, editorState, select, moveComponent, updatePlacement, editRoute);
 const {
   preference: themePreference,
   label: themeLabel,
@@ -162,6 +167,10 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           @node-drag-move="moveNodeDrag($event.pointerWorld, $event.altKey)"
           @node-drag-end="endNodeDrag()"
           @node-drag-cancel="cancelNodeDrag()"
+          @route-edit-start="startRouteEdit($event.connectionId, $event.route, $event.target, $event.pointerWorld)"
+          @route-edit-move="moveRouteEdit($event.pointerWorld, $event.altKey)"
+          @route-edit-end="endRouteEdit()"
+          @route-edit-cancel="cancelRouteEdit()"
           @viewport-change="setViewport"
           @resize="resizeCanvas"
           @placement-move="placementMoved"

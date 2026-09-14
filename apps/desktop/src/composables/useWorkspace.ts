@@ -28,6 +28,9 @@ interface WorkspaceBinding {
   toggleInput(key: InputKey): Promise<void>;
   select(selection: EditorSelection): Promise<void>;
   moveComponent(componentId: EditorComponentId, position: Point): Promise<void>;
+  editRoute(connectionId: string, route: readonly Point[]): Promise<void>;
+  resetRoute(connectionId: string): Promise<void>;
+  deleteWaypoint(connectionId: string, pointIndex: number): Promise<void>;
   deleteSelection(): Promise<void>;
   /** 请求显示清空确认；此步骤不会调用引擎。 */
   requestClear(): Promise<void>;
@@ -145,6 +148,9 @@ export function useWorkspace(): WorkspaceBinding {
     toggleInput,
     select: (selection) => dispatch({ type: "select", selection }),
     moveComponent: (componentId, position) => dispatch({ type: "move-component", componentId, position }),
+    editRoute: (connectionId, route) => dispatch({ type: "edit-route", connectionId, route }),
+    resetRoute: (connectionId) => dispatch({ type: "reset-route", connectionId }),
+    deleteWaypoint: (connectionId, pointIndex) => dispatch({ type: "delete-waypoint", connectionId, pointIndex }),
     deleteSelection: () => dispatch({ type: "delete-selected" }),
     requestClear: () => dispatch({ type: "request-clear" }),
     confirmClear: () => dispatch({ type: "confirm-clear" }),

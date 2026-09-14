@@ -6,6 +6,7 @@ import type {
   EditorSnapshot,
   Point,
 } from "../editor";
+import { createDefaultOrthogonalRoute, routeFromWaypoints } from "../editor/route.ts";
 
 export type PortDirection = "input" | "output";
 
@@ -238,6 +239,8 @@ export interface InteractionState {
   /** 拖动期间的临时世界坐标；只存在于交互层，不写入 EditorSnapshot。 */
   dragPreview?: { nodeId: string; position: Point } | null;
   connectionDraft: readonly Point[] | null;
+  /** Wire Route 拖动时的临时预览；释放后才进入 EditorSession 历史。 */
+  routeEditPreview?: { connectionId: string; route: readonly Point[] } | null;
   pendingPlacement?: { kind: ComponentKindName; position: Point; size: { width: number; height: number } } | null;
   emptyState?: { title: string; message: string };
 }
@@ -262,30 +265,13 @@ function getSignal(snapshot: SimulationSnapshot, componentId: string, portId: st
 function routeFor(connection: EditorConnection): readonly Point[] {
   const explicit = (connection as EditorConnection & { route?: readonly Point[] }).route;
   if (explicit && explicit.length >= 2) return explicit.map((point) => ({ ...point }));
-  const start = connection.source.point;
-  const end = connection.target.point;
-  const midpoint = start.x + (end.x - start.x) / 2;
-  return [
-    { ...start },
-    { x: midpoint, y: start.y },
-    { x: midpoint, y: end.y },
-    { ...end },
-  ];
+  return createDefaultOrthogonalRoute(connection.source.point, connection.target.point);
 }
 
 function routeBetween(start: Point, end: Point, waypoints: readonly Point[] = []): Point[] {
-  if (waypoints.length === 0) {
-    const midpoint = start.x + (end.x - start.x) / 2;
-    return [{ ...start }, { x: midpoint, y: start.y }, { x: midpoint, y: end.y }, { ...end }];
-  }
-  const route: Point[] = [{ ...start }];
-  const first = waypoints[0];
-  if (route[0].x !== first.x && route[0].y !== first.y) route.push({ x: first.x, y: route[0].y });
-  route.push(...waypoints.map((point) => ({ ...point })));
-  const last = route[route.length - 1];
-  if (last.x !== end.x && last.y !== end.y) route.push({ x: end.x, y: last.y });
-  route.push({ ...end });
-  return route;
+  return waypoints.length === 0
+    ? createDefaultOrthogonalRoute(start, end)
+    : routeFromWaypoints(start, end, waypoints);
 }
 
 function previewEndpoint(
@@ -335,6 +321,7 @@ export function projectCanvasScene(
   simulationSnapshot: SimulationSnapshot,
   registry: ComponentDefinitionRegistry,
   previewPositions?: Readonly<Record<string, Point>>,
+  previewRoutes?: Readonly<Record<string, readonly Point[]>>,
 ): CanvasScene {
   if (!editorSnapshot) return { nodes: [], wires: [], bounds: { min: { x: 0, y: 0 }, max: { x: 0, y: 0 } } };
 
@@ -385,8 +372,13 @@ export function projectCanvasScene(
   const wires = editorSnapshot.document.connections.map((connection) => {
     const sourcePoint = previewEndpoint(connection.source, componentsById, previewPositions);
     const targetPoint = previewEndpoint(connection.target, componentsById, previewPositions);
-    const route = connection.route
+    const previewRoute = previewRoutes?.[connection.id];
+    const route = previewRoute
+      ? previewRoute.map((point) => ({ ...point }))
+      : connection.route
       ? routeBetween(sourcePoint, targetPoint, connection.route.length > 2 ? connection.route.slice(1, -1) : [])
+      : connection.waypoints
+        ? routeBetween(sourcePoint, targetPoint, connection.waypoints)
       : routeBetween(sourcePoint, targetPoint);
     return {
     id: connection.id,
@@ -451,3 +443,11 @@ export {
   type NodeDragControllerOptions,
   type NodeDragPreview,
 } from "./drag.ts";
+
+export {
+  createRouteEditController,
+  type RouteEditController,
+  type RouteEditControllerOptions,
+  type RouteEditPreview,
+  type RouteEditTarget,
+} from "./route-edit.ts";
