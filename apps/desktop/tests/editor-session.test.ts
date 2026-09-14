@@ -63,6 +63,7 @@ test("maps editor keyboard shortcuts while preserving editable targets", () => {
   assert.equal(key({ key: "Backspace" }), "delete-selection");
   assert.equal(key({ key: "z", ctrlKey: true }), "undo");
   assert.equal(key({ key: "z", metaKey: true, shiftKey: true }), "redo");
+  assert.equal(key({ key: "d", ctrlKey: true }), "duplicate-selection");
   assert.equal(key({ key: "Escape" }), "cancel");
   assert.equal(key({ key: "Delete", editableTarget: true }), null);
   assert.equal(key({ key: "a" }), null);
@@ -735,4 +736,68 @@ test("added component is undoable without reusing its editor identity", async ()
   assert.equal(redone.snapshot.document.components[0].id, id);
   assert.equal(redone.snapshot.document.components[0].displayName, "AND 门 1");
   assert.equal(engine.calls.filter((call) => call.startsWith("addComponent:and")).length, 2);
+});
+
+test("Shift placement keeps the same kind pending until explicitly changed", async () => {
+  const engine = new FakeEngine();
+  const session = createEditorSession({ document: { components: [], connections: [] }, bindings: { components: {}, connections: {} } }, engine);
+
+  await session.dispatch({ type: "begin-placement", kind: "xor", continuous: true });
+  const first = await session.dispatch({ type: "place-component", center: { x: 100, y: 100 } });
+  assert.equal(first.ok, true);
+  assert.equal(first.snapshot.document.components.length, 1);
+  assert.deepEqual(first.snapshot.pendingPlacement, { kind: "xor", center: null, altKey: false, continuous: true });
+
+  const second = await session.dispatch({ type: "place-component", center: { x: 200, y: 100 } });
+  assert.equal(second.ok, true);
+  assert.equal(second.snapshot.document.components.length, 2);
+  assert.deepEqual(second.snapshot.pendingPlacement, { kind: "xor", center: null, altKey: false, continuous: true });
+
+  await session.dispatch({ type: "begin-placement", kind: "not", continuous: false });
+  const final = await session.dispatch({ type: "place-component", center: { x: 300, y: 100 } });
+  assert.equal(final.ok, true);
+  assert.equal(final.snapshot.document.components.at(-1)?.kind, "not");
+  assert.equal(final.snapshot.pendingPlacement, null);
+});
+
+test("duplicating a component copies only kind and selects a new offset node", async () => {
+  const engine = new FakeEngine();
+  const session = createSession(engine);
+  await session.dispatch({ type: "select", selection: { kind: "component", id: "and-gate" } });
+
+  const result = await session.dispatch({ type: "duplicate-selected" });
+
+  assert.equal(result.ok, true);
+  const copy = result.snapshot.document.components.find((component) => component.id === result.snapshot.selection?.id);
+  assert.deepEqual(copy, {
+    id: "component-1",
+    kind: "and",
+    displayName: "AND 门 2",
+    position: { x: 472, y: 252 },
+    lifecycle: "active",
+  });
+  assert.equal(result.snapshot.document.connections.length, 3);
+  assert.deepEqual(engine.calls, ["addComponent:and"]);
+
+  const undone = await session.dispatch({ type: "undo" });
+  assert.equal(undone.ok, true);
+  assert.equal(undone.snapshot.document.components.some((component) => component.id === "component-1"), false);
+  const redone = await session.dispatch({ type: "redo" });
+  assert.equal(redone.ok, true);
+  assert.equal(redone.snapshot.selection?.id, "component-1");
+  assert.deepEqual(engine.calls, ["addComponent:and", "removeComponent:100", "addComponent:and"]);
+});
+
+test("failed duplication preserves the source selection and does not create history", async () => {
+  const engine = new FakeEngine();
+  engine.failOn = "addComponent:and";
+  const session = createSession(engine);
+  await session.dispatch({ type: "select", selection: { kind: "component", id: "and-gate" } });
+
+  const result = await session.dispatch({ type: "copy-component", componentId: "and-gate" });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.snapshot.selection, { kind: "component", id: "and-gate" });
+  assert.equal(result.snapshot.canUndo, false);
+  assert.equal(result.snapshot.document.components.length, 4);
 });

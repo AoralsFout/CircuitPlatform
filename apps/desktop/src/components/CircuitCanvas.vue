@@ -25,7 +25,7 @@ const props = defineProps<{
   interaction: InteractionState;
   componentDefinitions?: readonly ComponentDefinition[];
   recentComponentKinds?: readonly ComponentKindName[];
-  addComponent?: (kind: ComponentKindName, center: { x: number; y: number }, altKey: boolean) => Promise<boolean>;
+  addComponent?: (kind: ComponentKindName, center: { x: number; y: number }, altKey: boolean, continuous?: boolean) => Promise<boolean>;
   rememberComponentKind?: (kind: ComponentKindName) => void;
 }>();
 
@@ -169,6 +169,29 @@ async function selectComponentFromMenu(kind: ComponentKindName): Promise<void> {
   const succeeded = await props.addComponent?.(kind, menu.worldPoint, menu.altKey);
   if (succeeded) props.rememberComponentKind?.(kind);
   closeComponentMenu();
+}
+
+function dragKind(event: DragEvent): ComponentKindName | null {
+  const raw = event.dataTransfer?.getData("application/x-circuit-component") || event.dataTransfer?.getData("text/plain");
+  if (!raw) return null;
+  return props.componentDefinitions?.find((definition) => definition.kind === raw && definition.available)?.kind ?? null;
+}
+
+function onDragOver(event: DragEvent): void {
+  const types = event.dataTransfer?.types ?? [];
+  if (!types.includes("application/x-circuit-component") && !types.includes("text/plain")) return;
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+}
+
+/** 将元件库拖放释放点转换为 WorldPoint，并提交统一添加事务。 */
+async function onDrop(event: DragEvent): Promise<void> {
+  const kind = dragKind(event);
+  if (!kind) return;
+  event.preventDefault();
+  const center = screenToWorld(pointerInCanvas(event), props.viewport);
+  const succeeded = await props.addComponent?.(kind, center, event.altKey, event.shiftKey);
+  if (succeeded) props.rememberComponentKind?.(kind);
 }
 
 function onContextMenu(event: MouseEvent): void {
@@ -411,8 +434,8 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="editor-canvas-wrap">
-    <div class="canvas-info"><span class="canvas-mode"><span class="mode-dot" aria-hidden="true"></span>场景模式</span><span>Delete 删除 · Ctrl/Cmd+Z 撤销 · Esc 取消</span></div>
-    <div ref="canvasElement" class="circuit-canvas" role="application" tabindex="0" aria-label="电路画布" @wheel="onWheel" @contextmenu="onContextMenu" @keydown="onCanvasKeydown" @pointerdown="onPointerDown" @pointermove="onPointerMove" @pointerup="onPointerUp" @pointercancel="onPointerUp">
+    <div class="canvas-info"><span class="canvas-mode"><span class="mode-dot" aria-hidden="true"></span>场景模式</span><span>Delete 删除 · Ctrl/Cmd+D 复制 · Ctrl/Cmd+Z 撤销 · Esc 取消</span></div>
+    <div ref="canvasElement" class="circuit-canvas" role="application" tabindex="0" aria-label="电路画布" @wheel="onWheel" @contextmenu="onContextMenu" @keydown="onCanvasKeydown" @dragover="onDragOver" @drop="onDrop" @pointerdown="onPointerDown" @pointermove="onPointerMove" @pointerup="onPointerUp" @pointercancel="onPointerUp">
       <div class="canvas-grid" :style="gridStyle()" aria-hidden="true"></div>
       <div class="canvas-viewport" :style="viewportStyle()">
         <svg class="signal-map" aria-label="电路连接">
