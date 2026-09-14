@@ -14,6 +14,7 @@ import {
 } from "../canvas";
 import type { ComponentDefinition } from "../canvas";
 import type { ComponentKindName } from "@circuit-platform/protocol";
+import type { ConnectionDraftPort } from "../editor/connection-draft.ts";
 import {
   positionComponentMenu,
 } from "../editor/component-menu";
@@ -43,6 +44,12 @@ const emit = defineEmits<{
   routeEditCancel: [];
   placementMove: [center: { x: number; y: number }, altKey: boolean];
   placeComponent: [center: { x: number; y: number }, altKey: boolean];
+  connectionStart: [port: ConnectionDraftPort];
+  connectionMove: [payload: { point: { x: number; y: number }; altKey: boolean }];
+  connectionWaypoint: [payload: { point: { x: number; y: number }; altKey: boolean }];
+  connectionEnd: [port: ConnectionDraftPort];
+  connectionAxisToggle: [];
+  connectionCancel: [];
 }>();
 
 const canvasElement = ref<HTMLElement | null>(null);
@@ -58,6 +65,7 @@ const componentMenu = ref<{
   altKey: boolean;
 } | null>(null);
 let routeEditPointer: { pointerId: number; connectionId: string; route: readonly { x: number; y: number }[]; target: { kind: "waypoint" | "segment"; index: number } } | null = null;
+let connectionPointer: { pointerId: number; ended: boolean } | null = null;
 
 function signalClass(value: 0 | 1 | "X"): string {
   if (value === 1) return "signal-state--high";
@@ -121,6 +129,26 @@ function pointerInWorld(event: PointerEvent): { x: number; y: number } {
   return screenToWorld(pointerInCanvas(event), props.viewport);
 }
 
+function connectionPort(node: CanvasNode, port: CanvasNode["ports"][number]): ConnectionDraftPort {
+  return {
+    componentId: node.id,
+    port: port.id,
+    direction: port.direction,
+    point: { ...port.point },
+    outward: port.direction === "output" ? "right" : "left",
+  };
+}
+
+function portAtWorld(point: { x: number; y: number }): ConnectionDraftPort | null {
+  const radius = 12 / Math.max(props.viewport.zoom, 0.01);
+  for (const node of props.scene.nodes) {
+    for (const port of node.ports) {
+      if (Math.hypot(port.point.x - point.x, port.point.y - point.y) <= radius) return connectionPort(node, port);
+    }
+  }
+  return null;
+}
+
 function closeComponentMenu(): void {
   componentMenu.value = null;
   void nextTick(() => canvasElement.value?.focus());
@@ -154,7 +182,13 @@ function onContextMenu(event: MouseEvent): void {
 }
 
 function onNodePointerDown(event: PointerEvent, node: CanvasNode): void {
-  if (event.button !== 0 || spacePressed) return;
+  if (event.button !== 0 || spacePressed || props.interaction.connectionDraft) {
+    if (props.interaction.connectionDraft && event.button === 0) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+    return;
+  }
   nodeDragPointer = { pointerId: event.pointerId, nodeId: node.id };
   nodeDidMove = false;
   canvasElement.value?.setPointerCapture(event.pointerId);
@@ -164,7 +198,7 @@ function onNodePointerDown(event: PointerEvent, node: CanvasNode): void {
 }
 
 function onRouteWaypointPointerDown(event: PointerEvent, wire: CanvasWire, pointIndex: number): void {
-  if (event.button !== 0) return;
+  if (event.button !== 0 || props.interaction.connectionDraft) return;
   routeEditPointer = { pointerId: event.pointerId, connectionId: wire.id, route: wire.route, target: { kind: "waypoint", index: pointIndex } };
   canvasElement.value?.setPointerCapture(event.pointerId);
   emit("routeEditStart", { connectionId: wire.id, route: wire.route, target: { kind: "waypoint", index: pointIndex }, pointerWorld: pointerInWorld(event) });
@@ -173,7 +207,7 @@ function onRouteWaypointPointerDown(event: PointerEvent, wire: CanvasWire, point
 }
 
 function onRouteSegmentPointerDown(event: PointerEvent, wire: CanvasWire, segmentIndex: number): void {
-  if (event.button !== 0 || !wire.selected) return;
+  if (event.button !== 0 || !wire.selected || props.interaction.connectionDraft) return;
   routeEditPointer = { pointerId: event.pointerId, connectionId: wire.id, route: wire.route, target: { kind: "segment", index: segmentIndex } };
   canvasElement.value?.setPointerCapture(event.pointerId);
   emit("routeEditStart", { connectionId: wire.id, route: wire.route, target: { kind: "segment", index: segmentIndex }, pointerWorld: pointerInWorld(event) });
@@ -187,6 +221,12 @@ function onWheel(event: WheelEvent): void {
 }
 
 function onPointerDown(event: PointerEvent): void {
+  if (props.interaction.connectionDraft && event.button === 0 && !spacePressed) {
+    emit("connectionWaypoint", { point: pointerInWorld(event), altKey: event.altKey });
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
   if (props.interaction.pendingPlacement && event.button === 0 && !spacePressed) {
     const point = screenToWorld(pointerInCanvas(event), props.viewport);
     emit("placeComponent", point, event.altKey);
@@ -202,6 +242,11 @@ function onPointerDown(event: PointerEvent): void {
 }
 
 function onPointerMove(event: PointerEvent): void {
+  if (connectionPointer?.pointerId === event.pointerId) {
+    emit("connectionMove", { point: pointerInWorld(event), altKey: event.altKey });
+    event.preventDefault();
+    return;
+  }
   if (routeEditPointer?.pointerId === event.pointerId) {
     emit("routeEditMove", { pointerWorld: pointerInWorld(event), altKey: event.altKey });
     event.preventDefault();
@@ -224,6 +269,18 @@ function onPointerMove(event: PointerEvent): void {
 }
 
 function onPointerUp(event: PointerEvent): void {
+  if (connectionPointer?.pointerId === event.pointerId) {
+    if (canvasElement.value?.hasPointerCapture(event.pointerId)) canvasElement.value.releasePointerCapture(event.pointerId);
+    if (!connectionPointer.ended && event.type !== "pointercancel") {
+      const target = portAtWorld(pointerInWorld(event));
+      if (target) emit("connectionEnd", target);
+      else emit("connectionWaypoint", { point: pointerInWorld(event), altKey: event.altKey });
+    }
+    if (event.type === "pointercancel") emit("connectionCancel");
+    connectionPointer = null;
+    event.preventDefault();
+    return;
+  }
   if (routeEditPointer?.pointerId === event.pointerId) {
     if (canvasElement.value?.hasPointerCapture(event.pointerId)) canvasElement.value.releasePointerCapture(event.pointerId);
     if (event.type === "pointercancel") emit("routeEditCancel");
@@ -248,6 +305,7 @@ function onPointerUp(event: PointerEvent): void {
 }
 
 function onNodeClick(nodeId: string): void {
+  if (props.interaction.connectionDraft) return;
   if (suppressNodeClick) {
     suppressNodeClick = false;
     return;
@@ -256,10 +314,64 @@ function onNodeClick(nodeId: string): void {
 }
 
 function onKeydown(event: KeyboardEvent): void {
+  if (event.key === "Escape" && props.interaction.connectionDraft) {
+    emit("connectionCancel");
+    event.preventDefault();
+    return;
+  }
   if (event.key === " ") {
+    if (props.interaction.connectionDraft) {
+      emit("connectionAxisToggle");
+      event.preventDefault();
+      return;
+    }
     spacePressed = true;
     event.preventDefault();
   }
+}
+
+function onPortPointerDown(event: PointerEvent, node: CanvasNode, port: CanvasNode["ports"][number]): void {
+  if (event.button !== 0 || spacePressed || props.interaction.pendingPlacement) return;
+  connectionPointer = { pointerId: event.pointerId, ended: false };
+  canvasElement.value?.setPointerCapture(event.pointerId);
+  emit("connectionStart", connectionPort(node, port));
+  emit("connectionMove", { point: pointerInWorld(event), altKey: event.altKey });
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function onPortPointerUp(event: PointerEvent, node: CanvasNode, port: CanvasNode["ports"][number]): void {
+  if (!connectionPointer || connectionPointer.pointerId !== event.pointerId) return;
+  const releasePoint = pointerInWorld(event);
+  const target = portAtWorld(releasePoint);
+  const originPoint = props.interaction.connectionDraft?.[0];
+  const isNearOrigin = originPoint && Math.hypot(originPoint.x - releasePoint.x, originPoint.y - releasePoint.y) <= 12 / Math.max(props.viewport.zoom, 0.01);
+  if (target && !isNearOrigin) {
+    connectionPointer.ended = true;
+    emit("connectionEnd", target);
+  } else if (!isNearOrigin) {
+    connectionPointer.ended = true;
+    emit("connectionWaypoint", { point: releasePoint, altKey: event.altKey });
+  } else {
+    connectionPointer.ended = true;
+    if (canvasElement.value?.hasPointerCapture(event.pointerId)) canvasElement.value.releasePointerCapture(event.pointerId);
+    connectionPointer = null;
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
+  connectionPointer.ended = true;
+  if (canvasElement.value?.hasPointerCapture(event.pointerId)) canvasElement.value.releasePointerCapture(event.pointerId);
+  connectionPointer = null;
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function onPortClick(event: MouseEvent, node: CanvasNode, port: CanvasNode["ports"][number]): void {
+  event.preventDefault();
+  event.stopPropagation();
+  // 指针按下/释放已经覆盖拖拽提交；没有位移的单击只启动一个草稿。
+  if (!props.interaction.connectionDraft) emit("connectionStart", connectionPort(node, port));
 }
 
 function onKeyup(event: KeyboardEvent): void {
@@ -322,13 +434,14 @@ onBeforeUnmount(() => {
           <span class="node-tag">{{ node.kind.toUpperCase() }} / {{ node.ports.length }}</span>
           <strong>{{ node.symbol }} <span class="node-display-name">{{ node.displayName }}</span></strong>
           <span class="node-description">{{ node.description }}</span>
-          <span v-for="port in node.ports" :key="port.id" class="node-port" :class="[port.direction === 'input' ? 'node-port--left' : 'node-port--right', signalClass(port.signal)]" :style="{ top: `${port.offset.y}px` }">{{ port.name }} · {{ port.signal }}</span>
+          <span v-for="port in node.ports" :key="port.id" class="node-port" :class="[port.direction === 'input' ? 'node-port--left' : 'node-port--right', signalClass(port.signal)]" :style="{ top: `${port.offset.y}px` }" :data-port-id="port.id" :aria-label="`${port.direction === 'input' ? '输入' : '输出'}端口 ${port.name}`" @pointerdown.stop="onPortPointerDown($event, node, port)" @pointerup.stop="onPortPointerUp($event, node, port)" @click.stop="onPortClick($event, node, port)">{{ port.name }} · {{ port.signal }}</span>
         </article>
         <article v-if="interaction.pendingPlacement" class="circuit-node circuit-node--pending" :style="{ left: `${interaction.pendingPlacement.position.x}px`, top: `${interaction.pendingPlacement.position.y}px`, width: `${interaction.pendingPlacement.size.width}px`, height: `${interaction.pendingPlacement.size.height}px` }" aria-hidden="true">
           <span class="node-tag">待放置</span><strong>{{ interaction.pendingPlacement.kind.toUpperCase() }}</strong><span class="node-description">单击画布放置 · Esc 取消</span>
         </article>
       </div>
       <div v-if="interaction.emptyState" class="canvas-empty-state"><span class="empty-orbit">＋</span><strong>{{ interaction.emptyState.title }}</strong><p>{{ interaction.emptyState.message }}</p></div>
+      <div v-if="interaction.connectionDraftError" class="canvas-draft-error" role="alert">{{ interaction.connectionDraftError }}<span> · Esc 取消，或选择其他端口重试</span></div>
       <ComponentMenu
         v-if="componentMenu && componentDefinitions"
         :style="{ left: `${componentMenu.position.x}px`, top: `${componentMenu.position.y}px` }"

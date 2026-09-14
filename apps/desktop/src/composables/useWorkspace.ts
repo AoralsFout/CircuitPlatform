@@ -29,6 +29,17 @@ interface WorkspaceBinding {
   select(selection: EditorSelection): Promise<void>;
   moveComponent(componentId: EditorComponentId, position: Point): Promise<void>;
   editRoute(connectionId: string, route: readonly Point[]): Promise<void>;
+  createConnection(left: {
+    componentId: string;
+    port: string;
+    direction: "input" | "output";
+    point: Point;
+  }, right: {
+    componentId: string;
+    port: string;
+    direction: "input" | "output";
+    point: Point;
+  }, route?: readonly Point[]): Promise<{ ok: boolean; error?: string }>;
   resetRoute(connectionId: string): Promise<void>;
   deleteWaypoint(connectionId: string, pointIndex: number): Promise<void>;
   deleteSelection(): Promise<void>;
@@ -163,6 +174,17 @@ export function useWorkspace(): WorkspaceBinding {
     return result.ok;
   }
 
+  /** 提交一次完成的连接意图；失败只返回错误，草稿由画布交互层继续保留。 */
+  async function createConnection(left: Parameters<WorkspaceBinding["createConnection"]>[0], right: Parameters<WorkspaceBinding["createConnection"]>[1], route?: readonly Point[]): Promise<{ ok: boolean; error?: string }> {
+    if (!editor) return { ok: false, error: "编辑器尚未准备好。" };
+    const pending = editor.dispatch({ type: "create-connection", left, right, route });
+    editorState.value = editor.snapshot();
+    const result = await pending;
+    editorState.value = result.snapshot;
+    state.value = workspace.snapshot();
+    return result.ok ? { ok: true } : { ok: false, error: result.error.message };
+  }
+
   return {
     state: readonly(state),
     editorState: readonly(editorState),
@@ -173,6 +195,7 @@ export function useWorkspace(): WorkspaceBinding {
     select: (selection) => dispatch({ type: "select", selection }),
     moveComponent: (componentId, position) => dispatch({ type: "move-component", componentId, position }),
     editRoute: (connectionId, route) => dispatch({ type: "edit-route", connectionId, route }),
+    createConnection,
     resetRoute: (connectionId) => dispatch({ type: "reset-route", connectionId }),
     deleteWaypoint: (connectionId, pointIndex) => dispatch({ type: "delete-waypoint", connectionId, pointIndex }),
     deleteSelection: () => dispatch({ type: "delete-selected" }),
