@@ -106,6 +106,12 @@ async function beginPlacementFromSidebar(kind: Parameters<typeof beginPlacement>
   await beginPlacement(kind, continuous);
 }
 
+/** 布线草稿期间保持结构意图单一，不允许键盘或工具栏启动复制事务。 */
+async function duplicateSelection(): Promise<void> {
+  if (interaction.value.connectionDraft) return;
+  await duplicateComponent();
+}
+
 function onEditorKeydown(event: KeyboardEvent): void {
   const target = event.target;
   const shortcut = resolveEditorShortcut({
@@ -121,7 +127,7 @@ function onEditorKeydown(event: KeyboardEvent): void {
   if (editorState.value?.confirmation && shortcut !== "cancel") return;
   if (shortcut === "undo") void undo();
   else if (shortcut === "redo") void redo();
-  else if (shortcut === "duplicate-selection") void duplicateComponent();
+  else if (shortcut === "duplicate-selection") void duplicateSelection();
   else if (shortcut === "cancel") void cancelCurrentOperation();
   else void deleteSelection();
 }
@@ -172,7 +178,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           :can-undo="editorState?.operation === 'idle' && !editorState.confirmation && editorState.canUndo"
           :can-redo="editorState?.operation === 'idle' && !editorState.confirmation && editorState.canRedo"
           :can-delete="editorState?.operation === 'idle' && !editorState.confirmation && Boolean(editorState.selection)"
-          :can-duplicate="editorState?.operation === 'idle' && !editorState.confirmation && editorState.selection?.kind === 'component'"
+          :can-duplicate="editorState?.operation === 'idle' && !editorState.confirmation && !interaction.connectionDraft && editorState.selection?.kind === 'component'"
           :can-clear="editorState?.operation === 'idle' && !editorState.confirmation && (editorState.document.components.length > 0 || editorState.document.connections.length > 0)"
           :simulation-state="state.simulationState"
           @adjust-zoom="adjustZoom"
@@ -181,7 +187,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           @undo="undo"
           @redo="redo"
           @delete-selection="deleteSelection"
-          @duplicate-selection="duplicateComponent"
+          @duplicate-selection="duplicateSelection"
           @request-clear="requestClear"
         />
         <CircuitCanvas

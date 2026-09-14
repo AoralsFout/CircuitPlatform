@@ -166,6 +166,11 @@ function openComponentMenu(anchor: { x: number; y: number }, altKey = false): vo
 async function selectComponentFromMenu(kind: ComponentKindName): Promise<void> {
   const menu = componentMenu.value;
   if (!menu) return;
+  // 布线草稿优先级更高；菜单可能在草稿开始前已打开，提交前再次检查避免并发添加。
+  if (props.interaction.connectionDraft) {
+    closeComponentMenu();
+    return;
+  }
   const succeeded = await props.addComponent?.(kind, menu.worldPoint, menu.altKey);
   if (succeeded) props.rememberComponentKind?.(kind);
   closeComponentMenu();
@@ -186,6 +191,8 @@ function onDragOver(event: DragEvent): void {
 
 /** 将元件库拖放释放点转换为 WorldPoint，并提交统一添加事务。 */
 async function onDrop(event: DragEvent): Promise<void> {
+  // 拖放事件可能在菜单打开后才到达；连接草稿期间不能启动另一种结构意图。
+  if (props.interaction.connectionDraft) return;
   const kind = dragKind(event);
   if (!kind) return;
   event.preventDefault();
