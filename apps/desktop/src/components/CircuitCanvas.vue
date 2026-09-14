@@ -19,6 +19,7 @@ defineProps<{
   componentVisibility: Record<NodeKey, boolean>;
   wireVisibility: Record<WireKey, boolean>;
   wireDangling: Record<WireKey, WireDanglingState>;
+  isEmpty: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -55,7 +56,7 @@ function onConnectionKeydown(event: KeyboardEvent, connectionId: EditorConnectio
 
 <template>
   <div class="editor-canvas-wrap">
-    <div class="canvas-info"><span class="canvas-mode"><span class="mode-dot" aria-hidden="true"></span>演示模式</span><span>Delete 删除 · Ctrl/Cmd+Z 撤销</span></div>
+    <div class="canvas-info"><span class="canvas-mode"><span class="mode-dot" aria-hidden="true"></span>演示模式</span><span>Delete 删除 · Ctrl/Cmd+Z 撤销 · Esc 取消</span></div>
     <div class="circuit-canvas" :style="{ '--canvas-zoom': `${zoom / 100}` }">
       <div class="canvas-grid" aria-hidden="true"></div>
       <div class="canvas-zoom-layer">
@@ -75,7 +76,8 @@ function onConnectionKeydown(event: KeyboardEvent, connectionId: EditorConnectio
         <article v-if="componentVisibility.andGate" class="circuit-node circuit-node--gate" :class="{ 'circuit-node--selected': selectedNode === 'andGate' }" role="button" tabindex="0" aria-label="选择 AND 门" @click="emit('selectNode', 'andGate')" @keydown="onNodeKeydown($event, 'andGate')"><span class="node-tag">LOGIC / 2 → 1</span><strong>AND</strong><span class="node-port node-port--left node-port--upper">in1</span><span class="node-port node-port--left node-port--lower">in2</span><span class="node-port node-port--right" :class="signalClass(outputValue)">out · {{ outputValue }}</span></article>
         <article v-if="componentVisibility.output" class="circuit-node circuit-node--output" :class="[{ 'circuit-node--active': outputValue === 1 }, { 'circuit-node--selected': selectedNode === 'output' }]" role="button" tabindex="0" aria-label="选择输出" @click="emit('selectNode', 'output')" @keydown="onNodeKeydown($event, 'output')"><span class="node-tag">MONITOR / 01</span><strong>输出</strong><span class="output-signal" :class="signalClass(outputValue)">{{ outputValue }}</span><span class="output-description">{{ outputDescription }}</span><span class="node-port node-port--left" :class="signalClass(outputValue)">in</span></article>
         <div v-if="!hasLab" class="canvas-empty-state"><span class="empty-orbit">＋</span><strong>{{ engineState === "ready" ? "正在准备示例电路" : "等待仿真引擎" }}</strong><p>{{ engineMessage }}</p></div>
-        <div v-if="hasLab && waveformLength === 1" class="canvas-guidance"><span class="guidance-mark">↗</span><div><strong>试着切换输入 A</strong><p>观察高电平如何沿着连线影响输出。</p></div></div>
+        <div v-else-if="isEmpty" class="canvas-empty-state"><span class="empty-orbit">＋</span><strong>还没有电路</strong><p>使用撤销恢复刚才的电路，或从元件库开始新设计。</p></div>
+        <div v-if="hasLab && !isEmpty && waveformLength === 1" class="canvas-guidance"><span class="guidance-mark">↗</span><div><strong>试着切换输入 A</strong><p>观察高电平如何沿着连线影响输出。</p></div></div>
       </div>
       <div class="canvas-crosshair canvas-crosshair--tl" aria-hidden="true"></div><div class="canvas-crosshair canvas-crosshair--br" aria-hidden="true"></div>
     </div>

@@ -24,7 +24,7 @@ interface EditorSession {
 }
 ```
 
-`EditorSelection` 只包含编辑器本地的 `EditorComponentId` 或 `EditorConnectionId`。`EditorSnapshot` 至少包含可见 Component、未删除的 live/dangling Wire、当前选中对象、操作状态、`canUndo` 和可展示错误。Wire 端点保存最后一次有效的画布坐标，并通过 `danglingEndpoints` 标明悬空端。
+`EditorSelection` 只包含编辑器本地的 `EditorComponentId` 或 `EditorConnectionId`。`EditorSnapshot` 至少包含可见 Component、未删除的 live/dangling Wire、当前选中对象、待确认操作、操作状态、`canUndo` 和可展示错误。Wire 端点保存最后一次有效的画布坐标，并通过 `danglingEndpoints` 标明悬空端。
 
 ### 身份分离
 
@@ -53,13 +53,24 @@ interface EditorSession {
 
 撤销 Connection 删除时，使用当前两端 Component 的 engine ID 创建新的 Connection，再更新编辑器映射。
 
-所有删除和撤销命令串行执行。同一时间只允许一个结构变更命令处于 `deleting` 或 `undoing` 状态，避免旧快照覆盖新快照。
+### 清空与取消语义
+
+- `request-clear` 只在快照中发布待确认操作，不调用引擎，也不写入历史；
+- 待确认期间只接受 `confirm-clear` 或 `cancel-current-operation`，避免确认内容与实际文档漂移；
+- 确认后将当前可见文档清空为一个复合历史帧：先删除 Connection，再删除 Component；
+- 清空只物理删除当时 live 的 Connection；已有 dangling Connection 遵守独立生命周期并保留引擎绑定，但从画布投影隐藏，撤销清空时恢复对应悬空 Wire；
+- Esc 优先取消待确认操作并保留选择；没有待确认操作时取消当前选择；已经发往引擎的异步事务不伪装成可取消操作。
+
+撤销清空时先重建全部可见 Component，再重建清空前的 live Connection，并使用新的 engine ID 更新映射；清空前已 dangling 的 Wire 只恢复编辑器投影。重做清空必须使用撤销后生成的新 engine ID。
+
+所有删除、清空和撤销命令串行执行。同一时间只允许一个结构变更命令处于 `busy` 状态，避免旧快照覆盖新快照。
 
 ### 失败和补偿
 
 协议调用是异步且可失败的。预期引擎错误被转换为 `EditorSnapshot.error`，不会把协议错误对象传播给 Vue。
 
 - 删除失败：编辑器可见状态和撤销栈保持不变；
+- 清空部分失败：重建已删除的 Component 和 live Connection，并更新变化后的 engine ID；
 - 撤销中间步骤失败：删除新建的 Component 和 Connection，保持原编辑器快照；
 - 补偿也失败：进入 `recovery_required` 状态，暂停后续结构编辑，并要求显式恢复或重新加载；
 - 只有全部步骤成功，撤销才从历史栈移除对应记录。
@@ -94,9 +105,9 @@ interface EditorSession {
 
 ## 后果
 
-- Vue 的默认删除和撤销调用保持简单：只需向组合层发出选择、删除或撤销意图；
+- Vue 的默认删除、清空和撤销调用保持简单：只需向组合层发出选择、请求确认、确认/取消或历史意图；
 - 引擎身份变化被隐藏，编辑器模型可以稳定维护选择和历史；
 - 删除 Component 后，领域层与 UI 都保留 dangling Connection；UI 使用冻结端点和警示样式明确显示悬空 Wire；
 - 需要维护 editor ID 到 engine ID 的映射，并实现可测试的补偿流程；
-- `EditorSession` 为后续多选、重做、保存/加载和批量恢复保留扩展点，但当前只实现单选择和固定 AND 示例；
-- 本 ADR 不宣称画布拖动、连线、删除 UI 或撤销快捷键已经完成，具体交付仍由 `docs/roadmap.md` 跟踪。
+- `EditorSession` 为后续多选、连接草稿、保存/加载和批量恢复保留扩展点，但当前仍使用固定 AND 示例；
+- 本 ADR 不宣称画布拖动、端口连线或属性编辑已经完成，具体交付仍由 `docs/roadmap.md` 跟踪。

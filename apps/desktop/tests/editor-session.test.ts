@@ -15,13 +15,22 @@ class FakeEngine implements CircuitEnginePort {
   nextConnectionId = 200;
   readonly calls: string[] = [];
   failOn: string | null = null;
+  readonly failures = new Map<string, number>();
 
   private result<T>(operation: string, value: T): EngineResult<T> {
     this.calls.push(operation);
-    if (this.failOn === operation) {
+    const remainingFailures = this.failures.get(operation) ?? 0;
+    if (remainingFailures > 0) {
+      this.failures.set(operation, remainingFailures - 1);
+    }
+    if (this.failOn === operation || remainingFailures > 0) {
       return { ok: false, error: { code: `${operation}_failed`, message: `${operation} failed`, retryable: true } };
     }
     return { ok: true, value };
+  }
+
+  failNext(operation: string, count = 1): void {
+    this.failures.set(operation, count);
   }
 
   async addComponent(kind: ComponentKindName): Promise<EngineResult<{ componentId: number }>> {
@@ -275,4 +284,273 @@ test("rejects concurrent commands while an engine operation is pending", async (
   release();
   const completed = await first;
   assert.equal(completed.ok, true);
+});
+
+test("requests and cancels clear without changing the document or selection", async () => {
+  const engine = new FakeEngine();
+  const session = createSession(engine);
+  await session.dispatch({ type: "select", selection: { kind: "component", id: "and-gate" } });
+  const before = session.snapshot();
+
+  const requested = await session.dispatch({ type: "request-clear" });
+
+  assert.equal(requested.ok, true);
+  assert.deepEqual(requested.snapshot.confirmation, {
+    type: "clear-document",
+    componentCount: 4,
+    connectionCount: 3,
+  });
+  assert.deepEqual(requested.snapshot.document, before.document);
+  assert.deepEqual(requested.snapshot.selection, before.selection);
+  assert.deepEqual(engine.calls, []);
+
+  const blocked = await session.dispatch({ type: "undo" });
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.error.code, "confirmation_pending");
+
+  const cancelled = await session.dispatch({ type: "cancel-current-operation" });
+  assert.equal(cancelled.ok, true);
+  assert.equal(cancelled.snapshot.confirmation, null);
+  assert.deepEqual(cancelled.snapshot.selection, before.selection);
+  assert.deepEqual(cancelled.snapshot.document, before.document);
+  assert.deepEqual(engine.calls, []);
+});
+
+test("cancel clears the current selection when no confirmation is open", async () => {
+  const engine = new FakeEngine();
+  const session = createSession(engine);
+  await session.dispatch({ type: "select", selection: { kind: "connection", id: "wire-a" } });
+
+  const cancelled = await session.dispatch({ type: "cancel-current-operation" });
+
+  assert.equal(cancelled.ok, true);
+  assert.equal(cancelled.snapshot.selection, null);
+  assert.equal(cancelled.snapshot.confirmation, null);
+  assert.deepEqual(engine.calls, []);
+});
+
+test("clear removes connections before components and records one history frame", async () => {
+  const engine = new FakeEngine();
+  const session = createSession(engine);
+  await session.dispatch({ type: "request-clear" });
+
+  const cleared = await session.dispatch({ type: "confirm-clear" });
+
+  assert.equal(cleared.ok, true);
+  assert.deepEqual(cleared.snapshot.document, { components: [], connections: [] });
+  assert.equal(cleared.snapshot.canUndo, true);
+  assert.equal(cleared.snapshot.canRedo, false);
+  assert.equal(cleared.snapshot.confirmation, null);
+  assert.deepEqual(engine.calls, [
+    "removeConnection:10",
+    "removeConnection:11",
+    "removeConnection:12",
+    "removeComponent:1",
+    "removeComponent:2",
+    "removeComponent:3",
+    "removeComponent:4",
+  ]);
+});
+
+test("clear requires confirmation and does not reopen confirmation for an empty canvas", async () => {
+  const engine = new FakeEngine();
+  const session = createSession(engine);
+
+  const unconfirmed = await session.dispatch({ type: "confirm-clear" });
+  assert.equal(unconfirmed.ok, false);
+  assert.equal(unconfirmed.error.code, "confirmation_required");
+  assert.deepEqual(engine.calls, []);
+
+  await session.dispatch({ type: "request-clear" });
+  await session.dispatch({ type: "confirm-clear" });
+  const empty = await session.dispatch({ type: "request-clear" });
+  assert.equal(empty.ok, false);
+  assert.equal(empty.error.code, "nothing_to_clear");
+  assert.equal(empty.snapshot.confirmation, null);
+});
+
+test("undo and redo treat clear as one recoverable command with refreshed engine IDs", async () => {
+  const engine = new FakeEngine();
+  const session = createSession(engine);
+  await session.dispatch({ type: "select", selection: { kind: "component", id: "and-gate" } });
+  await session.dispatch({ type: "request-clear" });
+  await session.dispatch({ type: "confirm-clear" });
+
+  const restored = await session.dispatch({ type: "undo" });
+
+  assert.equal(restored.ok, true);
+  assert.deepEqual(restored.snapshot.document, createAndDemoDocument());
+  assert.deepEqual(restored.snapshot.selection, { kind: "component", id: "and-gate" });
+  assert.equal(restored.snapshot.canRedo, true);
+  assert.deepEqual(engine.calls.slice(-7), [
+    "addComponent:input",
+    "addComponent:input",
+    "addComponent:and",
+    "addComponent:output",
+    "addConnection:100->102",
+    "addConnection:101->102",
+    "addConnection:102->103",
+  ]);
+
+  const redone = await session.dispatch({ type: "redo" });
+
+  assert.equal(redone.ok, true);
+  assert.deepEqual(redone.snapshot.document, { components: [], connections: [] });
+  assert.deepEqual(engine.calls.slice(-7), [
+    "removeConnection:200",
+    "removeConnection:201",
+    "removeConnection:202",
+    "removeComponent:100",
+    "removeComponent:101",
+    "removeComponent:102",
+    "removeComponent:103",
+  ]);
+});
+
+test("clear compensates a partial component deletion and publishes refreshed bindings", async () => {
+  const engine = new FakeEngine();
+  engine.failNext("removeComponent:2");
+  let latestBindings: unknown = null;
+  const session = createEditorSession({
+    document: createAndDemoDocument(),
+    bindings: {
+      components: { "input-a": 1, "input-b": 2, "and-gate": 3, output: 4 },
+      connections: { "wire-a": 10, "wire-b": 11, "wire-output": 12 },
+    },
+  }, engine, {
+    onBindingsChanged(bindings) {
+      latestBindings = bindings;
+    },
+  });
+  await session.dispatch({ type: "request-clear" });
+
+  const result = await session.dispatch({ type: "confirm-clear" });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.snapshot.operation, "idle");
+  assert.deepEqual(result.snapshot.document, createAndDemoDocument());
+  assert.equal(result.snapshot.canUndo, false);
+  assert.deepEqual(latestBindings, {
+    components: { "input-a": 100, "input-b": 2, "and-gate": 3, output: 4 },
+    connections: { "wire-a": 200, "wire-b": 201, "wire-output": 202 },
+  });
+});
+
+test("clear enters recovery when compensation cannot restore a partial deletion", async () => {
+  const engine = new FakeEngine();
+  engine.failNext("removeComponent:2");
+  engine.failNext("addComponent:input");
+  const session = createSession(engine);
+  await session.dispatch({ type: "request-clear" });
+
+  const result = await session.dispatch({ type: "confirm-clear" });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "editor_recovery_required");
+  assert.equal(result.snapshot.operation, "recovery-required");
+  const blocked = await session.dispatch({ type: "undo" });
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.error.code, "editor_recovery_required");
+});
+
+test("clear preserves bound dangling connections when a component deletion is compensated", async () => {
+  const engine = new FakeEngine();
+  const session = createSession(engine);
+  await session.dispatch({ type: "delete-component", componentId: "and-gate" });
+  await session.dispatch({ type: "request-clear" });
+  engine.failNext("removeComponent:2");
+  const callsBeforeClear = engine.calls.length;
+
+  const result = await session.dispatch({ type: "confirm-clear" });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.snapshot.operation, "idle");
+  assert.deepEqual(
+    result.snapshot.document.connections.map((connection) => [connection.id, connection.danglingEndpoints]),
+    [
+      ["wire-a", ["target"]],
+      ["wire-b", ["target"]],
+      ["wire-output", ["source"]],
+    ],
+  );
+  assert.equal(
+    engine.calls.slice(callsBeforeClear).some((call) => call.startsWith("removeConnection:")),
+    false,
+  );
+});
+
+test("failed clear undo removes the objects it created and remains undoable", async () => {
+  const engine = new FakeEngine();
+  const session = createSession(engine);
+  await session.dispatch({ type: "request-clear" });
+  await session.dispatch({ type: "confirm-clear" });
+  engine.failNext("addConnection:101->102");
+
+  const result = await session.dispatch({ type: "undo" });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.snapshot.operation, "idle");
+  assert.deepEqual(result.snapshot.document, { components: [], connections: [] });
+  assert.equal(result.snapshot.canUndo, true);
+  assert.deepEqual(engine.calls.slice(-6), [
+    "addConnection:101->102",
+    "removeConnection:200",
+    "removeComponent:103",
+    "removeComponent:102",
+    "removeComponent:101",
+    "removeComponent:100",
+  ]);
+});
+
+test("failed clear undo preserves pre-existing dangling connection bindings", async () => {
+  const engine = new FakeEngine();
+  const session = createSession(engine);
+  await session.dispatch({ type: "delete-component", componentId: "and-gate" });
+  await session.dispatch({ type: "request-clear" });
+  await session.dispatch({ type: "confirm-clear" });
+  engine.failNext("addComponent:input");
+
+  const failedUndo = await session.dispatch({ type: "undo" });
+  assert.equal(failedUndo.ok, false);
+  assert.equal(failedUndo.snapshot.operation, "idle");
+
+  const restored = await session.dispatch({ type: "undo" });
+  assert.equal(restored.ok, true);
+  const callsBeforeDelete = engine.calls.length;
+  const deleted = await session.dispatch({ type: "delete-connection", connectionId: "wire-b" });
+
+  assert.equal(deleted.ok, true);
+  assert.deepEqual(engine.calls.slice(callsBeforeDelete), ["removeConnection:11"]);
+});
+
+test("clear handles local-only dangling wires without creating invalid engine connections", async () => {
+  const engine = new FakeEngine();
+  const session = createSession(engine);
+  await session.dispatch({ type: "delete-component", componentId: "and-gate" });
+  await session.dispatch({ type: "delete-connection", connectionId: "wire-a" });
+  await session.dispatch({ type: "undo" });
+  await session.dispatch({ type: "request-clear" });
+  const callsBeforeClear = [...engine.calls];
+
+  const cleared = await session.dispatch({ type: "confirm-clear" });
+  const restored = await session.dispatch({ type: "undo" });
+
+  assert.equal(cleared.ok, true);
+  assert.equal(restored.ok, true);
+  assert.deepEqual(
+    restored.snapshot.document.connections.map((connection) => [connection.id, connection.danglingEndpoints]),
+    [
+      ["wire-a", ["target"]],
+      ["wire-b", ["target"]],
+      ["wire-output", ["source"]],
+    ],
+  );
+  assert.equal(
+    engine.calls.slice(callsBeforeClear.length).some((call) => call.startsWith("addConnection:")),
+    false,
+  );
+  assert.equal(
+    engine.calls.slice(callsBeforeClear.length).some((call) => call.startsWith("removeConnection:")),
+    false,
+  );
 });

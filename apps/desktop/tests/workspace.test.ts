@@ -219,3 +219,52 @@ test("rebinds simulation to the new engine ID after undo", async () => {
   assert.deepEqual(engine.calls[0], { type: "setInput", componentId: 45, value: 1 });
   assert.equal(JSON.stringify(session.snapshot()).includes("41"), false);
 });
+
+test("disables simulation after clear and rebinds it after one undo", async () => {
+  const engine = new FakeEngine();
+  const workspace = createWorkspace(engine);
+  await workspace.checkEngine();
+  const loaded = await workspace.loadDemoCircuit();
+  assert.ok(loaded.bindings);
+  const session = createEditorSession(
+    {
+      document: createAndDemoDocument(),
+      bindings: {
+        components: {
+          "input-a": loaded.bindings.components.inputA,
+          "input-b": loaded.bindings.components.inputB,
+          "and-gate": loaded.bindings.components.andGate,
+          output: loaded.bindings.components.output,
+        },
+        connections: {
+          "wire-a": loaded.bindings.connections.wireA,
+          "wire-b": loaded.bindings.connections.wireB,
+          "wire-output": loaded.bindings.connections.wireOutput,
+        },
+      },
+    },
+    createProtocolEnginePort(engine),
+    {
+      onBindingsChanged(bindings) {
+        const inputA = bindings.components["input-a"];
+        const inputB = bindings.components["input-b"];
+        const andGate = bindings.components["and-gate"];
+        const output = bindings.components.output;
+        const hasCompleteWiring = ["wire-a", "wire-b", "wire-output"]
+          .every((id) => bindings.connections[id] !== undefined);
+        workspace.rebindSimulation(
+          inputA === undefined || inputB === undefined || andGate === undefined || output === undefined || !hasCompleteWiring
+            ? null
+            : { inputA, inputB, andGate, output },
+        );
+      },
+    },
+  );
+
+  await session.dispatch({ type: "request-clear" });
+  await session.dispatch({ type: "confirm-clear" });
+  assert.equal(workspace.snapshot().canRun, false);
+
+  await session.dispatch({ type: "undo" });
+  assert.equal(workspace.snapshot().canRun, true);
+});

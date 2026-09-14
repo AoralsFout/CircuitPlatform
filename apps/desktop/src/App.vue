@@ -2,6 +2,7 @@
 import { onBeforeUnmount, onMounted } from "vue";
 import BottomPanel from "./components/BottomPanel.vue";
 import CircuitCanvas from "./components/CircuitCanvas.vue";
+import ClearCanvasDialog from "./components/ClearCanvasDialog.vue";
 import EditorToolbar from "./components/EditorToolbar.vue";
 import SettingsPage from "./components/SettingsPage.vue";
 import ToolRail from "./components/ToolRail.vue";
@@ -21,6 +22,9 @@ const {
   toggleInput,
   select,
   deleteSelection,
+  requestClear,
+  confirmClear,
+  cancelCurrentOperation,
   undo,
   redo,
 } = useWorkspace();
@@ -69,9 +73,10 @@ function onEditorKeydown(event: KeyboardEvent): void {
   });
   if (!shortcut) return;
   event.preventDefault();
+  if (editorState.value?.confirmation && shortcut !== "cancel") return;
   if (shortcut === "undo") void undo();
   else if (shortcut === "redo") void redo();
-  else if (shortcut === "cancel") void select(null);
+  else if (shortcut === "cancel") void cancelCurrentOperation();
   else void deleteSelection();
 }
 
@@ -116,9 +121,10 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
         <EditorToolbar
           :zoom-label="zoomLabel"
           :can-run="state.canRun"
-          :can-undo="editorState?.operation === 'idle' && editorState.canUndo"
-          :can-redo="editorState?.operation === 'idle' && editorState.canRedo"
-          :can-delete="editorState?.operation === 'idle' && Boolean(editorState.selection)"
+          :can-undo="editorState?.operation === 'idle' && !editorState.confirmation && editorState.canUndo"
+          :can-redo="editorState?.operation === 'idle' && !editorState.confirmation && editorState.canRedo"
+          :can-delete="editorState?.operation === 'idle' && !editorState.confirmation && Boolean(editorState.selection)"
+          :can-clear="editorState?.operation === 'idle' && !editorState.confirmation && (editorState.document.components.length > 0 || editorState.document.connections.length > 0)"
           :simulation-state="state.simulationState"
           @adjust-zoom="adjustZoom"
           @reset-zoom="zoom = 100"
@@ -126,6 +132,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           @undo="undo"
           @redo="redo"
           @delete-selection="deleteSelection"
+          @request-clear="requestClear"
         />
         <CircuitCanvas
           :zoom="zoom"
@@ -142,6 +149,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           :component-visibility="componentVisibility"
           :wire-visibility="wireVisibility"
           :wire-dangling="wireDangling"
+          :is-empty="Boolean(editorState && editorState.document.components.length === 0 && editorState.document.connections.length === 0)"
           @select-node="selectNode"
           @select-connection="selectConnection"
         />
@@ -181,5 +189,13 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
         @check-engine="checkEngine"
       />
     </section>
+
+    <ClearCanvasDialog
+      v-if="editorState?.confirmation?.type === 'clear-document'"
+      :component-count="editorState.confirmation.componentCount"
+      :connection-count="editorState.confirmation.connectionCount"
+      @confirm="confirmClear"
+      @cancel="cancelCurrentOperation"
+    />
   </main>
 </template>

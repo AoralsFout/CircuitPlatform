@@ -90,8 +90,17 @@ export type EditorCommand =
   | { type: "delete-selected" }
   | { type: "delete-component"; componentId: EditorComponentId }
   | { type: "delete-connection"; connectionId: EditorConnectionId }
+  | { type: "request-clear" }
+  | { type: "confirm-clear" }
+  | { type: "cancel-current-operation" }
   | { type: "undo" }
   | { type: "redo" };
+
+export interface EditorConfirmation {
+  type: "clear-document";
+  componentCount: number;
+  connectionCount: number;
+}
 
 export interface EditorSnapshot {
   document: EditorDocument;
@@ -99,6 +108,7 @@ export interface EditorSnapshot {
   operation: "idle" | "busy" | "recovery-required";
   canUndo: boolean;
   canRedo: boolean;
+  confirmation: EditorConfirmation | null;
   error: EngineError | null;
 }
 
@@ -109,7 +119,7 @@ export type CommandResult =
 export interface EditorSession {
   /** 返回不包含任何 C++ engine ID 的编辑器快照。 */
   snapshot(): EditorSnapshot;
-  /** 分发编辑器命令；并发结构命令会以稳定 busy 错误拒绝。 */
+  /** 分发编辑器命令；清空需先请求确认，并发结构命令会以稳定 busy 错误拒绝。 */
   dispatch(command: EditorCommand): Promise<CommandResult>;
   /** 订阅快照变化，并返回取消订阅函数。 */
   subscribe(listener: (snapshot: EditorSnapshot) => void): () => void;
@@ -146,7 +156,22 @@ interface DeleteConnectionFrame {
   target: EditorConnection["target"];
 }
 
-type HistoryFrame = DeleteComponentFrame | DeleteConnectionFrame;
+interface ClearDocumentFrame {
+  type: "clear-document";
+  selectionBefore: EditorSelection;
+  components: Array<{
+    id: EditorComponentId;
+    kind: ComponentKindName;
+  }>;
+  connections: Array<{
+    id: EditorConnectionId;
+    source: EditorConnection["source"];
+    target: EditorConnection["target"];
+    wasLive: boolean;
+  }>;
+}
+
+type HistoryFrame = DeleteComponentFrame | DeleteConnectionFrame | ClearDocumentFrame;
 
 const busyError: EngineError = {
   code: "editor_busy",
@@ -157,6 +182,24 @@ const busyError: EngineError = {
 const noSelectionError: EngineError = {
   code: "nothing_selected",
   message: "没有选中的元件或连接。",
+  retryable: false,
+};
+
+const nothingToClearError: EngineError = {
+  code: "nothing_to_clear",
+  message: "画布已经是空的。",
+  retryable: false,
+};
+
+const confirmationRequiredError: EngineError = {
+  code: "confirmation_required",
+  message: "清空画布前需要确认。",
+  retryable: false,
+};
+
+const confirmationPendingError: EngineError = {
+  code: "confirmation_pending",
+  message: "请先确认或取消当前操作。",
   retryable: false,
 };
 
@@ -272,6 +315,7 @@ function visibleSnapshot(
   operation: EditorSnapshot["operation"],
   undoStack: readonly HistoryFrame[],
   redoStack: readonly HistoryFrame[],
+  confirmation: EditorConfirmation | null,
   error: EngineError | null,
 ): EditorSnapshot {
   return {
@@ -280,6 +324,7 @@ function visibleSnapshot(
     operation,
     canUndo: undoStack.length > 0,
     canRedo: redoStack.length > 0,
+    confirmation: confirmation ? { ...confirmation } : null,
     error: error ? { ...error } : null,
   };
 }
@@ -313,6 +358,7 @@ export function createEditorSession(
   const undoStack: HistoryFrame[] = [];
   const redoStack: HistoryFrame[] = [];
   let selection: EditorSelection = null;
+  let confirmation: EditorConfirmation | null = null;
   let operation: EditorSnapshot["operation"] = "idle";
   let error: EngineError | null = null;
 
@@ -344,7 +390,7 @@ export function createEditorSession(
   }
 
   function currentSnapshot(): EditorSnapshot {
-    return visibleSnapshot(document, selection, operation, undoStack, redoStack, error);
+    return visibleSnapshot(document, selection, operation, undoStack, redoStack, confirmation, error);
   }
 
   function publish(): EditorSnapshot {
@@ -415,6 +461,47 @@ export function createEditorSession(
     };
   }
 
+  function makeClearDocumentFrame(): ClearDocumentFrame | null {
+    const components = [...document.components.values()]
+      .filter((component) => component.lifecycle === "active")
+      .map((component) => ({ id: component.id, kind: component.kind }));
+    const connections = [...document.connections.values()]
+      .filter((connection) => connection.lifecycle === "visible")
+      .map((connection) => ({
+        id: connection.id,
+        source: { ...connection.source, point: { ...connection.source.point } },
+        target: { ...connection.target, point: { ...connection.target.point } },
+        wasLive: isLiveConnection(connection),
+      }));
+    if (components.length === 0 && connections.length === 0) return null;
+    return {
+      type: "clear-document",
+      selectionBefore: selection ? { ...selection } : null,
+      components,
+      connections,
+    };
+  }
+
+  function hideClearDocument(frame: ClearDocumentFrame): void {
+    for (const component of frame.components) setComponentDeleted(document, component.id);
+    for (const connectionPlan of frame.connections) {
+      const connection = document.connections.get(connectionPlan.id);
+      if (!connection) continue;
+      connection.lifecycle = "hidden";
+      connection.hiddenReason = "pending-operation";
+    }
+  }
+
+  function restoreClearDocument(frame: ClearDocumentFrame): void {
+    for (const component of frame.components) restoreComponent(document, component.id);
+    for (const connectionPlan of frame.connections) {
+      const connection = document.connections.get(connectionPlan.id);
+      if (!connection) continue;
+      connection.lifecycle = "visible";
+      delete connection.hiddenReason;
+    }
+  }
+
   async function compensateNewComponent(
     componentId: EngineComponentId,
     connectionIds: readonly EngineConnectionId[],
@@ -427,6 +514,55 @@ export function createEditorSession(
     return removedComponent.ok || isAlreadyAbsent(removedComponent.error)
       ? null
       : removedComponent.error;
+  }
+
+  async function compensateCreatedGraph(
+    componentIds: readonly EngineComponentId[],
+    connectionIds: readonly EngineConnectionId[],
+  ): Promise<EngineError | null> {
+    let firstError: EngineError | null = null;
+    for (const connectionId of [...connectionIds].reverse()) {
+      const removed = await call(() => engine.removeConnection(connectionId));
+      if (!removed.ok && !isAlreadyAbsent(removed.error)) firstError ??= removed.error;
+    }
+    for (const componentId of [...componentIds].reverse()) {
+      const removed = await call(() => engine.removeComponent(componentId));
+      if (!removed.ok && !isAlreadyAbsent(removed.error)) firstError ??= removed.error;
+    }
+    return firstError;
+  }
+
+  async function compensateClearFailure(
+    frame: ClearDocumentFrame,
+    removedComponents: readonly ClearDocumentFrame["components"][number][],
+    removedConnections: readonly ClearDocumentFrame["connections"][number][],
+  ): Promise<EngineError | null> {
+    for (const component of removedComponents) {
+      const added = await call(() => engine.addComponent(component.kind));
+      if (!added.ok) return added.error;
+      bindings.components[component.id] = added.value.componentId;
+    }
+    for (const connection of removedConnections) {
+      delete bindings.connections[connection.id];
+      if (!connection.wasLive) continue;
+      const sourceComponentId = bindings.components[connection.source.componentId];
+      const targetComponentId = bindings.components[connection.target.componentId];
+      if (sourceComponentId === undefined || targetComponentId === undefined) {
+        return recoveryError("清空补偿所需的连接端点没有有效引擎绑定。");
+      }
+      const added = await call(() => engine.addConnection({
+        sourceComponentId,
+        sourcePort: connection.source.port,
+        targetComponentId,
+        targetPort: connection.target.port,
+      }));
+      if (!added.ok) return added.error;
+      bindings.connections[connection.id] = added.value.connectionId;
+    }
+    restoreClearDocument(frame);
+    selection = frame.selectionBefore;
+    publishBindings();
+    return null;
   }
 
   async function deleteComponent(frame: DeleteComponentFrame): Promise<CommandResult> {
@@ -473,6 +609,71 @@ export function createEditorSession(
 
     connection.lifecycle = "deleted";
     delete connection.hiddenReason;
+    undoStack.push(frame);
+    redoStack.length = 0;
+    selection = null;
+    publishBindings();
+    return { ok: true, snapshot: finishOperation() };
+  }
+
+  async function clearDocument(frame: ClearDocumentFrame): Promise<CommandResult> {
+    for (const component of frame.components) {
+      if (bindings.components[component.id] === undefined) {
+        return fail(recoveryError("清空所需的元件没有有效引擎绑定。"));
+      }
+    }
+    for (const connection of frame.connections) {
+      if (connection.wasLive && bindings.connections[connection.id] === undefined) {
+        return fail(recoveryError("清空所需的有效连接没有引擎绑定。"));
+      }
+    }
+
+    hideClearDocument(frame);
+    publish();
+    const removedConnections: ClearDocumentFrame["connections"] = [];
+    const removedComponents: ClearDocumentFrame["components"] = [];
+
+    for (const connection of frame.connections) {
+      if (!connection.wasLive) continue;
+      const engineId = bindings.connections[connection.id];
+      if (engineId === undefined) continue;
+      const removed = await call(() => engine.removeConnection(engineId));
+      if (!removed.ok && !isAlreadyAbsent(removed.error)) {
+        const compensationError = await compensateClearFailure(frame, removedComponents, removedConnections);
+        return compensationError
+          ? enterRecovery(recoveryError(`清空失败且连接补偿未完成：${compensationError.message}`))
+          : fail(removed.error);
+      }
+      removedConnections.push(connection);
+      delete bindings.connections[connection.id];
+    }
+
+    for (const component of frame.components) {
+      const engineId = bindings.components[component.id];
+      if (engineId === undefined) {
+        const compensationError = await compensateClearFailure(frame, removedComponents, removedConnections);
+        return compensationError
+          ? enterRecovery(recoveryError(`清空失败且元件补偿未完成：${compensationError.message}`))
+          : fail(recoveryError("清空所需的元件绑定在操作期间丢失。"));
+      }
+      const removed = await call(() => engine.removeComponent(engineId));
+      if (!removed.ok && !isAlreadyAbsent(removed.error)) {
+        const compensationError = await compensateClearFailure(frame, removedComponents, removedConnections);
+        return compensationError
+          ? enterRecovery(recoveryError(`清空失败且元件补偿未完成：${compensationError.message}`))
+          : fail(removed.error);
+      }
+      removedComponents.push(component);
+      delete bindings.components[component.id];
+    }
+
+    for (const connectionPlan of frame.connections) {
+      const connection = document.connections.get(connectionPlan.id);
+      if (!connection) continue;
+      connection.lifecycle = "deleted";
+      delete connection.hiddenReason;
+      if (connectionPlan.wasLive) delete bindings.connections[connection.id];
+    }
     undoStack.push(frame);
     redoStack.length = 0;
     selection = null;
@@ -583,10 +784,72 @@ export function createEditorSession(
     return { ok: true, snapshot: finishOperation() };
   }
 
+  async function undoClearDocument(frame: ClearDocumentFrame): Promise<CommandResult> {
+    const newComponentIds: EngineComponentId[] = [];
+    const newConnectionIds: EngineConnectionId[] = [];
+    const rollback = async (): Promise<EngineError | null> => {
+      const compensationError = await compensateCreatedGraph(newComponentIds, newConnectionIds);
+      if (!compensationError) {
+        for (const component of frame.components) delete bindings.components[component.id];
+        for (const connection of frame.connections) {
+          if (connection.wasLive) delete bindings.connections[connection.id];
+        }
+      }
+      return compensationError;
+    };
+
+    for (const component of frame.components) {
+      const added = await call(() => engine.addComponent(component.kind));
+      if (!added.ok) {
+        const compensationError = await rollback();
+        return compensationError
+          ? enterRecovery(recoveryError(`撤销清空失败且补偿未完成：${compensationError.message}`))
+          : fail(added.error);
+      }
+      bindings.components[component.id] = added.value.componentId;
+      newComponentIds.push(added.value.componentId);
+    }
+
+    for (const connection of frame.connections) {
+      if (!connection.wasLive) continue;
+      delete bindings.connections[connection.id];
+      const sourceComponentId = bindings.components[connection.source.componentId];
+      const targetComponentId = bindings.components[connection.target.componentId];
+      if (sourceComponentId === undefined || targetComponentId === undefined) {
+        const compensationError = await rollback();
+        return compensationError
+          ? enterRecovery(recoveryError(`撤销清空失败且补偿未完成：${compensationError.message}`))
+          : fail(recoveryError("撤销清空所需的连接端点没有有效引擎绑定。"));
+      }
+      const added = await call(() => engine.addConnection({
+        sourceComponentId,
+        sourcePort: connection.source.port,
+        targetComponentId,
+        targetPort: connection.target.port,
+      }));
+      if (!added.ok) {
+        const compensationError = await rollback();
+        return compensationError
+          ? enterRecovery(recoveryError(`撤销清空失败且补偿未完成：${compensationError.message}`))
+          : fail(added.error);
+      }
+      bindings.connections[connection.id] = added.value.connectionId;
+      newConnectionIds.push(added.value.connectionId);
+    }
+
+    restoreClearDocument(frame);
+    selection = frame.selectionBefore;
+    undoStack.pop();
+    redoStack.push(frame);
+    publishBindings();
+    return { ok: true, snapshot: finishOperation() };
+  }
+
   async function undo(): Promise<CommandResult> {
     const frame = undoStack[undoStack.length - 1];
     if (!frame) return fail({ code: "nothing_to_undo", message: "没有可撤销的操作。", retryable: false });
     if (frame.type === "delete-component") return undoDeleteComponent(frame);
+    if (frame.type === "clear-document") return undoClearDocument(frame);
     return undoDeleteConnection(frame);
   }
 
@@ -598,6 +861,13 @@ export function createEditorSession(
       const refreshed = makeDeleteComponentFrame(frame.componentId);
       if (!refreshed) return fail(recoveryError("重做所需的元件不存在。"));
       const result = await deleteComponent(refreshed);
+      if (result.ok) redoStack.push(...remainingRedo);
+      return result;
+    }
+    if (frame.type === "clear-document") {
+      const refreshed = makeClearDocumentFrame();
+      if (!refreshed) return fail(recoveryError("重做清空所需的文档不存在。"));
+      const result = await clearDocument(refreshed);
       if (result.ok) redoStack.push(...remainingRedo);
       return result;
     }
@@ -620,11 +890,42 @@ export function createEditorSession(
     if (operation === "busy") {
       return { ok: false, error: busyError, snapshot: currentSnapshot() };
     }
+    if (
+      confirmation &&
+      command.type !== "confirm-clear" &&
+      command.type !== "cancel-current-operation"
+    ) {
+      error = confirmationPendingError;
+      const snapshot = publish();
+      return { ok: false, error: confirmationPendingError, snapshot };
+    }
     if (!beginOperation()) return { ok: false, error: busyError, snapshot: currentSnapshot() };
 
     if (command.type === "select") {
       selection = command.selection;
       return { ok: true, snapshot: finishOperation() };
+    }
+    if (command.type === "request-clear") {
+      const frame = makeClearDocumentFrame();
+      if (!frame) return fail(nothingToClearError);
+      confirmation = {
+        type: "clear-document",
+        componentCount: frame.components.length,
+        connectionCount: frame.connections.length,
+      };
+      return { ok: true, snapshot: finishOperation() };
+    }
+    if (command.type === "cancel-current-operation") {
+      if (confirmation) confirmation = null;
+      else selection = null;
+      return { ok: true, snapshot: finishOperation() };
+    }
+    if (command.type === "confirm-clear") {
+      if (!confirmation) return fail(confirmationRequiredError);
+      const frame = makeClearDocumentFrame();
+      confirmation = null;
+      if (!frame) return fail(nothingToClearError);
+      return clearDocument(frame);
     }
     if (command.type === "undo") return undo();
     if (command.type === "redo") return redo();

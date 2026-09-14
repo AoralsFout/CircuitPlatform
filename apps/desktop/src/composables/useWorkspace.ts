@@ -25,6 +25,12 @@ interface WorkspaceBinding {
   toggleInput(key: InputKey): Promise<void>;
   select(selection: EditorSelection): Promise<void>;
   deleteSelection(): Promise<void>;
+  /** 请求显示清空确认；此步骤不会调用引擎。 */
+  requestClear(): Promise<void>;
+  /** 确认并执行可撤销的清空事务。 */
+  confirmClear(): Promise<void>;
+  /** 优先取消待确认操作；没有确认时清除当前选择。 */
+  cancelCurrentOperation(): Promise<void>;
   undo(): Promise<void>;
   redo(): Promise<void>;
 }
@@ -132,6 +138,9 @@ export function useWorkspace(): WorkspaceBinding {
     toggleInput,
     select: (selection) => dispatch({ type: "select", selection }),
     deleteSelection: () => dispatch({ type: "delete-selected" }),
+    requestClear: () => dispatch({ type: "request-clear" }),
+    confirmClear: () => dispatch({ type: "confirm-clear" }),
+    cancelCurrentOperation: () => dispatch({ type: "cancel-current-operation" }),
     undo: () => dispatch({ type: "undo" }),
     redo: () => dispatch({ type: "redo" }),
   };
