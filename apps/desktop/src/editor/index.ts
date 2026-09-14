@@ -32,6 +32,8 @@ export interface EditorConnection {
   target: EditorEndpoint;
   lifecycle: "visible" | "hidden" | "deleted";
   danglingEndpoints: readonly EditorEndpointSide[];
+  /** 可选的显式正交 Route；首尾点分别对应 source/target，旧文档可由投影层补齐。 */
+  route?: readonly Point[];
   hiddenReason?: "pending-operation";
 }
 
@@ -145,6 +147,7 @@ interface DeleteComponentFrame {
     id: EditorConnectionId;
     source: EditorConnection["source"];
     target: EditorConnection["target"];
+    route?: readonly Point[];
   }>;
 }
 
@@ -222,6 +225,7 @@ function cloneVisibleDocument(document: MutableDocument): EditorDocument {
         ...connection,
         source: { ...connection.source, point: { ...connection.source.point } },
         target: { ...connection.target, point: { ...connection.target.point } },
+        ...(connection.route ? { route: connection.route.map((point) => ({ ...point })) } : {}),
         danglingEndpoints: [
           ...(!isAttached(connection.source.componentId) ? ["source" as const] : []),
           ...(!isAttached(connection.target.componentId) ? ["target" as const] : []),
@@ -245,6 +249,7 @@ function toMutableDocument(document: EditorDocument): MutableDocument {
           ...connection,
           source: { ...connection.source, point: { ...connection.source.point } },
           target: { ...connection.target, point: { ...connection.target.point } },
+          ...(connection.route ? { route: connection.route.map((point) => ({ ...point })) } : {}),
           danglingEndpoints: [...connection.danglingEndpoints],
         },
       ]),
@@ -302,9 +307,9 @@ export function createAndDemoDocument(): EditorDocument {
       { id: "output", kind: "output", displayName: "输出", position: { x: 800, y: 240 }, lifecycle: "active" },
     ],
     connections: [
-      { id: "wire-a", source: { componentId: "input-a", port: "out", point: { x: 210, y: 150 } }, target: { componentId: "and-gate", port: "in1", point: { x: 435, y: 250 } }, lifecycle: "visible", danglingEndpoints: [] },
-      { id: "wire-b", source: { componentId: "input-b", port: "out", point: { x: 210, y: 405 } }, target: { componentId: "and-gate", port: "in2", point: { x: 435, y: 290 } }, lifecycle: "visible", danglingEndpoints: [] },
-      { id: "wire-output", source: { componentId: "and-gate", port: "out", point: { x: 585, y: 270 } }, target: { componentId: "output", port: "in", point: { x: 805, y: 270 } }, lifecycle: "visible", danglingEndpoints: [] },
+      { id: "wire-a", source: { componentId: "input-a", port: "out", point: { x: 210, y: 150 } }, target: { componentId: "and-gate", port: "in1", point: { x: 435, y: 250 } }, route: [{ x: 210, y: 150 }, { x: 330, y: 150 }, { x: 330, y: 250 }, { x: 435, y: 250 }], lifecycle: "visible", danglingEndpoints: [] },
+      { id: "wire-b", source: { componentId: "input-b", port: "out", point: { x: 210, y: 405 } }, target: { componentId: "and-gate", port: "in2", point: { x: 435, y: 290 } }, route: [{ x: 210, y: 405 }, { x: 330, y: 405 }, { x: 330, y: 290 }, { x: 435, y: 290 }], lifecycle: "visible", danglingEndpoints: [] },
+      { id: "wire-output", source: { componentId: "and-gate", port: "out", point: { x: 585, y: 270 } }, target: { componentId: "output", port: "in", point: { x: 805, y: 270 } }, route: [{ x: 585, y: 270 }, { x: 805, y: 270 }], lifecycle: "visible", danglingEndpoints: [] },
     ],
   };
 }
@@ -448,6 +453,7 @@ export function createEditorSession(
         id: connection.id,
         source: { ...connection.source, point: { ...connection.source.point } },
         target: { ...connection.target, point: { ...connection.target.point } },
+        ...(connection.route ? { route: connection.route.map((point) => ({ ...point })) } : {}),
       }));
     return {
       type: "delete-component",

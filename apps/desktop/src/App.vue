@@ -48,6 +48,9 @@ const {
   selectedNodeDescription,
   selectedNodeId,
   zoomLabel,
+  canvasScene,
+  viewport,
+  interaction,
   selectNode,
   selectConnection,
   selectRailPage,
@@ -135,23 +138,11 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           @request-clear="requestClear"
         />
         <CircuitCanvas
-          :zoom="zoom"
-          :input-a="state.inputA"
-          :input-b="state.inputB"
-          :output-value="state.outputValue"
-          :output-description="state.outputDescription"
-          :engine-state="state.engineState"
-          :engine-message="state.message"
-          :has-lab="state.hasLab"
-          :waveform-length="state.waveform.length"
-          :selected-node="selectedNode"
-          :selected-connection="selectedConnection"
-          :component-visibility="componentVisibility"
-          :wire-visibility="wireVisibility"
-          :wire-dangling="wireDangling"
-          :is-empty="Boolean(editorState && editorState.document.components.length === 0 && editorState.document.connections.length === 0)"
-          @select-node="selectNode"
-          @select-connection="selectConnection"
+          :scene="canvasScene"
+          :viewport="viewport"
+          :interaction="interaction"
+          @select-node="select({ kind: 'component', id: $event })"
+          @select-connection="select({ kind: 'connection', id: $event })"
         />
         <BottomPanel
           :bottom-tab="bottomTab"
