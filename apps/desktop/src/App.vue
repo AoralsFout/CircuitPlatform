@@ -21,6 +21,7 @@ const {
   runSimulation,
   toggleInput,
   select,
+  moveComponent,
   deleteSelection,
   requestClear,
   confirmClear,
@@ -58,7 +59,11 @@ const {
   setViewport,
   fitViewport,
   resizeCanvas,
-} = useEditorState(state, editorState, select);
+  startNodeDrag,
+  moveNodeDrag,
+  endNodeDrag,
+  cancelNodeDrag,
+} = useEditorState(state, editorState, select, moveComponent);
 const {
   preference: themePreference,
   label: themeLabel,
@@ -146,6 +151,10 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           :interaction="interaction"
           @select-node="select({ kind: 'component', id: $event })"
           @select-connection="select({ kind: 'connection', id: $event })"
+          @node-drag-start="startNodeDrag($event.nodeId, $event.pointerWorld)"
+          @node-drag-move="moveNodeDrag($event.pointerWorld, $event.altKey)"
+          @node-drag-end="endNodeDrag()"
+          @node-drag-cancel="cancelNodeDrag()"
           @viewport-change="setViewport"
           @resize="resizeCanvas"
         />

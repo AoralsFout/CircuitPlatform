@@ -4,6 +4,7 @@ import {
   applyWheelViewport,
   isViewportPanPointer,
   panViewport,
+  screenToWorld,
   type CanvasNode,
   type CanvasScene,
   type CanvasWire,
@@ -22,12 +23,19 @@ const emit = defineEmits<{
   selectConnection: [connectionId: string];
   viewportChange: [viewport: ViewportState];
   resize: [width: number, height: number];
+  nodeDragStart: [payload: { nodeId: string; pointerWorld: { x: number; y: number } }];
+  nodeDragMove: [payload: { pointerWorld: { x: number; y: number }; altKey: boolean }];
+  nodeDragEnd: [];
+  nodeDragCancel: [];
 }>();
 
 const canvasElement = ref<HTMLElement | null>(null);
 let resizeObserver: ResizeObserver | null = null;
 let spacePressed = false;
 let panPointer: { pointerId: number; x: number; y: number } | null = null;
+let nodeDragPointer: { pointerId: number; nodeId: string } | null = null;
+let nodeDidMove = false;
+let suppressNodeClick = false;
 
 function signalClass(value: 0 | 1 | "X"): string {
   if (value === 1) return "signal-state--high";
@@ -81,6 +89,20 @@ function pointerInCanvas(event: PointerEvent | WheelEvent): { x: number; y: numb
   };
 }
 
+function pointerInWorld(event: PointerEvent): { x: number; y: number } {
+  return screenToWorld(pointerInCanvas(event), props.viewport);
+}
+
+function onNodePointerDown(event: PointerEvent, node: CanvasNode): void {
+  if (event.button !== 0 || spacePressed) return;
+  nodeDragPointer = { pointerId: event.pointerId, nodeId: node.id };
+  nodeDidMove = false;
+  canvasElement.value?.setPointerCapture(event.pointerId);
+  emit("nodeDragStart", { nodeId: node.id, pointerWorld: pointerInWorld(event) });
+  event.preventDefault();
+  event.stopPropagation();
+}
+
 function onWheel(event: WheelEvent): void {
   event.preventDefault();
   emit("viewportChange", applyWheelViewport(props.viewport, event, pointerInCanvas(event)));
@@ -95,6 +117,12 @@ function onPointerDown(event: PointerEvent): void {
 }
 
 function onPointerMove(event: PointerEvent): void {
+  if (nodeDragPointer?.pointerId === event.pointerId) {
+    nodeDidMove = true;
+    emit("nodeDragMove", { pointerWorld: pointerInWorld(event), altKey: event.altKey });
+    event.preventDefault();
+    return;
+  }
   if (!panPointer || panPointer.pointerId !== event.pointerId) return;
   const delta = { x: event.clientX - panPointer.x, y: event.clientY - panPointer.y };
   panPointer = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
@@ -103,9 +131,27 @@ function onPointerMove(event: PointerEvent): void {
 }
 
 function onPointerUp(event: PointerEvent): void {
+  if (nodeDragPointer?.pointerId === event.pointerId) {
+    if (canvasElement.value?.hasPointerCapture(event.pointerId)) canvasElement.value.releasePointerCapture(event.pointerId);
+    if (event.type === "pointercancel") emit("nodeDragCancel");
+    else emit("nodeDragEnd");
+    nodeDragPointer = null;
+    suppressNodeClick = event.type !== "pointercancel" && nodeDidMove;
+    nodeDidMove = false;
+    event.preventDefault();
+    return;
+  }
   if (!panPointer || panPointer.pointerId !== event.pointerId) return;
   if (canvasElement.value?.hasPointerCapture(event.pointerId)) canvasElement.value.releasePointerCapture(event.pointerId);
   panPointer = null;
+}
+
+function onNodeClick(nodeId: string): void {
+  if (suppressNodeClick) {
+    suppressNodeClick = false;
+    return;
+  }
+  emit("selectNode", nodeId);
 }
 
 function onKeydown(event: KeyboardEvent): void {
@@ -156,7 +202,7 @@ onBeforeUnmount(() => {
           </template>
           <path v-if="interaction.connectionDraft" class="signal-wire signal-wire--draft" :d="pathFor(interaction.connectionDraft)" />
         </svg>
-        <article v-for="node in scene.nodes" :key="node.id" class="circuit-node" :class="{ 'circuit-node--selected': node.selected, 'circuit-node--dragging': interaction.draggingNodeId === node.id }" :style="nodeStyle(node)" role="button" tabindex="0" :aria-label="`选择${node.displayName}`" @click="emit('selectNode', node.id)" @keydown="onNodeKeydown($event, node.id)">
+        <article v-for="node in scene.nodes" :key="node.id" class="circuit-node" :class="{ 'circuit-node--selected': node.selected, 'circuit-node--dragging': interaction.draggingNodeId === node.id }" :style="nodeStyle(node)" role="button" tabindex="0" :aria-label="`选择${node.displayName}`" @pointerdown.stop="onNodePointerDown($event, node)" @click="onNodeClick(node.id)" @keydown="onNodeKeydown($event, node.id)">
           <span class="node-tag">{{ node.kind.toUpperCase() }} / {{ node.ports.length }}</span>
           <strong>{{ node.symbol }} <span class="node-display-name">{{ node.displayName }}</span></strong>
           <span class="node-description">{{ node.description }}</span>

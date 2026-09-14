@@ -1,4 +1,13 @@
 export {
+  NODE_GRID_SIZE,
+  createNodeDragController,
+  snapNodePosition,
+  type NodeDragController,
+  type NodeDragControllerOptions,
+  type NodeDragPreview,
+} from "./drag.ts";
+
+export {
   emptyCanvasScene,
   createCanvasScene,
   projectCanvasScene,

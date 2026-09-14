@@ -235,6 +235,8 @@ export interface CanvasScene {
 export interface InteractionState {
   focusedId: string | null;
   draggingNodeId: string | null;
+  /** 拖动期间的临时世界坐标；只存在于交互层，不写入 EditorSnapshot。 */
+  dragPreview?: { nodeId: string; position: Point } | null;
   connectionDraft: readonly Point[] | null;
   emptyState?: { title: string; message: string };
 }
@@ -264,6 +266,35 @@ function routeFor(connection: EditorConnection): readonly Point[] {
     { x: midpoint, y: end.y },
     { ...end },
   ];
+}
+
+function routeBetween(start: Point, end: Point, waypoints: readonly Point[] = []): Point[] {
+  if (waypoints.length === 0) {
+    const midpoint = start.x + (end.x - start.x) / 2;
+    return [{ ...start }, { x: midpoint, y: start.y }, { x: midpoint, y: end.y }, { ...end }];
+  }
+  const route: Point[] = [{ ...start }];
+  const first = waypoints[0];
+  if (route[0].x !== first.x && route[0].y !== first.y) route.push({ x: first.x, y: route[0].y });
+  route.push(...waypoints.map((point) => ({ ...point })));
+  const last = route[route.length - 1];
+  if (last.x !== end.x && last.y !== end.y) route.push({ x: end.x, y: last.y });
+  route.push({ ...end });
+  return route;
+}
+
+function previewEndpoint(
+  endpoint: EditorConnection["source"],
+  components: ReadonlyMap<string, EditorComponent>,
+  previewPositions: Readonly<Record<string, Point>> | undefined,
+): Point {
+  const preview = previewPositions?.[endpoint.componentId];
+  const component = components.get(endpoint.componentId);
+  if (!preview || !component) return { ...endpoint.point };
+  return {
+    x: preview.x + endpoint.point.x - component.position.x,
+    y: preview.y + endpoint.point.y - component.position.y,
+  };
 }
 
 function getSignal(snapshot: SimulationSnapshot, componentId: string, portId: string): Signal {
@@ -302,14 +333,16 @@ export function projectCanvasScene(
   editorSnapshot: EditorSnapshot | null,
   simulationSnapshot: SimulationSnapshot,
   registry: ComponentDefinitionRegistry,
+  previewPositions?: Readonly<Record<string, Point>>,
 ): CanvasScene {
   if (!editorSnapshot) return { nodes: [], wires: [], bounds: { min: { x: 0, y: 0 }, max: { x: 0, y: 0 } } };
 
   const selected = editorSnapshot.selection;
+  const componentsById = new Map(editorSnapshot.document.components.map((component) => [component.id, component]));
   const connectedPoints = new Map<string, Point>();
   for (const connection of editorSnapshot.document.connections) {
-    connectedPoints.set(endpointKey(connection.source.componentId, connection.source.port), { ...connection.source.point });
-    connectedPoints.set(endpointKey(connection.target.componentId, connection.target.port), { ...connection.target.point });
+    connectedPoints.set(endpointKey(connection.source.componentId, connection.source.port), previewEndpoint(connection.source, componentsById, previewPositions));
+    connectedPoints.set(endpointKey(connection.target.componentId, connection.target.port), previewEndpoint(connection.target, componentsById, previewPositions));
   }
   const nodes = editorSnapshot.document.components.map((component) => {
     const definition = registry.get(component.kind);
@@ -321,19 +354,23 @@ export function projectCanvasScene(
         if (endpoint.componentId === component.id) danglingPorts.add(endpoint.port);
       }
     }
+    const nodePosition = previewPositions?.[component.id] ?? component.position;
     return {
       id: component.id,
       kind: component.kind,
       displayName: component.displayName || definition.displayName,
       symbol: definition.symbol,
       description: definition.description,
-      position: { ...component.position },
+      position: { ...nodePosition },
       size: { ...definition.size },
       ports: definition.ports.map((portDefinition) => ({
         id: portDefinition.id,
         name: portDefinition.name,
         direction: portDefinition.direction,
-        point: connectedPoints.get(endpointKey(component.id, portDefinition.id)) ?? portPoint(component, definition, portDefinition),
+        point: connectedPoints.get(endpointKey(component.id, portDefinition.id)) ?? {
+          x: nodePosition.x + portDefinition.offset.x,
+          y: nodePosition.y + portDefinition.offset.y,
+        },
         offset: { ...portDefinition.offset },
         signal: getSignal(simulationSnapshot, component.id, portDefinition.id),
         dangling: danglingPorts.has(portDefinition.id),
@@ -342,15 +379,22 @@ export function projectCanvasScene(
     } satisfies CanvasNode;
   }).filter((node) => node !== null) as CanvasNode[];
 
-  const wires = editorSnapshot.document.connections.map((connection) => ({
+  const wires = editorSnapshot.document.connections.map((connection) => {
+    const sourcePoint = previewEndpoint(connection.source, componentsById, previewPositions);
+    const targetPoint = previewEndpoint(connection.target, componentsById, previewPositions);
+    const route = connection.route
+      ? routeBetween(sourcePoint, targetPoint, connection.route.length > 2 ? connection.route.slice(1, -1) : [])
+      : routeBetween(sourcePoint, targetPoint);
+    return {
     id: connection.id,
-    source: { ...connection.source, point: { ...connection.source.point } },
-    target: { ...connection.target, point: { ...connection.target.point } },
-    route: routeFor(connection),
+    source: { ...connection.source, point: sourcePoint },
+    target: { ...connection.target, point: targetPoint },
+    route,
     signal: getSignal(simulationSnapshot, connection.source.componentId, connection.source.port),
     danglingEndpoints: [...connection.danglingEndpoints],
     selected: selected?.kind === "connection" && selected.id === connection.id,
-  } satisfies CanvasWire));
+    } satisfies CanvasWire;
+  });
 
   return { nodes, wires, bounds: boundsFor(nodes, wires) };
 }
@@ -395,3 +439,12 @@ export {
   type ViewportState,
   type ViewportTransform,
 } from "./viewport.ts";
+
+export {
+  NODE_GRID_SIZE,
+  createNodeDragController,
+  snapNodePosition,
+  type NodeDragController,
+  type NodeDragControllerOptions,
+  type NodeDragPreview,
+} from "./drag.ts";

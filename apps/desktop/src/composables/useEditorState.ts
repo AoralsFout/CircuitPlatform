@@ -1,9 +1,10 @@
 import { computed, ref, watch, type DeepReadonly, type Ref } from "vue";
 import type { Signal } from "@circuit-platform/protocol";
-import type { EditorComponentId, EditorConnectionId, EditorSelection, EditorSnapshot } from "../editor";
+import type { EditorComponentId, EditorConnectionId, EditorSelection, EditorSnapshot, Point } from "../editor";
 import type { InputKey, WorkspaceSnapshot } from "../workspace";
 import {
   createComponentDefinitionRegistry,
+  createNodeDragController,
   createViewportState,
   emptyCanvasScene,
   fitViewportToBounds,
@@ -61,6 +62,7 @@ export function useEditorState(
   workspaceState: DeepReadonly<Ref<WorkspaceSnapshot>>,
   editorState: DeepReadonly<Ref<EditorSnapshot | null>>,
   selectEditor: (selection: EditorSelection) => Promise<void>,
+  moveComponent: (componentId: EditorComponentId, position: Point) => Promise<void> = async () => undefined,
 ) {
   const showDetails = ref(false);
   const showSidebar = ref(true);
@@ -80,6 +82,27 @@ export function useEditorState(
     },
   });
   const registry = createComponentDefinitionRegistry();
+  const draggingNodeId = ref<EditorComponentId | null>(null);
+  const dragPreview = ref<{ nodeId: EditorComponentId; position: Point } | null>(null);
+  const dragController = createNodeDragController({
+    onPreview(preview) {
+      dragPreview.value = { nodeId: preview.nodeId, position: { ...preview.position } };
+    },
+    onCommit(preview) {
+      void moveComponent(preview.nodeId, preview.position).finally(() => {
+        draggingNodeId.value = null;
+        dragPreview.value = null;
+      });
+    },
+    onCancel() {
+      draggingNodeId.value = null;
+      dragPreview.value = null;
+    },
+  });
+  const previewPositions = computed<Readonly<Record<string, Point>>>(() => {
+    const preview = dragPreview.value;
+    return preview ? { [preview.nodeId]: { ...preview.position } } : {};
+  });
 
   const canvasScene = computed(() => {
     const snapshot = editorState.value;
@@ -99,20 +122,20 @@ export function useEditorState(
           : "X";
       }
     }
-    return projectCanvasScene(snapshot, { signals }, registry);
+    return projectCanvasScene(snapshot, { signals }, registry, previewPositions.value);
   });
   const viewport = computed<ViewportState>(() => viewportState.value);
   const interaction = computed<InteractionState>(() => {
     if (workspaceState.value.engineState !== "ready") {
-      return { focusedId: null, draggingNodeId: null, connectionDraft: null, emptyState: { title: "等待仿真引擎", message: workspaceState.value.message } };
+      return { focusedId: null, draggingNodeId: null, dragPreview: null, connectionDraft: null, emptyState: { title: "等待仿真引擎", message: workspaceState.value.message } };
     }
     if (!workspaceState.value.hasLab) {
-      return { focusedId: null, draggingNodeId: null, connectionDraft: null, emptyState: { title: "正在准备示例电路", message: workspaceState.value.message } };
+      return { focusedId: null, draggingNodeId: null, dragPreview: null, connectionDraft: null, emptyState: { title: "正在准备示例电路", message: workspaceState.value.message } };
     }
     if (!editorState.value || editorState.value.document.components.length === 0) {
-      return { focusedId: null, draggingNodeId: null, connectionDraft: null, emptyState: { title: "还没有电路", message: "从左侧选择一个元件，或加载一份示例电路开始。" } };
+      return { focusedId: null, draggingNodeId: null, dragPreview: null, connectionDraft: null, emptyState: { title: "还没有电路", message: "从左侧选择一个元件，或加载一份示例电路开始。" } };
     }
-    return { focusedId: editorState.value.selection?.id ?? null, draggingNodeId: null, connectionDraft: null };
+    return { focusedId: editorState.value.selection?.id ?? null, draggingNodeId: draggingNodeId.value, dragPreview: dragPreview.value, connectionDraft: null };
   });
 
   const componentVisibility = computed<Record<NodeKey, boolean>>(() => ({
@@ -235,6 +258,30 @@ export function useEditorState(
     viewportState.value = resizeViewport(viewportState.value, { width, height });
   }
 
+  /** 开始节点临时拖动；只更新 InteractionState，不创建编辑器快照。 */
+  function startNodeDrag(nodeId: EditorComponentId, pointerWorld: Point): void {
+    const node = canvasScene.value.nodes.find((candidate) => candidate.id === nodeId);
+    if (!node) return;
+    draggingNodeId.value = nodeId;
+    dragPreview.value = { nodeId, position: { ...node.position } };
+    dragController.start(nodeId, node.position, pointerWorld);
+  }
+
+  /** 合并 pointer move 到下一帧，并按世界坐标网格预览节点与 Wire。 */
+  function moveNodeDrag(pointerWorld: Point, altKey = false): void {
+    dragController.move(pointerWorld, altKey);
+  }
+
+  /** 结束节点拖动；实际位移只提交一个布局历史命令。 */
+  function endNodeDrag(): void {
+    dragController.end();
+  }
+
+  /** 取消节点拖动；不提交历史。 */
+  function cancelNodeDrag(): void {
+    dragController.cancel();
+  }
+
   /** 应用画布交互层计算出的新视口；不会触碰编辑器文档或历史栈。 */
   function setViewport(next: ViewportState): void {
     viewportState.value = next;
@@ -276,5 +323,9 @@ export function useEditorState(
     fitViewport,
     resizeCanvas,
     setViewport,
+    startNodeDrag,
+    moveNodeDrag,
+    endNodeDrag,
+    cancelNodeDrag,
   };
 }
