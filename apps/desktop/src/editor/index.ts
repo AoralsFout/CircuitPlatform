@@ -142,7 +142,10 @@ export type EditorCommand =
   | { type: "update-placement"; center: Point; altKey?: boolean }
   | { type: "place-component"; kind?: ComponentKindName; center: Point; altKey?: boolean; continuous?: boolean }
   | { type: "commit-placement"; kind?: ComponentKindName; center: Point; altKey?: boolean; continuous?: boolean }
-  | { type: "add-component"; kind: ComponentKindName; position: Point; altKey?: boolean }
+  | { type: "add-component"; kind: ComponentKindName; position: Point; altKey?: boolean; continuous?: boolean }
+  | { type: "duplicate-component"; componentId: EditorComponentId }
+  | { type: "copy-component"; componentId: EditorComponentId }
+  | { type: "duplicate-selected" }
   | { type: "delete-selected" }
   | { type: "delete-component"; componentId: EditorComponentId }
   | { type: "delete-connection"; connectionId: EditorConnectionId }
@@ -820,8 +823,13 @@ export function createEditorSession(
    * @param altKey 是否关闭 16 单位网格吸附。
    * @returns 添加成功后自动选中新元件的命令结果。
    */
-  async function addComponentAt(kind: ComponentKindName, center: Point, altKey: boolean): Promise<CommandResult> {
-    const continuePlacement = pendingPlacement?.continuous ?? false;
+  async function addComponentAt(
+    kind: ComponentKindName,
+    center: Point,
+    altKey: boolean,
+    continuousOverride?: boolean,
+  ): Promise<CommandResult> {
+    const continuePlacement = continuousOverride ?? pendingPlacement?.continuous ?? false;
     const identity = pendingIdentity ?? nextComponentIdentity(kind);
     if (!Number.isFinite(center.x) || !Number.isFinite(center.y)) {
       return fail({ code: "invalid_placement", message: "元件放置位置无效。", retryable: false });
@@ -862,6 +870,42 @@ export function createEditorSession(
     pendingPlacement = continuePlacement
       ? { kind, center: null, altKey, continuous: true }
       : null;
+    publishBindings();
+    return { ok: true, snapshot: finishOperation() };
+  }
+
+  /**
+   * 复制一个 CircuitNode 的结构身份，不复制连接、路线、选择或信号状态。
+   * @param componentId 要复制的稳定编辑器元件 ID。
+   * @returns 创建成功后选中新副本的命令结果；引擎失败时保留原文档和历史。
+   */
+  async function duplicateComponent(componentId: EditorComponentId): Promise<CommandResult> {
+    const source = requireComponent(componentId);
+    if (!source) return fail(noSelectionError);
+    const identity = nextComponentIdentity(source.kind);
+    const position = { x: source.position.x + 32, y: source.position.y + 32 };
+    const added = await call(() => engine.addComponent(source.kind));
+    if (!added.ok) return fail(added.error);
+
+    const component: EditorComponent = {
+      id: identity.id,
+      kind: source.kind,
+      displayName: identity.displayName,
+      position,
+      lifecycle: "active",
+    };
+    document.components.set(component.id, component);
+    bindings.components[component.id] = added.value.componentId;
+    await settleAfterStructure();
+    undoStack.push({
+      type: "add-component",
+      componentId: component.id,
+      kind: component.kind,
+      displayName: component.displayName,
+      position: { ...position },
+    });
+    redoStack.length = 0;
+    selection = { kind: "component", id: component.id };
     publishBindings();
     return { ok: true, snapshot: finishOperation() };
   }
@@ -1471,8 +1515,15 @@ export function createEditorSession(
       if (!kind) return fail({ code: "no_pending_placement", message: "当前没有待放置的元件。", retryable: false });
       const altKey = command.altKey ?? pendingPlacement?.altKey ?? false;
       const center = command.type === "add-component" ? command.position : command.center;
-      const result = await addComponentAt(kind, center, altKey);
+      const result = await addComponentAt(kind, center, altKey, command.continuous);
       return result;
+    }
+    if (command.type === "duplicate-component" || command.type === "copy-component" || command.type === "duplicate-selected") {
+      const componentId = command.type === "duplicate-selected"
+        ? selection?.kind === "component" ? selection.id : null
+        : command.componentId;
+      if (!componentId) return fail(noSelectionError);
+      return duplicateComponent(componentId);
     }
     if (command.type === "confirm-clear") {
       if (!confirmation) return fail(confirmationRequiredError);

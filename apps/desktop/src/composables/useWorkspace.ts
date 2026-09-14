@@ -44,7 +44,9 @@ interface WorkspaceBinding {
   updatePlacement(center: Point, altKey?: boolean): Promise<void>;
   placeComponent(center: Point, altKey?: boolean): Promise<boolean>;
   /** 使用与画布待放置流程相同的添加命令，在指定 WorldPoint 添加一个元件。 */
-  addComponent(kind: ComponentKindName, center: Point, altKey?: boolean): Promise<boolean>;
+  addComponent(kind: ComponentKindName, center: Point, altKey?: boolean, continuous?: boolean): Promise<boolean>;
+  /** 复制指定稳定编辑器元件；副本不继承连接、路线、选择或信号。 */
+  duplicateComponent(componentId?: EditorComponentId): Promise<boolean>;
 }
 
 function toEditorBindings(bindings: DemoRuntimeBindings): EditorBindings {
@@ -142,9 +144,23 @@ export function useWorkspace(): WorkspaceBinding {
   }
 
   /** 右键菜单直接复用 EditorSession 的 add-component 命令；成功才返回 true。 */
-  async function addComponent(kind: ComponentKindName, center: Point, altKey = false): Promise<boolean> {
+  async function addComponent(kind: ComponentKindName, center: Point, altKey = false, continuous = false): Promise<boolean> {
     if (!editor) return false;
-    const pending = editor.dispatch({ type: "add-component", kind, position: center, altKey });
+    const pending = editor.dispatch({ type: "add-component", kind, position: center, altKey, continuous });
+    editorState.value = editor.snapshot();
+    const result = await pending;
+    editorState.value = result.snapshot;
+    state.value = workspace.snapshot();
+    return result.ok;
+  }
+
+  /** 复制当前选中元件或显式指定的元件，并复用 EditorSession 的结构事务。 */
+  async function duplicateComponent(componentId?: EditorComponentId): Promise<boolean> {
+    if (!editor) return false;
+    const command = componentId
+      ? { type: "duplicate-component" as const, componentId }
+      : { type: "duplicate-selected" as const };
+    const pending = editor.dispatch(command);
     editorState.value = editor.snapshot();
     const result = await pending;
     editorState.value = result.snapshot;
@@ -185,5 +201,6 @@ export function useWorkspace(): WorkspaceBinding {
     updatePlacement: (center, altKey = false) => dispatch({ type: "update-placement", center, altKey }),
     placeComponent,
     addComponent,
+    duplicateComponent,
   };
 }

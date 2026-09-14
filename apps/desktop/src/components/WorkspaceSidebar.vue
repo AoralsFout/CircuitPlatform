@@ -26,6 +26,13 @@ const emit = defineEmits<{
   toggleInput: [key: InputKey];
   placeComponent: [kind: ComponentKindName, continuous: boolean];
 }>();
+
+function startComponentDrag(event: DragEvent, kind: ComponentKindName): void {
+  if (!event.dataTransfer) return;
+  event.dataTransfer.effectAllowed = "copy";
+  event.dataTransfer.setData("application/x-circuit-component", kind);
+  event.dataTransfer.setData("text/plain", kind);
+}
 </script>
 
 <template>
@@ -35,11 +42,11 @@ const emit = defineEmits<{
     <template v-if="activeRailPage === 'components'">
       <div class="sidebar-section-title"><span>元件库</span><span class="component-count">{{ componentDefinitions.length }}</span></div>
       <div class="component-list">
-        <button v-for="definition in componentDefinitions" :key="definition.kind" class="component-item" :class="{ 'component-item--disabled': !definition.available }" type="button" :disabled="!definition.available" :title="definition.disabledReason ?? `添加${definition.displayName}`" @click="emit('placeComponent', definition.kind, $event.shiftKey)">
+        <button v-for="definition in componentDefinitions" :key="definition.kind" class="component-item" :class="{ 'component-item--disabled': !definition.available }" type="button" :draggable="definition.available" :disabled="!definition.available" :title="definition.disabledReason ?? `添加${definition.displayName}`" @dragstart="startComponentDrag($event, definition.kind)" @click="emit('placeComponent', definition.kind, $event.shiftKey)">
           <span class="component-symbol">{{ definition.symbol }}</span><span><strong>{{ definition.displayName }}</strong><small>{{ definition.kind.toUpperCase() }} / {{ definition.ports.filter((port) => port.direction === 'input').length }} → {{ definition.ports.filter((port) => port.direction === 'output').length }}</small></span><span class="drag-hint">＋</span>
         </button>
       </div>
-      <p class="sidebar-hint">单击元件后移动到画布并单击放置；按 Esc 取消。</p>
+      <p class="sidebar-hint">单击元件后移动到画布并单击放置；也可直接拖到画布释放；按 Esc 取消。</p>
     </template>
 
     <template v-else-if="activeRailPage === 'inputs'">

@@ -1,4 +1,4 @@
-export type EditorShortcut = "delete-selection" | "undo" | "redo" | "cancel";
+export type EditorShortcut = "delete-selection" | "undo" | "redo" | "duplicate-selection" | "cancel";
 
 export interface EditorKeyInput {
   key: string;
@@ -18,6 +18,7 @@ export function resolveEditorShortcut(input: EditorKeyInput): EditorShortcut | n
   if ((input.ctrlKey || input.metaKey) && input.key.toLowerCase() === "z") {
     return input.shiftKey ? "redo" : "undo";
   }
+  if ((input.ctrlKey || input.metaKey) && input.key.toLowerCase() === "d") return "duplicate-selection";
   if (input.key === "Escape") return "cancel";
   if (input.key === "Delete" || input.key === "Backspace") return "delete-selection";
   return null;
