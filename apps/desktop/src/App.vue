@@ -55,6 +55,9 @@ const {
   selectConnection,
   selectRailPage,
   adjustZoom,
+  setViewport,
+  fitViewport,
+  resizeCanvas,
 } = useEditorState(state, editorState, select);
 const {
   preference: themePreference,
@@ -130,7 +133,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           :can-clear="editorState?.operation === 'idle' && !editorState.confirmation && (editorState.document.components.length > 0 || editorState.document.connections.length > 0)"
           :simulation-state="state.simulationState"
           @adjust-zoom="adjustZoom"
-          @reset-zoom="zoom = 100"
+          @reset-zoom="fitViewport"
           @run-simulation="runSimulation"
           @undo="undo"
           @redo="redo"
@@ -143,6 +146,8 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           :interaction="interaction"
           @select-node="select({ kind: 'component', id: $event })"
           @select-connection="select({ kind: 'connection', id: $event })"
+          @viewport-change="setViewport"
+          @resize="resizeCanvas"
         />
         <BottomPanel
           :bottom-tab="bottomTab"
