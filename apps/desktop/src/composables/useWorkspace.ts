@@ -3,6 +3,8 @@ import {
   createAndDemoDocument,
   createEditorSession,
   type EditorBindings,
+  type EditorComponentId,
+  type Point,
   type EditorSelection,
   type EditorSession,
   type EditorSnapshot,
@@ -24,6 +26,7 @@ interface WorkspaceBinding {
   runSimulation(): Promise<void>;
   toggleInput(key: InputKey): Promise<void>;
   select(selection: EditorSelection): Promise<void>;
+  moveComponent(componentId: EditorComponentId, position: Point): Promise<void>;
   deleteSelection(): Promise<void>;
   /** 请求显示清空确认；此步骤不会调用引擎。 */
   requestClear(): Promise<void>;
@@ -137,6 +140,7 @@ export function useWorkspace(): WorkspaceBinding {
     runSimulation,
     toggleInput,
     select: (selection) => dispatch({ type: "select", selection }),
+    moveComponent: (componentId, position) => dispatch({ type: "move-component", componentId, position }),
     deleteSelection: () => dispatch({ type: "delete-selected" }),
     requestClear: () => dispatch({ type: "request-clear" }),
     confirmClear: () => dispatch({ type: "confirm-clear" }),

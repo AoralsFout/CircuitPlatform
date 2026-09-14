@@ -89,6 +89,9 @@ export type EditorSelection =
 
 export type EditorCommand =
   | { type: "select"; selection: EditorSelection }
+  | { type: "move-component"; componentId: EditorComponentId; position: Point }
+  | { type: "move-node"; nodeId: EditorComponentId; position: Point }
+  | { type: "move-node"; componentId: EditorComponentId; position: Point }
   | { type: "delete-selected" }
   | { type: "delete-component"; componentId: EditorComponentId }
   | { type: "delete-connection"; connectionId: EditorConnectionId }
@@ -174,7 +177,27 @@ interface ClearDocumentFrame {
   }>;
 }
 
-type HistoryFrame = DeleteComponentFrame | DeleteConnectionFrame | ClearDocumentFrame;
+interface MoveComponentFrame {
+  type: "move-component";
+  componentId: EditorComponentId;
+  positionBefore: Point;
+  positionAfter: Point;
+  selectionBefore: EditorSelection;
+  connectionsBefore: Array<{
+    id: EditorConnectionId;
+    source: EditorConnection["source"];
+    target: EditorConnection["target"];
+    route?: readonly Point[];
+  }>;
+  connectionsAfter: Array<{
+    id: EditorConnectionId;
+    source: EditorConnection["source"];
+    target: EditorConnection["target"];
+    route?: readonly Point[];
+  }>;
+}
+
+type HistoryFrame = DeleteComponentFrame | DeleteConnectionFrame | ClearDocumentFrame | MoveComponentFrame;
 
 const busyError: EngineError = {
   code: "editor_busy",
@@ -344,6 +367,86 @@ function restoreComponent(document: MutableDocument, id: EditorComponentId): voi
   const component = document.components.get(id);
   if (!component) return;
   component.lifecycle = "active";
+}
+
+function cloneEndpoint(endpoint: EditorEndpoint): EditorEndpoint {
+  return { ...endpoint, point: { ...endpoint.point } };
+}
+
+function cloneConnectionGeometry(connection: EditorConnection): {
+  id: EditorConnectionId;
+  source: EditorConnection["source"];
+  target: EditorConnection["target"];
+  route?: readonly Point[];
+} {
+  return {
+    id: connection.id,
+    source: cloneEndpoint(connection.source),
+    target: cloneEndpoint(connection.target),
+    ...(connection.route ? { route: connection.route.map((point) => ({ ...point })) } : {}),
+  };
+}
+
+function pointsEqual(left: Point, right: Point): boolean {
+  return left.x === right.x && left.y === right.y;
+}
+
+function defaultRoute(start: Point, end: Point): Point[] {
+  const midpoint = start.x + (end.x - start.x) / 2;
+  return [
+    { ...start },
+    { x: midpoint, y: start.y },
+    { x: midpoint, y: end.y },
+    { ...end },
+  ];
+}
+
+function orthogonalRoute(start: Point, end: Point, waypoints: readonly Point[]): Point[] {
+  if (waypoints.length === 0) return defaultRoute(start, end);
+  const route: Point[] = [{ ...start }];
+  const first = waypoints[0];
+  if (route[0].x !== first.x && route[0].y !== first.y) route.push({ x: first.x, y: route[0].y });
+  route.push(...waypoints.map((point) => ({ ...point })));
+  const last = route[route.length - 1];
+  if (last.x !== end.x && last.y !== end.y) route.push({ x: end.x, y: last.y });
+  route.push({ ...end });
+  return route;
+}
+
+function updateMovedConnection(
+  connection: EditorConnection,
+  componentId: EditorComponentId,
+  beforePosition: Point,
+  afterPosition: Point,
+): void {
+  const moveEndpoint = (endpoint: EditorEndpoint): EditorEndpoint => {
+    if (endpoint.componentId !== componentId) return cloneEndpoint(endpoint);
+    return {
+      ...endpoint,
+      point: {
+        x: afterPosition.x + endpoint.point.x - beforePosition.x,
+        y: afterPosition.y + endpoint.point.y - beforePosition.y,
+      },
+    };
+  };
+  const source = moveEndpoint(connection.source);
+  const target = moveEndpoint(connection.target);
+  const oldRoute = connection.route;
+  const waypoints = oldRoute && oldRoute.length > 2 ? oldRoute.slice(1, -1) : [];
+  connection.source = source;
+  connection.target = target;
+  connection.route = orthogonalRoute(source.point, target.point, waypoints);
+}
+
+function restoreConnectionGeometry(
+  document: MutableDocument,
+  geometry: MoveComponentFrame["connectionsBefore"][number],
+): void {
+  const connection = document.connections.get(geometry.id);
+  if (!connection) return;
+  connection.source = cloneEndpoint(geometry.source);
+  connection.target = cloneEndpoint(geometry.target);
+  connection.route = geometry.route?.map((point) => ({ ...point }));
 }
 
 /**
@@ -790,6 +893,83 @@ export function createEditorSession(
     return { ok: true, snapshot: finishOperation() };
   }
 
+  function makeMoveComponentFrame(
+    componentId: EditorComponentId,
+    position: Point,
+  ): MoveComponentFrame | null {
+    const component = requireComponent(componentId);
+    if (!component) return null;
+    const positionBefore = { ...component.position };
+    const positionAfter = { ...position };
+    const connectionsBefore = [...document.connections.values()]
+      .filter((connection) =>
+        connection.lifecycle === "visible" &&
+        (connection.source.componentId === componentId || connection.target.componentId === componentId),
+      )
+      .map(cloneConnectionGeometry);
+    for (const connection of connectionsBefore) {
+      const current = document.connections.get(connection.id);
+      if (current) updateMovedConnection(current, componentId, positionBefore, positionAfter);
+    }
+    component.position = positionAfter;
+    const connectionsAfter = connectionsBefore
+      .map(({ id }) => document.connections.get(id))
+      .filter((connection): connection is EditorConnection => connection !== undefined)
+      .map(cloneConnectionGeometry);
+    for (const connection of connectionsBefore) restoreConnectionGeometry(document, connection);
+    component.position = positionBefore;
+    return {
+      type: "move-component",
+      componentId,
+      positionBefore,
+      positionAfter,
+      selectionBefore: selection ? { ...selection } : null,
+      connectionsBefore,
+      connectionsAfter,
+    };
+  }
+
+  function applyMoveFrame(frame: MoveComponentFrame, after: boolean): void {
+    const component = document.components.get(frame.componentId);
+    if (!component || component.lifecycle !== "active") return;
+    component.position = { ...(after ? frame.positionAfter : frame.positionBefore) };
+    for (const connection of after ? frame.connectionsAfter : frame.connectionsBefore) {
+      restoreConnectionGeometry(document, connection);
+    }
+  }
+
+  async function moveComponent(frame: MoveComponentFrame): Promise<CommandResult> {
+    if (pointsEqual(frame.positionBefore, frame.positionAfter)) {
+      selection = frame.selectionBefore;
+      return { ok: true, snapshot: finishOperation() };
+    }
+    applyMoveFrame(frame, true);
+    selection = { kind: "component", id: frame.componentId };
+    undoStack.push(frame);
+    redoStack.length = 0;
+    return { ok: true, snapshot: finishOperation() };
+  }
+
+  async function undoMoveComponent(frame: MoveComponentFrame): Promise<CommandResult> {
+    applyMoveFrame(frame, false);
+    selection = frame.selectionBefore;
+    undoStack.pop();
+    redoStack.push(frame);
+    return { ok: true, snapshot: finishOperation() };
+  }
+
+  async function redoMoveComponent(
+    frame: MoveComponentFrame,
+    remainingRedo: readonly HistoryFrame[],
+  ): Promise<CommandResult> {
+    applyMoveFrame(frame, true);
+    selection = { kind: "component", id: frame.componentId };
+    redoStack.length = 0;
+    redoStack.push(...remainingRedo);
+    undoStack.push(frame);
+    return { ok: true, snapshot: finishOperation() };
+  }
+
   async function undoClearDocument(frame: ClearDocumentFrame): Promise<CommandResult> {
     const newComponentIds: EngineComponentId[] = [];
     const newConnectionIds: EngineConnectionId[] = [];
@@ -856,6 +1036,7 @@ export function createEditorSession(
     if (!frame) return fail({ code: "nothing_to_undo", message: "没有可撤销的操作。", retryable: false });
     if (frame.type === "delete-component") return undoDeleteComponent(frame);
     if (frame.type === "clear-document") return undoClearDocument(frame);
+    if (frame.type === "move-component") return undoMoveComponent(frame);
     return undoDeleteConnection(frame);
   }
 
@@ -877,6 +1058,7 @@ export function createEditorSession(
       if (result.ok) redoStack.push(...remainingRedo);
       return result;
     }
+    if (frame.type === "move-component") return redoMoveComponent(frame, remainingRedo);
     const connection = document.connections.get(frame.connectionId);
     if (!connection) return fail(recoveryError("重做所需的连接不存在。"));
     const result = await deleteConnection({
@@ -910,6 +1092,14 @@ export function createEditorSession(
     if (command.type === "select") {
       selection = command.selection;
       return { ok: true, snapshot: finishOperation() };
+    }
+    if (command.type === "move-component" || command.type === "move-node") {
+      const componentId = command.type === "move-component"
+        ? command.componentId
+        : "nodeId" in command ? command.nodeId : command.componentId;
+      const frame = makeMoveComponentFrame(componentId, command.position);
+      if (!frame) return fail(noSelectionError);
+      return moveComponent(frame);
     }
     if (command.type === "request-clear") {
       const frame = makeClearDocumentFrame();

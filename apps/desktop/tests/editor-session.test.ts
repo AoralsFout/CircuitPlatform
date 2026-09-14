@@ -554,3 +554,34 @@ test("clear handles local-only dangling wires without creating invalid engine co
     false,
   );
 });
+
+test("moves a component as one local layout history frame and aligns wire endpoints", async () => {
+  const engine = new FakeEngine();
+  const session = createSession(engine);
+  const beforeCalls = [...engine.calls];
+
+  const result = await session.dispatch({ type: "move-component", componentId: "and-gate", position: { x: 480, y: 256 } });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.snapshot.document.components.find((component) => component.id === "and-gate")?.position, { x: 480, y: 256 });
+  assert.deepEqual(result.snapshot.document.connections.find((connection) => connection.id === "wire-a")?.target.point, { x: 475, y: 286 });
+  assert.deepEqual(result.snapshot.document.connections.find((connection) => connection.id === "wire-output")?.source.point, { x: 625, y: 306 });
+  assert.deepEqual(engine.calls, beforeCalls);
+  assert.equal(result.snapshot.canUndo, true);
+
+  const undo = await session.dispatch({ type: "undo" });
+  assert.deepEqual(undo.snapshot.document.components.find((component) => component.id === "and-gate")?.position, { x: 440, y: 220 });
+  assert.deepEqual(undo.snapshot.document.connections.find((connection) => connection.id === "wire-a")?.target.point, { x: 435, y: 250 });
+  const redo = await session.dispatch({ type: "redo" });
+  assert.deepEqual(redo.snapshot.document.components.find((component) => component.id === "and-gate")?.position, { x: 480, y: 256 });
+  assert.deepEqual(redo.snapshot.document.connections.find((connection) => connection.id === "wire-output")?.source.point, { x: 625, y: 306 });
+  assert.deepEqual(engine.calls, beforeCalls);
+});
+
+test("a no-op component move does not create layout history", async () => {
+  const engine = new FakeEngine();
+  const session = createSession(engine);
+  const result = await session.dispatch({ type: "move-node", nodeId: "and-gate", position: { x: 440, y: 220 } });
+  assert.equal(result.ok, true);
+  assert.equal(result.snapshot.canUndo, false);
+  assert.deepEqual(engine.calls, []);
+});
