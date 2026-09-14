@@ -1,25 +1,73 @@
 import { readonly, shallowRef, type DeepReadonly, type Ref } from "vue";
 import {
+  createAndDemoDocument,
+  createEditorSession,
+  type EditorBindings,
+  type EditorSelection,
+  type EditorSession,
+  type EditorSnapshot,
+} from "../editor";
+import { createProtocolEnginePort } from "../editor/protocolEnginePort";
+import {
   createWorkspace,
+  type DemoRuntimeBindings,
   type InputKey,
+  type LabIds,
   type WorkspaceSnapshot,
 } from "../workspace";
 
 interface WorkspaceBinding {
   state: DeepReadonly<Ref<WorkspaceSnapshot>>;
+  editorState: DeepReadonly<Ref<EditorSnapshot | null>>;
   bootstrap(): Promise<void>;
   checkEngine(): Promise<void>;
   runSimulation(): Promise<void>;
   toggleInput(key: InputKey): Promise<void>;
+  select(selection: EditorSelection): Promise<void>;
+  deleteSelection(): Promise<void>;
+  undo(): Promise<void>;
+  redo(): Promise<void>;
+}
+
+function toEditorBindings(bindings: DemoRuntimeBindings): EditorBindings {
+  return {
+    components: {
+      "input-a": bindings.components.inputA,
+      "input-b": bindings.components.inputB,
+      "and-gate": bindings.components.andGate,
+      output: bindings.components.output,
+    },
+    connections: {
+      "wire-a": bindings.connections.wireA,
+      "wire-b": bindings.connections.wireB,
+      "wire-output": bindings.connections.wireOutput,
+    },
+  };
+}
+
+function toSimulationBindings(bindings: EditorBindings): LabIds | null {
+  const inputA = bindings.components["input-a"];
+  const inputB = bindings.components["input-b"];
+  const andGate = bindings.components["and-gate"];
+  const output = bindings.components.output;
+  const hasCompleteWiring = ["wire-a", "wire-b", "wire-output"]
+    .every((id) => bindings.connections[id] !== undefined);
+  return inputA === undefined || inputB === undefined || andGate === undefined || output === undefined || !hasCompleteWiring
+    ? null
+    : { inputA, inputB, andGate, output };
 }
 
 /**
- * 将工作区领域模块接入 Vue 响应式系统，并统一处理首次启动与引擎恢复流程。
- * @returns 只读工作区快照，以及供界面触发的异步操作。
+ * 将工作区领域模块与 EditorSession 接入 Vue，并统一管理真实运行时身份。
+ * @returns 只读仿真/编辑器快照，以及基于稳定 editor ID 的界面操作。
  */
 export function useWorkspace(): WorkspaceBinding {
-  const workspace = createWorkspace(window.circuitPlatform);
+  const adapter = window.circuitPlatform;
+  const workspace = createWorkspace(adapter);
   const state = shallowRef(workspace.snapshot());
+  const editorState = shallowRef<EditorSnapshot | null>(null);
+  let editor: EditorSession | null = null;
+  let unsubscribeEditor: (() => void) | null = null;
 
   async function reflect(operation: () => Promise<WorkspaceSnapshot>): Promise<void> {
     const pending = operation();
@@ -27,10 +75,30 @@ export function useWorkspace(): WorkspaceBinding {
     state.value = await pending;
   }
 
+  function attachEditor(bindings: DemoRuntimeBindings): void {
+    unsubscribeEditor?.();
+    editor = createEditorSession(
+      { document: createAndDemoDocument(), bindings: toEditorBindings(bindings) },
+      createProtocolEnginePort(adapter),
+      {
+        onBindingsChanged(nextBindings) {
+          state.value = workspace.rebindSimulation(toSimulationBindings(nextBindings));
+        },
+      },
+    );
+    editorState.value = editor.snapshot();
+    unsubscribeEditor = editor.subscribe((snapshot) => {
+      editorState.value = snapshot;
+    });
+  }
+
   async function loadDemoWhenReady(): Promise<void> {
-    if (state.value.engineState === "ready" && !state.value.labIds) {
-      await reflect(() => workspace.loadDemoCircuit());
-    }
+    if (state.value.engineState !== "ready" || state.value.hasLab) return;
+    const pending = workspace.loadDemoCircuit();
+    state.value = workspace.snapshot();
+    const loaded = await pending;
+    state.value = loaded.snapshot;
+    if (loaded.bindings) attachEditor(loaded.bindings);
   }
 
   async function checkEngine(): Promise<void> {
@@ -46,11 +114,25 @@ export function useWorkspace(): WorkspaceBinding {
     await reflect(() => workspace.toggleInput(key));
   }
 
+  async function dispatch(command: Parameters<EditorSession["dispatch"]>[0]): Promise<void> {
+    if (!editor) return;
+    const pending = editor.dispatch(command);
+    editorState.value = editor.snapshot();
+    const result = await pending;
+    editorState.value = result.snapshot;
+    state.value = workspace.snapshot();
+  }
+
   return {
     state: readonly(state),
+    editorState: readonly(editorState),
     bootstrap: checkEngine,
     checkEngine,
     runSimulation,
     toggleInput,
+    select: (selection) => dispatch({ type: "select", selection }),
+    deleteSelection: () => dispatch({ type: "delete-selected" }),
+    undo: () => dispatch({ type: "undo" }),
+    redo: () => dispatch({ type: "redo" }),
   };
 }

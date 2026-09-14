@@ -48,6 +48,52 @@ void deleting_a_component_leaves_a_dangling_connection() {
     assert(circuit.isDangling(*result.id));
 }
 
+void dangling_source_does_not_block_reconnecting_the_live_input() {
+    circuit::Circuit circuit;
+    const auto deletedInputId = circuit.addComponent(circuit::ComponentKind::Input);
+    const auto replacementInputId = circuit.addComponent(circuit::ComponentKind::Input);
+    const auto outputId = circuit.addComponent(circuit::ComponentKind::Output);
+    const auto oldConnection = circuit.addConnection(
+        {deletedInputId, "out"},
+        {outputId, "in"});
+
+    assert(oldConnection.succeeded());
+    assert(circuit.removeComponent(deletedInputId));
+    assert(circuit.isDangling(*oldConnection.id));
+
+    const auto replacementConnection = circuit.addConnection(
+        {replacementInputId, "out"},
+        {outputId, "in"});
+
+    assert(replacementConnection.succeeded());
+    assert(circuit.connectionCount() == 2);
+    assert(circuit.isDangling(*oldConnection.id));
+    assert(!circuit.isDangling(*replacementConnection.id));
+}
+
+void dangling_target_is_retained_without_affecting_live_connections() {
+    circuit::Circuit circuit;
+    const auto inputId = circuit.addComponent(circuit::ComponentKind::Input);
+    const auto deletedOutputId = circuit.addComponent(circuit::ComponentKind::Output);
+    const auto replacementOutputId = circuit.addComponent(circuit::ComponentKind::Output);
+    const auto oldConnection = circuit.addConnection(
+        {inputId, "out"},
+        {deletedOutputId, "in"});
+
+    assert(oldConnection.succeeded());
+    assert(circuit.removeComponent(deletedOutputId));
+    assert(circuit.connectionCount() == 1);
+    assert(circuit.isDangling(*oldConnection.id));
+
+    const auto replacementConnection = circuit.addConnection(
+        {inputId, "out"},
+        {replacementOutputId, "in"});
+
+    assert(replacementConnection.succeeded());
+    assert(!circuit.isDangling(*replacementConnection.id));
+    assert(circuit.isDangling(*oldConnection.id));
+}
+
 void deleting_a_connection_keeps_both_components() {
     circuit::Circuit circuit;
     const auto inputId = circuit.addComponent(circuit::ComponentKind::Input);
@@ -125,6 +171,8 @@ int main() {
     adds_an_and_gate_with_two_inputs_and_one_output();
     adds_a_connection_between_valid_ports();
     deleting_a_component_leaves_a_dangling_connection();
+    dangling_source_does_not_block_reconnecting_the_live_input();
+    dangling_target_is_retained_without_affecting_live_connections();
     deleting_a_connection_keeps_both_components();
     rejects_a_second_source_for_an_input_port();
     allows_one_output_to_fan_out_to_multiple_inputs();

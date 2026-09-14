@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted } from "vue";
+import { onBeforeUnmount, onMounted } from "vue";
 import BottomPanel from "./components/BottomPanel.vue";
 import CircuitCanvas from "./components/CircuitCanvas.vue";
 import EditorToolbar from "./components/EditorToolbar.vue";
@@ -10,10 +10,26 @@ import WorkspaceSidebar from "./components/WorkspaceSidebar.vue";
 import { useEditorState } from "./composables/useEditorState";
 import { useThemePreference } from "./composables/useThemePreference";
 import { useWorkspace } from "./composables/useWorkspace";
+import { resolveEditorShortcut } from "./editor/keyboard";
 
-const { state, bootstrap, checkEngine, runSimulation, toggleInput } = useWorkspace();
+const {
+  state,
+  editorState,
+  bootstrap,
+  checkEngine,
+  runSimulation,
+  toggleInput,
+  select,
+  deleteSelection,
+  undo,
+  redo,
+} = useWorkspace();
 const {
   selectedNode,
+  selectedConnection,
+  componentVisibility,
+  wireVisibility,
+  wireDangling,
   showDetails,
   showSidebar,
   activeRailPage,
@@ -29,9 +45,10 @@ const {
   selectedNodeId,
   zoomLabel,
   selectNode,
+  selectConnection,
   selectRailPage,
   adjustZoom,
-} = useEditorState(state);
+} = useEditorState(state, editorState, select);
 const {
   preference: themePreference,
   label: themeLabel,
@@ -40,10 +57,31 @@ const {
   cycle: cycleTheme,
 } = useThemePreference();
 
+function onEditorKeydown(event: KeyboardEvent): void {
+  const target = event.target;
+  const shortcut = resolveEditorShortcut({
+    key: event.key,
+    ctrlKey: event.ctrlKey,
+    metaKey: event.metaKey,
+    shiftKey: event.shiftKey,
+    editableTarget: target instanceof HTMLElement &&
+      (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)),
+  });
+  if (!shortcut) return;
+  event.preventDefault();
+  if (shortcut === "undo") void undo();
+  else if (shortcut === "redo") void redo();
+  else if (shortcut === "cancel") void select(null);
+  else void deleteSelection();
+}
+
 onMounted(() => {
   restoreTheme();
+  window.addEventListener("keydown", onEditorKeydown);
   void bootstrap();
 });
+
+onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
 </script>
 
 <template>
@@ -66,19 +104,28 @@ onMounted(() => {
         :input-controls="inputControls"
         :can-run="state.canRun"
         :selected-node="selectedNode"
+        :component-visibility="componentVisibility"
+        :component-count="editorState?.document.components.length ?? 0"
         @close="showSidebar = false"
         @select-node="selectNode"
         @toggle-input="toggleInput"
       />
 
       <section v-if="activeRailPage !== 'settings'" class="editor-main" aria-label="电路编辑器">
+        <p v-if="editorState?.operation === 'recovery-required'" class="bottom-error" role="alert">编辑器与仿真引擎的结构状态可能不一致。请关闭并重新打开应用后再继续编辑。</p>
         <EditorToolbar
           :zoom-label="zoomLabel"
           :can-run="state.canRun"
+          :can-undo="editorState?.operation === 'idle' && editorState.canUndo"
+          :can-redo="editorState?.operation === 'idle' && editorState.canRedo"
+          :can-delete="editorState?.operation === 'idle' && Boolean(editorState.selection)"
           :simulation-state="state.simulationState"
           @adjust-zoom="adjustZoom"
           @reset-zoom="zoom = 100"
           @run-simulation="runSimulation"
+          @undo="undo"
+          @redo="redo"
+          @delete-selection="deleteSelection"
         />
         <CircuitCanvas
           :zoom="zoom"
@@ -88,15 +135,21 @@ onMounted(() => {
           :output-description="state.outputDescription"
           :engine-state="state.engineState"
           :engine-message="state.message"
-          :has-lab="Boolean(state.labIds)"
+          :has-lab="state.hasLab"
           :waveform-length="state.waveform.length"
           :selected-node="selectedNode"
+          :selected-connection="selectedConnection"
+          :component-visibility="componentVisibility"
+          :wire-visibility="wireVisibility"
+          :wire-dangling="wireDangling"
           @select-node="selectNode"
+          @select-connection="selectConnection"
         />
         <BottomPanel
           :bottom-tab="bottomTab"
           :outputs="outputs"
           :selected-node="selectedNode"
+          :selected-connection="selectedConnection"
           :selected-node-name="selectedNodeName"
           :selected-node-value="selectedNodeValue"
           :selected-node-description="selectedNodeDescription"
@@ -104,7 +157,7 @@ onMounted(() => {
           :show-details="showDetails"
           :engine-state="state.engineState"
           :engine-name="state.engineName"
-          :operation-error="state.operationError"
+          :operation-error="editorState?.error?.message ?? state.operationError"
           :waveform="state.waveform"
           :waveform-rows="waveformRows"
           :simulation-step="state.simulationStep"
@@ -122,7 +175,7 @@ onMounted(() => {
         :engine-state-label="engineStateLabel"
         :engine-name="state.engineName"
         :is-busy="state.isBusy || state.engineState === 'checking'"
-        :component-count="state.labIds ? 4 : 0"
+        :component-count="editorState?.document.components.length ?? 0"
         :simulation-step="state.simulationStep"
         @set-theme-preference="setThemePreference"
         @check-engine="checkEngine"

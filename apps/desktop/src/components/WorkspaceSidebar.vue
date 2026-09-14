@@ -6,14 +6,15 @@ interface InputControl {
   key: InputKey;
   label: string;
   value: 0 | 1;
-  componentId: number | null;
 }
 
 defineProps<{
   activeRailPage: RailPage;
   inputControls: readonly InputControl[];
   canRun: boolean;
-  selectedNode: NodeKey;
+  selectedNode: NodeKey | null;
+  componentVisibility: Record<NodeKey, boolean>;
+  componentCount: number;
 }>();
 
 const emit = defineEmits<{
@@ -32,7 +33,7 @@ const emit = defineEmits<{
       <div class="component-list">
         <button class="component-item" type="button" disabled title="元件添加将在画布编辑模式中开放"><span class="component-symbol component-symbol--input">↗</span><span><strong>输入</strong><small>INPUT / 1 bit</small></span><span class="drag-hint">＋</span></button>
         <button class="component-item" type="button" disabled title="元件添加将在画布编辑模式中开放"><span class="component-symbol component-symbol--output">↙</span><span><strong>输出</strong><small>OUTPUT / 1 bit</small></span><span class="drag-hint">＋</span></button>
-        <button class="component-item component-item--selected" type="button" @click="emit('selectNode', 'andGate')"><span class="component-symbol component-symbol--gate">&amp;</span><span><strong>AND 门</strong><small>LOGIC / 2 → 1</small></span><span class="drag-hint">＋</span></button>
+        <button class="component-item component-item--selected" type="button" :disabled="!componentVisibility.andGate" @click="emit('selectNode', 'andGate')"><span class="component-symbol component-symbol--gate">&amp;</span><span><strong>AND 门</strong><small>LOGIC / 2 → 1</small></span><span class="drag-hint">＋</span></button>
         <button class="component-item" type="button" disabled title="暂未开放"><span class="component-symbol">≥1</span><span><strong>OR 门</strong><small>LOGIC / 2 → 1</small></span><span class="drag-hint">＋</span></button>
         <button class="component-item" type="button" disabled title="暂未开放"><span class="component-symbol">¬</span><span><strong>NOT 门</strong><small>LOGIC / 1 → 1</small></span><span class="drag-hint">＋</span></button>
       </div>
@@ -52,12 +53,12 @@ const emit = defineEmits<{
     </template>
 
     <template v-else>
-      <div class="sidebar-section-title"><span>当前电路</span><span class="component-count">4</span></div>
+      <div class="sidebar-section-title"><span>当前电路</span><span class="component-count">{{ componentCount }}</span></div>
       <div class="layer-list">
-        <button type="button" :class="{ 'layer-item--active': selectedNode === 'output' }" @click="emit('selectNode', 'output')"><span class="layer-dot layer-dot--output"></span>输出 <small>OUTPUT</small></button>
-        <button type="button" :class="{ 'layer-item--active': selectedNode === 'andGate' }" @click="emit('selectNode', 'andGate')"><span class="layer-dot layer-dot--gate"></span>AND 门 <small>AND</small></button>
-        <button type="button" :class="{ 'layer-item--active': selectedNode === 'inputB' }" @click="emit('selectNode', 'inputB')"><span class="layer-dot"></span>输入 B <small>INPUT</small></button>
-        <button type="button" :class="{ 'layer-item--active': selectedNode === 'inputA' }" @click="emit('selectNode', 'inputA')"><span class="layer-dot"></span>输入 A <small>INPUT</small></button>
+        <button v-if="componentVisibility.output" type="button" :class="{ 'layer-item--active': selectedNode === 'output' }" @click="emit('selectNode', 'output')"><span class="layer-dot layer-dot--output"></span>输出 <small>OUTPUT</small></button>
+        <button v-if="componentVisibility.andGate" type="button" :class="{ 'layer-item--active': selectedNode === 'andGate' }" @click="emit('selectNode', 'andGate')"><span class="layer-dot layer-dot--gate"></span>AND 门 <small>AND</small></button>
+        <button v-if="componentVisibility.inputB" type="button" :class="{ 'layer-item--active': selectedNode === 'inputB' }" @click="emit('selectNode', 'inputB')"><span class="layer-dot"></span>输入 B <small>INPUT</small></button>
+        <button v-if="componentVisibility.inputA" type="button" :class="{ 'layer-item--active': selectedNode === 'inputA' }" @click="emit('selectNode', 'inputA')"><span class="layer-dot"></span>输入 A <small>INPUT</small></button>
       </div>
     </template>
   </aside>

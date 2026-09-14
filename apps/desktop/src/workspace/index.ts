@@ -36,6 +36,20 @@ export interface LabIds {
   output: number;
 }
 
+export interface DemoRuntimeBindings {
+  components: LabIds;
+  connections: {
+    wireA: number;
+    wireB: number;
+    wireOutput: number;
+  };
+}
+
+export interface DemoLoadResult {
+  snapshot: WorkspaceSnapshot;
+  bindings: DemoRuntimeBindings | null;
+}
+
 export interface WaveformPoint {
   step: number;
   a: BinarySignal;
@@ -54,7 +68,7 @@ export interface WorkspaceSnapshot {
   inputB: BinarySignal;
   outputValue: Signal;
   outputDescription: string;
-  labIds: LabIds | null;
+  hasLab: boolean;
   simulationStep: number;
   waveform: readonly WaveformPoint[];
   canRun: boolean;
@@ -66,7 +80,9 @@ export interface WorkspaceSnapshot {
  */
 export interface Workspace {
   checkEngine(): Promise<WorkspaceSnapshot>;
-  loadDemoCircuit(): Promise<WorkspaceSnapshot>;
+  loadDemoCircuit(): Promise<DemoLoadResult>;
+  /** 由编辑器会话在结构提交后更新仿真所使用的临时引擎身份。 */
+  rebindSimulation(ids: LabIds | null): WorkspaceSnapshot;
   runSimulation(): Promise<WorkspaceSnapshot>;
   toggleInput(key: InputKey): Promise<WorkspaceSnapshot>;
   snapshot(): WorkspaceSnapshot;
@@ -82,6 +98,7 @@ interface MutableState {
   inputA: BinarySignal;
   inputB: BinarySignal;
   outputValue: Signal;
+  hasLab: boolean;
   labIds: LabIds | null;
   simulationStep: number;
   waveform: WaveformPoint[];
@@ -124,6 +141,7 @@ function createInitialState(): MutableState {
     inputA: 1,
     inputB: 1,
     outputValue: "X",
+    hasLab: false,
     labIds: null,
     simulationStep: 0,
     waveform: [],
@@ -131,7 +149,6 @@ function createInitialState(): MutableState {
 }
 
 function createWorkspaceSnapshot(state: MutableState): WorkspaceSnapshot {
-  const labIds = state.labIds && { ...state.labIds };
   return {
     engineState: state.engineState,
     engineName: state.engineName,
@@ -143,7 +160,7 @@ function createWorkspaceSnapshot(state: MutableState): WorkspaceSnapshot {
     inputB: state.inputB,
     outputValue: state.outputValue,
     outputDescription: outputDescription(state.outputValue),
-    labIds: labIds ?? null,
+    hasLab: state.hasLab,
     simulationStep: state.simulationStep,
     waveform: state.waveform.map((point) => ({ ...point })),
     canRun:
@@ -242,9 +259,9 @@ export function createWorkspace(adapter: EngineAdapter): Workspace {
     }
   }
 
-  async function loadDemoCircuit(): Promise<WorkspaceSnapshot> {
-    if (state.labIds || state.isBusy || state.engineState !== "ready") {
-      return createWorkspaceSnapshot(state);
+  async function loadDemoCircuit(): Promise<DemoLoadResult> {
+    if (state.hasLab || state.isBusy || state.engineState !== "ready") {
+      return { snapshot: createWorkspaceSnapshot(state), bindings: null };
     }
     state.isBusy = true;
     state.message = "正在创建 2 个输入、AND 门和输出端…";
@@ -263,12 +280,22 @@ export function createWorkspace(adapter: EngineAdapter): Workspace {
         andGate: await addTrackedComponent("and"),
         output: await addTrackedComponent("output"),
       };
-      createdConnectionIds.push(await addConnection(ids.inputA, "out", ids.andGate, "in1"));
-      createdConnectionIds.push(await addConnection(ids.inputB, "out", ids.andGate, "in2"));
-      createdConnectionIds.push(await addConnection(ids.andGate, "out", ids.output, "in"));
+      const wireA = await addConnection(ids.inputA, "out", ids.andGate, "in1");
+      createdConnectionIds.push(wireA);
+      const wireB = await addConnection(ids.inputB, "out", ids.andGate, "in2");
+      createdConnectionIds.push(wireB);
+      const wireOutput = await addConnection(ids.andGate, "out", ids.output, "in");
+      createdConnectionIds.push(wireOutput);
+      const connections = { wireA, wireB, wireOutput };
       state.labIds = ids;
+      state.hasLab = true;
       state.message = "示例已创建，试着切换输入 A 或输入 B。";
       await runSimulationInternal(ids);
+      state.isBusy = false;
+      return {
+        snapshot: createWorkspaceSnapshot(state),
+        bindings: { components: { ...ids }, connections },
+      };
     } catch (error) {
       state.message = errorMessage(error, "创建示例电路失败。");
       state.operationError = state.message;
@@ -281,6 +308,11 @@ export function createWorkspace(adapter: EngineAdapter): Workspace {
     } finally {
       state.isBusy = false;
     }
+    return { snapshot: createWorkspaceSnapshot(state), bindings: null };
+  }
+
+  function rebindSimulation(ids: LabIds | null): WorkspaceSnapshot {
+    state.labIds = ids ? { ...ids } : null;
     return createWorkspaceSnapshot(state);
   }
 
@@ -309,6 +341,7 @@ export function createWorkspace(adapter: EngineAdapter): Workspace {
   return {
     checkEngine,
     loadDemoCircuit,
+    rebindSimulation,
     runSimulation,
     toggleInput,
     snapshot: () => createWorkspaceSnapshot(state),

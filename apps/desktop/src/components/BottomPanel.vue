@@ -6,6 +6,7 @@ import type {
   WaveformKey,
   WaveformRow,
 } from "../composables/useEditorState";
+import type { EditorConnectionId } from "../editor";
 import type { WaveformPoint, WorkspaceEngineState } from "../workspace";
 
 interface OutputItem {
@@ -13,7 +14,6 @@ interface OutputItem {
   label: string;
   value: Signal;
   description: string;
-  componentId: number | null;
 }
 
 defineProps<{
@@ -23,8 +23,9 @@ defineProps<{
   simulationStep: number;
   outputs: readonly OutputItem[];
   selectedNodeName: string;
-  selectedNode: NodeKey;
-  selectedNodeId: number | null;
+  selectedNode: NodeKey | null;
+  selectedConnection: EditorConnectionId | null;
+  selectedNodeId: string | null;
   selectedNodeValue: Signal;
   selectedNodeDescription: string;
   showDetails: boolean;
@@ -59,11 +60,11 @@ function waveformValue(point: WaveformPoint, key: WaveformKey): Signal {
       <button type="button" :class="{ 'bottom-tab--active': bottomTab === 'waveform' }" :disabled="!waveform.length" @click="emit('selectTab', 'waveform')">波形 <span class="tab-count">{{ waveform.length }}</span></button>
     </div>
     <div v-if="bottomTab === 'inspector'" class="bottom-content bottom-content--inspector" aria-live="polite">
-      <div class="bottom-inspector-heading"><div><span class="eyebrow">INSPECTOR</span><strong>{{ selectedNodeName }}</strong></div><span class="inspector-kind">{{ selectedNode === "andGate" ? "LOGIC" : "NODE" }}</span></div>
+      <div class="bottom-inspector-heading"><div><span class="eyebrow">INSPECTOR</span><strong>{{ selectedNodeName }}</strong></div><span class="inspector-kind">{{ selectedConnection ? "WIRE" : selectedNode === "andGate" ? "LOGIC" : "NODE" }}</span></div>
       <p>{{ selectedNodeDescription }}</p>
       <div class="inspector-value"><span>当前值</span><strong :class="signalClass(selectedNodeValue)">{{ selectedNodeValue }}</strong></div>
       <button class="details-button" type="button" @click="emit('toggleDetails')">{{ showDetails ? "收起详细信息" : "显示详细信息" }} <span aria-hidden="true">{{ showDetails ? "⌃" : "⌄" }}</span></button>
-      <div v-if="showDetails" class="inspector-details"><span>端口：{{ selectedNode === "andGate" ? "in1 / in2 / out" : selectedNode === "output" ? "in" : "out" }}</span><span>组件 ID：{{ selectedNodeId ?? "—" }}</span></div>
+      <div v-if="showDetails" class="inspector-details"><span>端口：{{ selectedConnection ? "source → target" : selectedNode === null ? "—" : selectedNode === "andGate" ? "in1 / in2 / out" : selectedNode === "output" ? "in" : "out" }}</span><span>编辑器 ID：{{ selectedNodeId ?? "—" }}</span></div>
     </div>
     <div v-else-if="bottomTab === 'outputs'" class="bottom-content bottom-content--outputs" aria-live="polite">
       <div class="output-panel-heading"><div><span class="eyebrow">OUTPUT MONITOR</span><strong>当前电路输出</strong></div><span>{{ outputs.length }} 个输出</span></div>

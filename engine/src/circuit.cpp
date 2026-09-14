@@ -120,9 +120,12 @@ ConnectionResult Circuit::addConnection(PortId source, PortId target) {
         return {std::nullopt, ConnectionError::TargetMustBeInput};
     }
 
+    // 只有两端仍然有效的 Connection 才占用输入端；dangling Connection 可保留但不能阻塞重连。
     const auto targetAlreadyConnected = std::find_if(
         connections_.begin(), connections_.end(),
-        [&target](const Connection& connection) { return samePort(connection.target, target); });
+        [this, &target](const Connection& connection) {
+            return !isDangling(connection.id) && samePort(connection.target, target);
+        });
     if (targetAlreadyConnected != connections_.end()) {
         return {std::nullopt, ConnectionError::InputAlreadyConnected};
     }

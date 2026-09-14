@@ -59,11 +59,15 @@ Phase 0–2.5 已建立 C++ 电路模型、组合逻辑求值、组合环路检�
 
 #### 2. 画布删除与撤销
 
-将协议删除能力接入编辑器模型，实现 Delete/Backspace 删除选中对象、清空确认以及 Ctrl/Cmd+Z 撤销。编辑器可以把“删除元件及其视觉连线”作为一个可恢复的复合命令；底层领域操作仍必须保持 Connection 独立生命周期的规则。
+将协议删除能力接入编辑器模型，实现 Delete/Backspace 删除选中对象、清空确认以及 Ctrl/Cmd+Z 撤销。编辑器可以把“删除元件并更新相关视觉连线状态”作为一个可恢复的复合命令；底层领域操作仍必须保持 Connection 独立生命周期的规则。
+
+设计采用 `EditorSession` 深模块（见 [ADR 0007](decisions/0007-editor-session-and-stable-editor-ids.md)）：Vue 只使用稳定的 editor ID 和 `deleteSelection()` / `undo()`，不接触临时 engine ID 或原始协议响应。删除 Component 时引擎保留相关 dangling Connection，编辑器在最后端口位置继续显示对应悬空 Wire；撤销先使用新的 engine ID 重建 Component 和 Connection，全部成功后再清理旧 dangling Connection。删除和撤销命令串行执行，协议失败通过补偿处理；补偿失败时进入恢复状态，不静默覆盖编辑器快照。
+
+该设计依赖 ADR 0003 的 dangling Connection 不占用 live 输入端口语义。当前固定 AND 示例先实现单选择删除、撤销和重做；多选、清空事务和项目加载沿用同一 Interface 继续扩展。
 
 验收标准：
 
-- 删除节点后画布立即更新，相关视觉连线不残留；
+- 删除节点后画布立即更新，相关视觉连线保留并明确显示悬空端点；
 - 撤销恢复节点、位置、属性和相关连接；
 - 清空画布需要确认，Esc 可以取消当前删除或连接操作；
 - 领域层的 dangling Connection 规则不被 UI 逻辑绕过。

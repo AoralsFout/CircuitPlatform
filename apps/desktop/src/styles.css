@@ -253,9 +253,14 @@ button:disabled { cursor: not-allowed; }
 .canvas-grid::after { position: absolute; inset: 0; background: radial-gradient(circle at center, transparent 22%, color-mix(in srgb, var(--theme-canvas) 70%, transparent) 100%); content: ""; }
 .canvas-zoom-layer { position: absolute; inset: 0; transform: scale(var(--canvas-zoom)); transform-origin: center; transition: transform .18s ease; }
 .signal-map { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
-.signal-wire { fill: none; stroke: var(--color-signal-low); stroke-width: 2.2; vector-effect: non-scaling-stroke; }
+.signal-wire-hit { fill: none; stroke: transparent; stroke-width: 16; vector-effect: non-scaling-stroke; pointer-events: stroke; cursor: pointer; }
+.signal-wire-hit:focus-visible { stroke: color-mix(in srgb, var(--color-focus) 20%, transparent); outline: none; }
+.signal-wire { fill: none; stroke: var(--color-signal-low); stroke-width: 2.2; vector-effect: non-scaling-stroke; pointer-events: none; }
 .signal-wire--live { stroke: var(--color-signal-high); stroke-width: 3; filter: drop-shadow(0 0 5px color-mix(in srgb, var(--color-signal-high) 42%, transparent)); }
 .signal-wire--unknown { stroke: var(--color-signal-unknown); stroke-dasharray: 6 5; }
+.signal-wire--dangling { stroke: var(--color-status-warning); stroke-width: 2.5; stroke-dasharray: 5 5; filter: none; }
+.signal-wire:focus-visible, .signal-wire--selected { stroke: var(--color-focus); stroke-width: 5; outline: none; }
+.dangling-endpoint { fill: var(--theme-canvas); stroke: var(--color-status-warning); stroke-width: 2; vector-effect: non-scaling-stroke; pointer-events: none; }
 .circuit-node { position: absolute; display: flex; width: 148px; height: 84px; flex-direction: column; justify-content: center; border: 1px solid var(--color-border-strong); border-radius: 4px; padding: 13px 14px; background: color-mix(in srgb, var(--color-panel) 90%, var(--theme-canvas)); box-shadow: 0 10px 25px var(--theme-shadow); cursor: pointer; }
 .circuit-node::before { position: absolute; inset: 4px; border: 1px solid color-mix(in srgb, var(--color-status-success) 10%, transparent); content: ""; pointer-events: none; }
 .circuit-node strong { margin-top: 7px; color: var(--color-text); font-size: 15px; font-weight: 600; }
@@ -294,6 +299,7 @@ button:disabled { cursor: not-allowed; }
 .legend-line { display: inline-block; width: 16px; height: 2px; background: var(--color-signal-low); }
 .legend-line--live { background: var(--color-signal-high); box-shadow: 0 0 6px color-mix(in srgb, var(--color-signal-high) 60%, transparent); }
 .legend-line--unknown { height: 0; border-top: 2px dashed var(--color-signal-unknown); background: transparent; }
+.legend-line--dangling { height: 0; border-top: 2px dashed var(--color-status-warning); background: transparent; }
 
 .bottom-panel { position: relative; min-height: 0; border-top: 1px solid var(--color-border); background: var(--theme-panel); }
 .bottom-error { position: absolute; z-index: 2; top: 7px; right: 15px; max-width: 42%; margin: 0; overflow: hidden; color: var(--color-status-error); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }

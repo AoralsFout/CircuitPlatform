@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ComponentKindName, EngineResponse, Signal } from "@circuit-platform/protocol";
+import { createAndDemoDocument, createEditorSession, type EditorBindings } from "../src/editor/index.ts";
+import { createProtocolEnginePort } from "../src/editor/protocolEnginePort.ts";
 import { createWorkspace, type EngineAdapter, type InputKey } from "../src/workspace/index.ts";
 
 type Call =
@@ -15,7 +17,8 @@ type Call =
 
 class FakeEngine implements EngineAdapter {
   readonly calls: Call[] = [];
-  private nextComponentId = 1;
+  nextComponentId = 1;
+  nextConnectionId = 1;
   private inputs = new Map<number, Signal>();
   private output: Signal = "X";
   errorOn: Call["type"] | null = null;
@@ -34,7 +37,7 @@ class FakeEngine implements EngineAdapter {
   async addConnection(source: { componentId: number; port: string }, target: { componentId: number; port: string }): Promise<EngineResponse> {
     this.calls.push({ type: "addConnection", sourceComponentId: source.componentId, sourcePort: source.port, targetComponentId: target.componentId, targetPort: target.port });
     if (this.errorOn === "addConnection") return this.error("连接失败");
-    return { type: "connection_added", requestId: "fake", connectionId: 1 };
+    return { type: "connection_added", requestId: "fake", connectionId: this.nextConnectionId++ };
   }
 
   async removeComponent(componentId: number): Promise<EngineResponse> {
@@ -80,10 +83,15 @@ test("creates and runs the AND example through the adapter", async () => {
   const workspace = createWorkspace(engine);
 
   await workspace.checkEngine();
-  const state = await workspace.loadDemoCircuit();
+  const loaded = await workspace.loadDemoCircuit();
+  const state = loaded.snapshot;
 
   assert.equal(state.engineState, "ready");
-  assert.deepEqual(state.labIds, { inputA: 1, inputB: 2, andGate: 3, output: 4 });
+  assert.equal(state.hasLab, true);
+  assert.deepEqual(loaded.bindings, {
+    components: { inputA: 1, inputB: 2, andGate: 3, output: 4 },
+    connections: { wireA: 1, wireB: 2, wireOutput: 3 },
+  });
   assert.equal(state.outputValue, 1);
   assert.equal(state.waveform.length, 1);
   assert.deepEqual(state.waveform[0], { step: 1, a: 1, b: 1, output: 1 });
@@ -109,9 +117,9 @@ test("turns an engine error response into visible workspace error state", async 
   const workspace = createWorkspace(engine);
   await workspace.checkEngine();
 
-  const state = await workspace.loadDemoCircuit();
+  const state = (await workspace.loadDemoCircuit()).snapshot;
 
-  assert.equal(state.labIds, null);
+  assert.equal(state.hasLab, false);
   assert.equal(state.outputValue, "X");
   assert.equal(state.message, "连接失败");
   assert.equal(state.operationError, "连接失败");
@@ -159,4 +167,55 @@ test("keeps the committed input when the next simulation is rejected", async () 
   assert.equal(state.operationError, "输入设置失败");
   assert.equal(state.engineState, "ready");
   assert.equal(state.canRun, true);
+});
+
+test("rebinds simulation to the new engine ID after undo", async () => {
+  const engine = new FakeEngine();
+  engine.nextComponentId = 41;
+  engine.nextConnectionId = 71;
+  const workspace = createWorkspace(engine);
+  await workspace.checkEngine();
+  const loaded = await workspace.loadDemoCircuit();
+  assert.ok(loaded.bindings);
+
+  const initialBindings: EditorBindings = {
+    components: {
+      "input-a": loaded.bindings.components.inputA,
+      "input-b": loaded.bindings.components.inputB,
+      "and-gate": loaded.bindings.components.andGate,
+      output: loaded.bindings.components.output,
+    },
+    connections: {
+      "wire-a": loaded.bindings.connections.wireA,
+      "wire-b": loaded.bindings.connections.wireB,
+      "wire-output": loaded.bindings.connections.wireOutput,
+    },
+  };
+  const session = createEditorSession(
+    { document: createAndDemoDocument(), bindings: initialBindings },
+    createProtocolEnginePort(engine),
+    {
+      onBindingsChanged(bindings) {
+        const inputA = bindings.components["input-a"];
+        const inputB = bindings.components["input-b"];
+        const andGate = bindings.components["and-gate"];
+        const output = bindings.components.output;
+        workspace.rebindSimulation(
+          inputA === undefined || inputB === undefined || andGate === undefined || output === undefined
+            ? null
+            : { inputA, inputB, andGate, output },
+        );
+      },
+    },
+  );
+
+  await session.dispatch({ type: "delete-component", componentId: "input-a" });
+  assert.equal(workspace.snapshot().canRun, false);
+  await session.dispatch({ type: "undo" });
+  assert.equal(workspace.snapshot().canRun, true);
+
+  engine.calls.length = 0;
+  await workspace.runSimulation();
+  assert.deepEqual(engine.calls[0], { type: "setInput", componentId: 45, value: 1 });
+  assert.equal(JSON.stringify(session.snapshot()).includes("41"), false);
 });
