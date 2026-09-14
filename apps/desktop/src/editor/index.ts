@@ -1,5 +1,32 @@
 import type { ComponentKindName } from "@circuit-platform/protocol";
 import { positionFromPlacementCenter } from "./placement.ts";
+import {
+  createDefaultOrthogonalRoute,
+  deleteRouteWaypoint,
+  moveRouteSegment,
+  moveRouteWaypoint,
+  normalizeOrthogonalRoute,
+  resetOrthogonalRoute,
+  routeFromWaypoints,
+} from "./route.ts";
+
+export {
+  ROUTE_GRID_SIZE,
+  ROUTE_TERMINAL_LENGTH,
+  createDefaultOrthogonalRoute,
+  deleteRouteWaypoint,
+  insertRouteDetour,
+  isOrthogonalRoute,
+  moveRouteSegment,
+  moveRouteWaypoint,
+  normalizeOrthogonalRoute,
+  resetOrthogonalRoute,
+  routeFromWaypoints,
+  snapRoutePoint,
+  type PortOutwardDirection,
+  type RouteAxis,
+  type RouteOptions,
+} from "./route.ts";
 
 export {
   EDITOR_GRID_SIZE,
@@ -42,6 +69,8 @@ export interface EditorConnection {
   danglingEndpoints: readonly EditorEndpointSide[];
   /** 可选的显式正交 Route；首尾点分别对应 source/target，旧文档可由投影层补齐。 */
   route?: readonly Point[];
+  /** 可选的 Waypoint 语义投影；route 存在时 route 是渲染用的完整点列。 */
+  waypoints?: readonly Point[];
   hiddenReason?: "pending-operation";
 }
 
@@ -102,6 +131,12 @@ export type EditorCommand =
   | { type: "move-component"; componentId: EditorComponentId; position: Point }
   | { type: "move-node"; nodeId: EditorComponentId; position: Point }
   | { type: "move-node"; componentId: EditorComponentId; position: Point }
+  | { type: "edit-route"; connectionId: EditorConnectionId; route: readonly Point[]; altKey?: boolean }
+  | { type: "move-route"; connectionId: EditorConnectionId; route: readonly Point[]; altKey?: boolean }
+  | { type: "move-route-waypoint"; connectionId: EditorConnectionId; pointIndex: number; delta: Point; altKey?: boolean }
+  | { type: "move-route-segment"; connectionId: EditorConnectionId; segmentIndex: number; offset: Point; altKey?: boolean }
+  | { type: "delete-waypoint"; connectionId: EditorConnectionId; pointIndex: number }
+  | { type: "reset-route"; connectionId: EditorConnectionId }
   | { type: "begin-placement"; kind: ComponentKindName; center?: Point; altKey?: boolean; continuous?: boolean }
   | { type: "start-placement"; kind: ComponentKindName; center?: Point; altKey?: boolean; continuous?: boolean }
   | { type: "update-placement"; center: Point; altKey?: boolean }
@@ -178,6 +213,7 @@ interface DeleteComponentFrame {
     source: EditorConnection["source"];
     target: EditorConnection["target"];
     route?: readonly Point[];
+    waypoints?: readonly Point[];
   }>;
 }
 
@@ -215,12 +251,14 @@ interface MoveComponentFrame {
     source: EditorConnection["source"];
     target: EditorConnection["target"];
     route?: readonly Point[];
+    waypoints?: readonly Point[];
   }>;
   connectionsAfter: Array<{
     id: EditorConnectionId;
     source: EditorConnection["source"];
     target: EditorConnection["target"];
     route?: readonly Point[];
+    waypoints?: readonly Point[];
   }>;
 }
 interface AddComponentFrame {
@@ -231,7 +269,17 @@ interface AddComponentFrame {
   position: Point;
 }
 
-type HistoryFrame = DeleteComponentFrame | DeleteConnectionFrame | ClearDocumentFrame | MoveComponentFrame | AddComponentFrame;
+interface EditRouteFrame {
+  type: "edit-route";
+  connectionId: EditorConnectionId;
+  routeBefore?: readonly Point[];
+  routeAfter: readonly Point[];
+  waypointsBefore?: readonly Point[];
+  waypointsAfter?: readonly Point[];
+  selectionBefore: EditorSelection;
+}
+
+type HistoryFrame = DeleteComponentFrame | DeleteConnectionFrame | ClearDocumentFrame | MoveComponentFrame | AddComponentFrame | EditRouteFrame;
 
 const busyError: EngineError = {
   code: "editor_busy",
@@ -283,6 +331,7 @@ function cloneVisibleDocument(document: MutableDocument): EditorDocument {
         source: { ...connection.source, point: { ...connection.source.point } },
         target: { ...connection.target, point: { ...connection.target.point } },
         ...(connection.route ? { route: connection.route.map((point) => ({ ...point })) } : {}),
+        ...(connection.waypoints ? { waypoints: connection.waypoints.map((point) => ({ ...point })) } : {}),
         danglingEndpoints: [
           ...(!isAttached(connection.source.componentId) ? ["source" as const] : []),
           ...(!isAttached(connection.target.componentId) ? ["target" as const] : []),
@@ -307,6 +356,7 @@ function toMutableDocument(document: EditorDocument): MutableDocument {
           source: { ...connection.source, point: { ...connection.source.point } },
           target: { ...connection.target, point: { ...connection.target.point } },
           ...(connection.route ? { route: connection.route.map((point) => ({ ...point })) } : {}),
+          ...(connection.waypoints ? { waypoints: connection.waypoints.map((point) => ({ ...point })) } : {}),
           danglingEndpoints: [...connection.danglingEndpoints],
         },
       ]),
@@ -416,39 +466,19 @@ function cloneConnectionGeometry(connection: EditorConnection): {
   source: EditorConnection["source"];
   target: EditorConnection["target"];
   route?: readonly Point[];
+  waypoints?: readonly Point[];
 } {
   return {
     id: connection.id,
     source: cloneEndpoint(connection.source),
     target: cloneEndpoint(connection.target),
     ...(connection.route ? { route: connection.route.map((point) => ({ ...point })) } : {}),
+    ...(connection.waypoints ? { waypoints: connection.waypoints.map((point) => ({ ...point })) } : {}),
   };
 }
 
 function pointsEqual(left: Point, right: Point): boolean {
   return left.x === right.x && left.y === right.y;
-}
-
-function defaultRoute(start: Point, end: Point): Point[] {
-  const midpoint = start.x + (end.x - start.x) / 2;
-  return [
-    { ...start },
-    { x: midpoint, y: start.y },
-    { x: midpoint, y: end.y },
-    { ...end },
-  ];
-}
-
-function orthogonalRoute(start: Point, end: Point, waypoints: readonly Point[]): Point[] {
-  if (waypoints.length === 0) return defaultRoute(start, end);
-  const route: Point[] = [{ ...start }];
-  const first = waypoints[0];
-  if (route[0].x !== first.x && route[0].y !== first.y) route.push({ x: first.x, y: route[0].y });
-  route.push(...waypoints.map((point) => ({ ...point })));
-  const last = route[route.length - 1];
-  if (last.x !== end.x && last.y !== end.y) route.push({ x: end.x, y: last.y });
-  route.push({ ...end });
-  return route;
 }
 
 function updateMovedConnection(
@@ -470,10 +500,10 @@ function updateMovedConnection(
   const source = moveEndpoint(connection.source);
   const target = moveEndpoint(connection.target);
   const oldRoute = connection.route;
-  const waypoints = oldRoute && oldRoute.length > 2 ? oldRoute.slice(1, -1) : [];
+  const waypoints = connection.waypoints ?? (oldRoute && oldRoute.length > 2 ? oldRoute.slice(1, -1) : []);
   connection.source = source;
   connection.target = target;
-  connection.route = orthogonalRoute(source.point, target.point, waypoints);
+  connection.route = routeFromWaypoints(source.point, target.point, waypoints);
 }
 
 function restoreConnectionGeometry(
@@ -485,6 +515,7 @@ function restoreConnectionGeometry(
   connection.source = cloneEndpoint(geometry.source);
   connection.target = cloneEndpoint(geometry.target);
   connection.route = geometry.route?.map((point) => ({ ...point }));
+  connection.waypoints = geometry.waypoints?.map((point) => ({ ...point }));
 }
 
 /**
@@ -1149,6 +1180,80 @@ export function createEditorSession(
     return { ok: true, snapshot: finishOperation() };
   }
 
+  function routePointsEqual(left: readonly Point[] | undefined, right: readonly Point[] | undefined): boolean {
+    if (!left || !right) return !left && !right;
+    return left.length === right.length && left.every((point, index) => pointsEqual(point, right[index]));
+  }
+
+  function clonePoints(points: readonly Point[] | undefined): readonly Point[] | undefined {
+    return points?.map((point) => ({ ...point }));
+  }
+
+  function routeForConnection(connection: EditorConnection): Point[] {
+    if (connection.route && connection.route.length >= 2) return connection.route.map((point) => ({ ...point }));
+    return createDefaultOrthogonalRoute(connection.source.point, connection.target.point);
+  }
+
+  function routeWithEndpoints(connection: EditorConnection, route: readonly Point[]): Point[] {
+    const points = route.length >= 2 ? route.map((point) => ({ ...point })) : routeForConnection(connection);
+    points[0] = { ...connection.source.point };
+    points[points.length - 1] = { ...connection.target.point };
+    return normalizeOrthogonalRoute(points);
+  }
+
+  function makeEditRouteFrame(connection: EditorConnection, route: readonly Point[]): EditRouteFrame {
+    const routeAfter = routeWithEndpoints(connection, route);
+    return {
+      type: "edit-route",
+      connectionId: connection.id,
+      routeBefore: clonePoints(connection.route),
+      routeAfter,
+      waypointsBefore: clonePoints(connection.waypoints),
+      waypointsAfter: routeAfter.slice(1, -1).map((point) => ({ ...point })),
+      selectionBefore: selection ? { ...selection } : null,
+    };
+  }
+
+  function applyRouteFrame(frame: EditRouteFrame, after: boolean): void {
+    const connection = document.connections.get(frame.connectionId);
+    if (!connection || connection.lifecycle !== "visible") return;
+    const route = after ? frame.routeAfter : frame.routeBefore;
+    const waypoints = after ? frame.waypointsAfter : frame.waypointsBefore;
+    if (route) connection.route = route.map((point) => ({ ...point }));
+    else delete connection.route;
+    if (waypoints) connection.waypoints = waypoints.map((point) => ({ ...point }));
+    else delete connection.waypoints;
+  }
+
+  async function editRoute(frame: EditRouteFrame): Promise<CommandResult> {
+    if (routePointsEqual(frame.routeBefore, frame.routeAfter) && routePointsEqual(frame.waypointsBefore, frame.waypointsAfter)) {
+      selection = frame.selectionBefore;
+      return { ok: true, snapshot: finishOperation() };
+    }
+    applyRouteFrame(frame, true);
+    selection = { kind: "connection", id: frame.connectionId };
+    undoStack.push(frame);
+    redoStack.length = 0;
+    return { ok: true, snapshot: finishOperation() };
+  }
+
+  async function undoEditRoute(frame: EditRouteFrame): Promise<CommandResult> {
+    applyRouteFrame(frame, false);
+    selection = frame.selectionBefore;
+    undoStack.pop();
+    redoStack.push(frame);
+    return { ok: true, snapshot: finishOperation() };
+  }
+
+  async function redoEditRoute(frame: EditRouteFrame, remainingRedo: readonly HistoryFrame[]): Promise<CommandResult> {
+    applyRouteFrame(frame, true);
+    selection = { kind: "connection", id: frame.connectionId };
+    redoStack.length = 0;
+    redoStack.push(...remainingRedo);
+    undoStack.push(frame);
+    return { ok: true, snapshot: finishOperation() };
+  }
+
   async function undoClearDocument(frame: ClearDocumentFrame): Promise<CommandResult> {
     const newComponentIds: EngineComponentId[] = [];
     const newConnectionIds: EngineConnectionId[] = [];
@@ -1217,6 +1322,7 @@ export function createEditorSession(
     if (frame.type === "delete-component") return undoDeleteComponent(frame);
     if (frame.type === "clear-document") return undoClearDocument(frame);
     if (frame.type === "move-component") return undoMoveComponent(frame);
+    if (frame.type === "edit-route") return undoEditRoute(frame);
     return undoDeleteConnection(frame);
   }
 
@@ -1240,6 +1346,7 @@ export function createEditorSession(
       return result;
     }
     if (frame.type === "move-component") return redoMoveComponent(frame, remainingRedo);
+    if (frame.type === "edit-route") return redoEditRoute(frame, remainingRedo);
     const connection = document.connections.get(frame.connectionId);
     if (!connection) return fail(recoveryError("重做所需的连接不存在。"));
     const result = await deleteConnection({
@@ -1313,6 +1420,31 @@ export function createEditorSession(
       const frame = makeMoveComponentFrame(componentId, command.position);
       if (!frame) return fail(noSelectionError);
       return moveComponent(frame);
+    }
+    if (
+      command.type === "edit-route" ||
+      command.type === "move-route" ||
+      command.type === "move-route-waypoint" ||
+      command.type === "move-route-segment" ||
+      command.type === "delete-waypoint" ||
+      command.type === "reset-route"
+    ) {
+      const connection = document.connections.get(command.connectionId);
+      if (!connection || connection.lifecycle !== "visible") return fail(noSelectionError);
+      const currentRoute = routeForConnection(connection);
+      let nextRoute: readonly Point[];
+      if (command.type === "edit-route" || command.type === "move-route") {
+        nextRoute = command.route;
+      } else if (command.type === "move-route-waypoint") {
+        nextRoute = moveRouteWaypoint(currentRoute, command.pointIndex, command.delta, command.altKey);
+      } else if (command.type === "move-route-segment") {
+        nextRoute = moveRouteSegment(currentRoute, command.segmentIndex, command.offset, command.altKey);
+      } else if (command.type === "delete-waypoint") {
+        nextRoute = deleteRouteWaypoint(currentRoute, command.pointIndex);
+      } else {
+        nextRoute = resetOrthogonalRoute(connection.source.point, connection.target.point);
+      }
+      return editRoute(makeEditRouteFrame(connection, nextRoute));
     }
     if (command.type === "request-clear") {
       const frame = makeClearDocumentFrame();

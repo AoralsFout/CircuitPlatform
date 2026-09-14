@@ -5,6 +5,7 @@ import type { InputKey, WorkspaceSnapshot } from "../workspace";
 import {
   createComponentDefinitionRegistry,
   createNodeDragController,
+  createRouteEditController,
   createViewportState,
   emptyCanvasScene,
   fitViewportToBounds,
@@ -69,6 +70,7 @@ export function useEditorState(
   selectEditor: (selection: EditorSelection) => Promise<void>,
   moveComponent: (componentId: EditorComponentId, position: Point) => Promise<void> = async () => undefined,
   updatePlacement?: (center: Point, altKey?: boolean) => Promise<void>,
+  editRoute: (connectionId: EditorConnectionId, route: readonly Point[]) => Promise<void> = async () => undefined,
 ) {
   const showDetails = ref(false);
   const showSidebar = ref(true);
@@ -112,6 +114,20 @@ export function useEditorState(
       dragPreview.value = null;
     },
   });
+  const routeEditPreview = ref<{ connectionId: string; route: readonly Point[] } | null>(null);
+  const routeEditController = createRouteEditController({
+    onPreview(preview) {
+      routeEditPreview.value = preview;
+    },
+    onCommit(preview) {
+      void editRoute(preview.connectionId, preview.route).finally(() => {
+        routeEditPreview.value = null;
+      });
+    },
+    onCancel() {
+      routeEditPreview.value = null;
+    },
+  });
   const previewPositions = computed<Readonly<Record<string, Point>>>(() => {
     const preview = dragPreview.value;
     return preview ? { [preview.nodeId]: { ...preview.position } } : {};
@@ -141,18 +157,18 @@ export function useEditorState(
           : "X";
       }
     }
-    return projectCanvasScene(snapshot, { signals }, registry, previewPositions.value);
+    return projectCanvasScene(snapshot, { signals }, registry, previewPositions.value, routeEditPreview.value ? { [routeEditPreview.value.connectionId]: routeEditPreview.value.route } : undefined);
   });
   const viewport = computed<ViewportState>(() => viewportState.value);
   const interaction = computed<InteractionState>(() => {
     if (workspaceState.value.engineState !== "ready") {
-      return { focusedId: null, draggingNodeId: null, dragPreview: null, connectionDraft: null, emptyState: { title: "等待仿真引擎", message: workspaceState.value.message } };
+      return { focusedId: null, draggingNodeId: null, dragPreview: null, connectionDraft: null, routeEditPreview: null, emptyState: { title: "等待仿真引擎", message: workspaceState.value.message } };
     }
     if (!workspaceState.value.hasLab) {
-      return { focusedId: null, draggingNodeId: null, dragPreview: null, connectionDraft: null, emptyState: { title: "正在准备示例电路", message: workspaceState.value.message } };
+      return { focusedId: null, draggingNodeId: null, dragPreview: null, connectionDraft: null, routeEditPreview: null, emptyState: { title: "正在准备示例电路", message: workspaceState.value.message } };
     }
     if (!editorState.value) {
-      return { focusedId: null, draggingNodeId: null, dragPreview: null, connectionDraft: null, emptyState: { title: "还没有电路", message: "从左侧选择一个元件，或加载一份示例电路开始。" } };
+      return { focusedId: null, draggingNodeId: null, dragPreview: null, connectionDraft: null, routeEditPreview: null, emptyState: { title: "还没有电路", message: "从左侧选择一个元件，或加载一份示例电路开始。" } };
     }
     if (editorState.value.document.components.length === 0 && !editorState.value.pendingPlacement) {
       return { focusedId: null, draggingNodeId: null, dragPreview: null, connectionDraft: null, emptyState: { title: "还没有电路", message: "从左侧选择一个元件，或加载一份示例电路开始。" } };
@@ -164,6 +180,7 @@ export function useEditorState(
       draggingNodeId: draggingNodeId.value,
       dragPreview: dragPreview.value,
       connectionDraft: null,
+      routeEditPreview: routeEditPreview.value,
       pendingPlacement: pending && pending.center && definition
         ? { kind: pending.kind, position: positionFromPlacementCenter(pending.center, definition.size, pending.altKey), size: definition.size }
         : null,
@@ -323,6 +340,24 @@ export function useEditorState(
     dragController.cancel();
   }
 
+  /** 开始一个 Wire 折点/线段的临时拖动。 */
+  function startRouteEdit(connectionId: string, route: readonly Point[], target: Parameters<typeof routeEditController.start>[2], pointerWorld: Point): void {
+    routeEditController.start(connectionId, route, target, pointerWorld);
+  }
+
+  /** 合并 Wire pointer move，并在释放时提交一次 Route 历史命令。 */
+  function moveRouteEdit(pointerWorld: Point, altKey = false): void {
+    routeEditController.move(pointerWorld, altKey);
+  }
+
+  function endRouteEdit(): void {
+    routeEditController.end();
+  }
+
+  function cancelRouteEdit(): void {
+    routeEditController.cancel();
+  }
+
   /** 应用画布交互层计算出的新视口；不会触碰编辑器文档或历史栈。 */
   function setViewport(next: ViewportState): void {
     viewportState.value = next;
@@ -371,6 +406,10 @@ export function useEditorState(
     moveNodeDrag,
     endNodeDrag,
     cancelNodeDrag,
+    startRouteEdit,
+    moveRouteEdit,
+    endRouteEdit,
+    cancelRouteEdit,
     placementMoved,
   };
 }
