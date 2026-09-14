@@ -2,6 +2,13 @@ import { computed, ref, type DeepReadonly, type Ref } from "vue";
 import type { Signal } from "@circuit-platform/protocol";
 import type { EditorComponentId, EditorConnectionId, EditorSelection, EditorSnapshot } from "../editor";
 import type { InputKey, WorkspaceSnapshot } from "../workspace";
+import {
+  createComponentDefinitionRegistry,
+  emptyCanvasScene,
+  projectCanvasScene,
+  type InteractionState,
+  type ViewportState,
+} from "../canvas";
 
 export type NodeKey = "inputA" | "inputB" | "andGate" | "output";
 export type RailPage = "components" | "inputs" | "layers" | "settings";
@@ -56,6 +63,46 @@ export function useEditorState(
   const activeRailPage = ref<RailPage>("components");
   const bottomTab = ref<BottomTab>("outputs");
   const zoom = ref(100);
+  const registry = createComponentDefinitionRegistry();
+
+  const canvasScene = computed(() => {
+    const snapshot = editorState.value;
+    if (!snapshot) return emptyCanvasScene();
+    const inputComponents = snapshot.document.components.filter((component) => component.kind === "input");
+    const signals: Record<string, Signal> = {};
+    inputComponents.forEach((component, index) => {
+      signals[`${component.id}:out`] = index === 0 ? workspaceState.value.inputA : index === 1 ? workspaceState.value.inputB : "X";
+    });
+    for (const component of snapshot.document.components) {
+      const definition = registry.get(component.kind);
+      if (!definition) continue;
+      for (const port of definition.ports) {
+        if (signals[`${component.id}:${port.id}`] !== undefined) continue;
+        signals[`${component.id}:${port.id}`] = port.direction === "output" && component.kind !== "input"
+          ? workspaceState.value.outputValue
+          : "X";
+      }
+    }
+    return projectCanvasScene(snapshot, { signals }, registry);
+  });
+  const viewport = computed<ViewportState>(() => ({
+    x: 0,
+    y: 0,
+    zoom: zoom.value / 100,
+    visibleRect: { width: 1000, height: 560 },
+  }));
+  const interaction = computed<InteractionState>(() => {
+    if (workspaceState.value.engineState !== "ready") {
+      return { focusedId: null, draggingNodeId: null, connectionDraft: null, emptyState: { title: "等待仿真引擎", message: workspaceState.value.message } };
+    }
+    if (!workspaceState.value.hasLab) {
+      return { focusedId: null, draggingNodeId: null, connectionDraft: null, emptyState: { title: "正在准备示例电路", message: workspaceState.value.message } };
+    }
+    if (!editorState.value || editorState.value.document.components.length === 0) {
+      return { focusedId: null, draggingNodeId: null, connectionDraft: null, emptyState: { title: "还没有电路", message: "从左侧选择一个元件，或加载一份示例电路开始。" } };
+    }
+    return { focusedId: editorState.value.selection?.id ?? null, draggingNodeId: null, connectionDraft: null };
+  });
 
   const componentVisibility = computed<Record<NodeKey, boolean>>(() => ({
     inputA: editorState.value?.document.components.some((component) => component.id === "input-a") ?? false,
@@ -187,6 +234,9 @@ export function useEditorState(
     selectedNodeDescription,
     selectedNodeId,
     zoomLabel,
+    canvasScene,
+    viewport,
+    interaction,
     selectNode,
     selectConnection,
     selectRailPage,
