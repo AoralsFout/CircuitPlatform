@@ -290,6 +290,7 @@ button:disabled { cursor: not-allowed; }
 .circuit-node:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 3px; }
 .circuit-node--active { border-color: var(--color-status-success); box-shadow: 0 0 25px color-mix(in srgb, var(--color-status-success) 14%, transparent); }
 .circuit-node--selected { border-color: var(--color-focus); box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-focus) 28%, transparent), 0 10px 25px var(--theme-shadow); }
+.circuit-node--pending { opacity: .48; border-style: dashed; pointer-events: none; }
 .output-signal { position: absolute; top: 12px; right: 14px; font-family: var(--font-data); font-size: 22px; }
 .output-description { margin-top: 7px; color: var(--color-text-faint); font-size: 9px; }
 .canvas-empty-state { position: absolute; top: 50%; left: 50%; display: flex; align-items: center; flex-direction: column; transform: translate(-50%, -50%); text-align: center; }

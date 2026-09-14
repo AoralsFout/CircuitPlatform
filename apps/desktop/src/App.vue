@@ -28,6 +28,9 @@ const {
   cancelCurrentOperation,
   undo,
   redo,
+  beginPlacement,
+  updatePlacement,
+  placeComponent,
 } = useWorkspace();
 const {
   selectedNode,
@@ -52,6 +55,7 @@ const {
   canvasScene,
   viewport,
   interaction,
+  componentDefinitions,
   selectNode,
   selectConnection,
   selectRailPage,
@@ -63,7 +67,8 @@ const {
   moveNodeDrag,
   endNodeDrag,
   cancelNodeDrag,
-} = useEditorState(state, editorState, select, moveComponent);
+  placementMoved,
+} = useEditorState(state, editorState, select, moveComponent, updatePlacement);
 const {
   preference: themePreference,
   label: themeLabel,
@@ -122,9 +127,11 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
         :selected-node="selectedNode"
         :component-visibility="componentVisibility"
         :component-count="editorState?.document.components.length ?? 0"
+        :component-definitions="componentDefinitions"
         @close="showSidebar = false"
         @select-node="selectNode"
         @toggle-input="toggleInput"
+        @place-component="beginPlacement"
       />
 
       <section v-if="activeRailPage !== 'settings'" class="editor-main" aria-label="电路编辑器">
@@ -157,6 +164,8 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           @node-drag-cancel="cancelNodeDrag()"
           @viewport-change="setViewport"
           @resize="resizeCanvas"
+          @placement-move="placementMoved"
+          @place-component="placeComponent"
         />
         <BottomPanel
           :bottom-tab="bottomTab"

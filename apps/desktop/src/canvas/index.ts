@@ -238,6 +238,7 @@ export interface InteractionState {
   /** 拖动期间的临时世界坐标；只存在于交互层，不写入 EditorSnapshot。 */
   dragPreview?: { nodeId: string; position: Point } | null;
   connectionDraft: readonly Point[] | null;
+  pendingPlacement?: { kind: ComponentKindName; position: Point; size: { width: number; height: number } } | null;
   emptyState?: { title: string; message: string };
 }
 
@@ -252,6 +253,10 @@ function freezeDefinition(definition: ComponentDefinition): ComponentDefinition 
 
 function endpointKey(componentId: string, portId: string): string {
   return `${componentId}:${portId}`;
+}
+
+function getSignal(snapshot: SimulationSnapshot, componentId: string, portId: string): Signal {
+  return snapshot.signals[endpointKey(componentId, portId)] ?? "X";
 }
 
 function routeFor(connection: EditorConnection): readonly Point[] {
@@ -295,10 +300,6 @@ function previewEndpoint(
     x: preview.x + endpoint.point.x - component.position.x,
     y: preview.y + endpoint.point.y - component.position.y,
   };
-}
-
-function getSignal(snapshot: SimulationSnapshot, componentId: string, portId: string): Signal {
-  return snapshot.signals[endpointKey(componentId, portId)] ?? "X";
 }
 
 function portPoint(component: EditorComponent, definition: ComponentDefinition, port: PortDefinition): Point {
@@ -372,7 +373,9 @@ export function projectCanvasScene(
           y: nodePosition.y + portDefinition.offset.y,
         },
         offset: { ...portDefinition.offset },
-        signal: getSignal(simulationSnapshot, component.id, portDefinition.id),
+        // 未提供仿真快照时，新 Input 的默认驱动值为 0，其余端口保持未知 X。
+        signal: simulationSnapshot.signals[endpointKey(component.id, portDefinition.id)]
+          ?? (component.kind === "input" && portDefinition.direction === "output" ? 0 : "X"),
         dangling: danglingPorts.has(portDefinition.id),
       })),
       selected: selected?.kind === "component" && selected.id === component.id,

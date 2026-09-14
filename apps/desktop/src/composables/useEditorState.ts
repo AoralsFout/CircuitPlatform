@@ -14,6 +14,7 @@ import {
   type InteractionState,
   type ViewportState,
 } from "../canvas";
+import { positionFromPlacementCenter } from "../editor/placement.ts";
 
 export type NodeKey = "inputA" | "inputB" | "andGate" | "output";
 export type RailPage = "components" | "inputs" | "layers" | "settings";
@@ -63,6 +64,7 @@ export function useEditorState(
   editorState: DeepReadonly<Ref<EditorSnapshot | null>>,
   selectEditor: (selection: EditorSelection) => Promise<void>,
   moveComponent: (componentId: EditorComponentId, position: Point) => Promise<void> = async () => undefined,
+  updatePlacement?: (center: Point, altKey?: boolean) => Promise<void>,
 ) {
   const showDetails = ref(false);
   const showSidebar = ref(true);
@@ -109,15 +111,21 @@ export function useEditorState(
     if (!snapshot) return emptyCanvasScene();
     const inputComponents = snapshot.document.components.filter((component) => component.kind === "input");
     const signals: Record<string, Signal> = {};
-    inputComponents.forEach((component, index) => {
-      signals[`${component.id}:out`] = index === 0 ? workspaceState.value.inputA : index === 1 ? workspaceState.value.inputB : "X";
+    inputComponents.forEach((component) => {
+      // 示例输入由工作区控制；通过元件库新建的 Input 从 0 开始，不继承示例状态。
+      signals[`${component.id}:out`] = component.id === "input-a"
+        ? workspaceState.value.inputA
+        : component.id === "input-b"
+          ? workspaceState.value.inputB
+          : 0;
     });
     for (const component of snapshot.document.components) {
       const definition = registry.get(component.kind);
       if (!definition) continue;
       for (const port of definition.ports) {
         if (signals[`${component.id}:${port.id}`] !== undefined) continue;
-        signals[`${component.id}:${port.id}`] = port.direction === "output" && component.kind !== "input"
+        const isDemoComponent = ["input-a", "input-b", "and-gate", "output"].includes(component.id);
+        signals[`${component.id}:${port.id}`] = isDemoComponent && port.direction === "output" && component.kind !== "input"
           ? workspaceState.value.outputValue
           : "X";
       }
@@ -132,10 +140,23 @@ export function useEditorState(
     if (!workspaceState.value.hasLab) {
       return { focusedId: null, draggingNodeId: null, dragPreview: null, connectionDraft: null, emptyState: { title: "正在准备示例电路", message: workspaceState.value.message } };
     }
-    if (!editorState.value || editorState.value.document.components.length === 0) {
+    if (!editorState.value) {
       return { focusedId: null, draggingNodeId: null, dragPreview: null, connectionDraft: null, emptyState: { title: "还没有电路", message: "从左侧选择一个元件，或加载一份示例电路开始。" } };
     }
-    return { focusedId: editorState.value.selection?.id ?? null, draggingNodeId: draggingNodeId.value, dragPreview: dragPreview.value, connectionDraft: null };
+    if (editorState.value.document.components.length === 0 && !editorState.value.pendingPlacement) {
+      return { focusedId: null, draggingNodeId: null, dragPreview: null, connectionDraft: null, emptyState: { title: "还没有电路", message: "从左侧选择一个元件，或加载一份示例电路开始。" } };
+    }
+    const pending = editorState.value.pendingPlacement;
+    const definition = pending ? registry.get(pending.kind) : undefined;
+    return {
+      focusedId: editorState.value.selection?.id ?? null,
+      draggingNodeId: draggingNodeId.value,
+      dragPreview: dragPreview.value,
+      connectionDraft: null,
+      pendingPlacement: pending && pending.center && definition
+        ? { kind: pending.kind, position: positionFromPlacementCenter(pending.center, definition.size, pending.altKey), size: definition.size }
+        : null,
+    };
   });
 
   const componentVisibility = computed<Record<NodeKey, boolean>>(() => ({
@@ -239,6 +260,10 @@ export function useEditorState(
     void selectEditor({ kind: "connection", id: connectionId });
   }
 
+  function placementMoved(center: Point, altKey = false): void {
+    void updatePlacement?.(center, altKey);
+  }
+
   function selectRailPage(page: RailPage): void {
     activeRailPage.value = page;
     if (page !== "settings") showSidebar.value = true;
@@ -316,6 +341,7 @@ export function useEditorState(
     canvasScene,
     viewport,
     interaction,
+    componentDefinitions: registry.list(),
     selectNode,
     selectConnection,
     selectRailPage,
@@ -327,5 +353,6 @@ export function useEditorState(
     moveNodeDrag,
     endNodeDrag,
     cancelNodeDrag,
+    placementMoved,
   };
 }

@@ -585,3 +585,64 @@ test("a no-op component move does not create layout history", async () => {
   assert.equal(result.snapshot.canUndo, false);
   assert.deepEqual(engine.calls, []);
 });
+test("library click creates a pending placement without changing the document", async () => {
+  const engine = new FakeEngine();
+  const session = createSession(engine);
+  const before = session.snapshot().document;
+
+  const pending = await session.dispatch({ type: "begin-placement", kind: "xor" });
+
+  assert.equal(pending.ok, true);
+  assert.deepEqual(pending.snapshot.document, before);
+  assert.deepEqual(pending.snapshot.pendingPlacement, { kind: "xor", center: null, altKey: false, continuous: false });
+  assert.deepEqual(engine.calls, []);
+});
+
+test("places every combinational kind at a snapped world center and selects it", async () => {
+  const engine = new FakeEngine();
+  const session = createEditorSession({ document: { components: [], connections: [] }, bindings: { components: {}, connections: {} } }, engine);
+  for (const kind of ["input", "output", "and", "or", "nand", "nor", "xor", "xnor", "not"] as const) {
+    const result = await session.dispatch({ type: "add-component", kind, position: { x: 101, y: 67 } });
+    assert.equal(result.ok, true);
+    const component = result.snapshot.document.components.at(-1);
+    assert.equal(component?.kind, kind);
+    assert.deepEqual(component?.position, { x: 22, y: 22 });
+    assert.equal(result.snapshot.selection?.kind, "component");
+  }
+  assert.equal(session.snapshot().document.connections.length, 0);
+  assert.deepEqual(engine.calls.filter((call) => call.startsWith("addComponent:")), [
+    "addComponent:input", "addComponent:output", "addComponent:and", "addComponent:or",
+    "addComponent:nand", "addComponent:nor", "addComponent:xor", "addComponent:xnor", "addComponent:not",
+  ]);
+});
+
+test("Alt preserves the exact placement center and failed placement remains pending", async () => {
+  const engine = new FakeEngine();
+  const session = createSession(engine);
+  await session.dispatch({ type: "begin-placement", kind: "input", center: { x: 11, y: 19 }, altKey: true });
+  const placed = await session.dispatch({ type: "place-component", center: { x: 11, y: 19 }, altKey: true });
+  assert.equal(placed.ok, true);
+  assert.deepEqual(placed.snapshot.document.components.at(-1)?.position, { x: -63, y: -23 });
+  assert.deepEqual(placed.snapshot.selection, { kind: "component", id: "component-1" });
+
+  engine.failOn = "addComponent:output";
+  await session.dispatch({ type: "begin-placement", kind: "output" });
+  const failed = await session.dispatch({ type: "place-component", center: { x: 0, y: 0 } });
+  assert.equal(failed.ok, false);
+  assert.deepEqual(failed.snapshot.pendingPlacement, { kind: "output", center: { x: 0, y: 0 }, altKey: false, continuous: false });
+});
+
+test("added component is undoable without reusing its editor identity", async () => {
+  const engine = new FakeEngine();
+  const session = createEditorSession({ document: { components: [], connections: [] }, bindings: { components: {}, connections: {} } }, engine);
+  const added = await session.dispatch({ type: "add-component", kind: "and", position: { x: 16, y: 16 } });
+  const id = added.snapshot.document.components[0].id;
+  assert.equal(id, "component-1");
+  await session.dispatch({ type: "undo" });
+  assert.equal(session.snapshot().document.components.length, 0);
+  const redone = await session.dispatch({ type: "redo" });
+  assert.equal(redone.ok, true);
+  assert.equal(redone.snapshot.document.components[0].id, id);
+  assert.equal(redone.snapshot.document.components[0].displayName, "AND 门 1");
+  assert.equal(engine.calls.filter((call) => call.startsWith("addComponent:and")).length, 2);
+});

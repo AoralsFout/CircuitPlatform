@@ -27,6 +27,8 @@ const emit = defineEmits<{
   nodeDragMove: [payload: { pointerWorld: { x: number; y: number }; altKey: boolean }];
   nodeDragEnd: [];
   nodeDragCancel: [];
+  placementMove: [center: { x: number; y: number }, altKey: boolean];
+  placeComponent: [center: { x: number; y: number }, altKey: boolean];
 }>();
 
 const canvasElement = ref<HTMLElement | null>(null);
@@ -109,6 +111,13 @@ function onWheel(event: WheelEvent): void {
 }
 
 function onPointerDown(event: PointerEvent): void {
+  if (props.interaction.pendingPlacement && event.button === 0 && !spacePressed) {
+    const point = screenToWorld(pointerInCanvas(event), props.viewport);
+    emit("placeComponent", point, event.altKey);
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
   if (!isViewportPanPointer(event.button, spacePressed)) return;
   panPointer = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
   canvasElement.value?.setPointerCapture(event.pointerId);
@@ -122,6 +131,9 @@ function onPointerMove(event: PointerEvent): void {
     emit("nodeDragMove", { pointerWorld: pointerInWorld(event), altKey: event.altKey });
     event.preventDefault();
     return;
+  }
+  if (props.interaction.pendingPlacement && !nodeDragPointer && !panPointer && !spacePressed) {
+    emit("placementMove", screenToWorld(pointerInCanvas(event), props.viewport), event.altKey);
   }
   if (!panPointer || panPointer.pointerId !== event.pointerId) return;
   const delta = { x: event.clientX - panPointer.x, y: event.clientY - panPointer.y };
@@ -207,6 +219,9 @@ onBeforeUnmount(() => {
           <strong>{{ node.symbol }} <span class="node-display-name">{{ node.displayName }}</span></strong>
           <span class="node-description">{{ node.description }}</span>
           <span v-for="port in node.ports" :key="port.id" class="node-port" :class="[port.direction === 'input' ? 'node-port--left' : 'node-port--right', signalClass(port.signal)]" :style="{ top: `${port.offset.y}px` }">{{ port.name }} · {{ port.signal }}</span>
+        </article>
+        <article v-if="interaction.pendingPlacement" class="circuit-node circuit-node--pending" :style="{ left: `${interaction.pendingPlacement.position.x}px`, top: `${interaction.pendingPlacement.position.y}px`, width: `${interaction.pendingPlacement.size.width}px`, height: `${interaction.pendingPlacement.size.height}px` }" aria-hidden="true">
+          <span class="node-tag">待放置</span><strong>{{ interaction.pendingPlacement.kind.toUpperCase() }}</strong><span class="node-description">单击画布放置 · Esc 取消</span>
         </article>
       </div>
       <div v-if="interaction.emptyState" class="canvas-empty-state"><span class="empty-orbit">＋</span><strong>{{ interaction.emptyState.title }}</strong><p>{{ interaction.emptyState.message }}</p></div>
