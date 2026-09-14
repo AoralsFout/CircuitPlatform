@@ -632,6 +632,96 @@ test("Alt preserves the exact placement center and failed placement remains pend
   assert.deepEqual(failed.snapshot.pendingPlacement, { kind: "output", center: { x: 0, y: 0 }, altKey: false, continuous: false });
 });
 
+test("failed placement can be retried with the same editor identity and position", async () => {
+  const engine = new FakeEngine();
+  engine.failNext("addComponent:and");
+  const session = createEditorSession({ document: { components: [], connections: [] }, bindings: { components: {}, connections: {} } }, engine);
+
+  const failed = await session.dispatch({ type: "add-component", kind: "and", position: { x: 101, y: 67 } });
+  assert.equal(failed.ok, false);
+  assert.deepEqual(failed.snapshot.document, { components: [], connections: [] });
+  assert.equal(failed.snapshot.canUndo, false);
+  assert.deepEqual(failed.snapshot.pendingPlacement, { kind: "and", center: { x: 101, y: 67 }, altKey: false, continuous: false });
+
+  const retried = await session.dispatch({ type: "retry-current-operation" });
+  assert.equal(retried.ok, true);
+  assert.deepEqual(retried.snapshot.document.components, [{
+    id: "component-1",
+    kind: "and",
+    displayName: "AND 门 1",
+    position: { x: 22, y: 22 },
+    lifecycle: "active",
+  }]);
+  assert.deepEqual(retried.snapshot.selection, { kind: "component", id: "component-1" });
+  assert.equal(retried.snapshot.pendingPlacement, null);
+  assert.deepEqual(engine.calls, ["addComponent:and", "addComponent:and"]);
+});
+
+test("cancel after a failed placement clears the pending request without changing history", async () => {
+  const engine = new FakeEngine();
+  engine.failOn = "addComponent:output";
+  const session = createEditorSession({ document: { components: [], connections: [] }, bindings: { components: {}, connections: {} } }, engine);
+
+  await session.dispatch({ type: "add-component", kind: "output", position: { x: 32, y: 48 } });
+  const cancelled = await session.dispatch({ type: "cancel-current-operation" });
+
+  assert.equal(cancelled.ok, true);
+  assert.equal(cancelled.snapshot.pendingPlacement, null);
+  assert.equal(cancelled.snapshot.error, null);
+  assert.equal(cancelled.snapshot.canUndo, false);
+  assert.deepEqual(cancelled.snapshot.document, { components: [], connections: [] });
+});
+
+test("cancellation is busy once an add request has been sent", async () => {
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  const engine = new FakeEngine();
+  const original = engine.addComponent.bind(engine);
+  engine.addComponent = async (kind) => {
+    await pending;
+    return original(kind);
+  };
+  const session = createEditorSession({ document: { components: [], connections: [] }, bindings: { components: {}, connections: {} } }, engine);
+
+  const adding = session.dispatch({ type: "add-component", kind: "not", position: { x: 64, y: 64 } });
+  const cancelled = await session.dispatch({ type: "cancel-current-operation" });
+  assert.equal(cancelled.ok, false);
+  assert.equal(cancelled.error.code, "editor_busy");
+  assert.equal(cancelled.snapshot.operation, "busy");
+  assert.deepEqual(cancelled.snapshot.document, { components: [], connections: [] });
+
+  release();
+  const completed = await adding;
+  assert.equal(completed.ok, true);
+  assert.equal(completed.snapshot.document.components[0]?.id, "component-1");
+});
+
+test("transport failure keeps the pending add retryable without publishing a half component", async () => {
+  const engine = new FakeEngine();
+  let first = true;
+  const original = engine.addComponent.bind(engine);
+  engine.addComponent = async (kind) => {
+    if (first) {
+      first = false;
+      throw new Error("engine disconnected");
+    }
+    return original(kind);
+  };
+  const session = createEditorSession({ document: { components: [], connections: [] }, bindings: { components: {}, connections: {} } }, engine);
+
+  const failed = await session.dispatch({ type: "add-component", kind: "or", position: { x: 97, y: 33 } });
+  assert.equal(failed.ok, false);
+  assert.equal(failed.error.code, "engine_operation_failed");
+  assert.deepEqual(failed.snapshot.document, { components: [], connections: [] });
+  assert.equal(failed.snapshot.canUndo, false);
+  assert.deepEqual(failed.snapshot.pendingPlacement, { kind: "or", center: { x: 97, y: 33 }, altKey: false, continuous: false });
+
+  const retried = await session.dispatch({ type: "retry-placement" });
+  assert.equal(retried.ok, true);
+  assert.equal(retried.snapshot.document.components[0]?.id, "component-1");
+  assert.equal(retried.snapshot.document.components[0]?.displayName, "OR 门 1");
+});
+
 test("added component is undoable without reusing its editor identity", async () => {
   const engine = new FakeEngine();
   const session = createEditorSession({ document: { components: [], connections: [] }, bindings: { components: {}, connections: {} } }, engine);

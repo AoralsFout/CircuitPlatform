@@ -114,6 +114,8 @@ export type EditorCommand =
   | { type: "request-clear" }
   | { type: "confirm-clear" }
   | { type: "cancel-current-operation" }
+  | { type: "retry-current-operation" }
+  | { type: "retry-placement" }
   | { type: "undo" }
   | { type: "redo" };
 
@@ -790,6 +792,9 @@ export function createEditorSession(
   async function addComponentAt(kind: ComponentKindName, center: Point, altKey: boolean): Promise<CommandResult> {
     const continuePlacement = pendingPlacement?.continuous ?? false;
     const identity = pendingIdentity ?? nextComponentIdentity(kind);
+    if (!Number.isFinite(center.x) || !Number.isFinite(center.y)) {
+      return fail({ code: "invalid_placement", message: "元件放置位置无效。", retryable: false });
+    }
     const position = componentPosition(center, altKey);
     const component: EditorComponent = {
       id: identity.id,
@@ -798,15 +803,20 @@ export function createEditorSession(
       position,
       lifecycle: "active",
     };
+
+    // 在请求发出前固定 pending 的身份和位置。pending 只属于交互投影，
+    // 文档、绑定和历史仍要等引擎确认成功后一次性提交。
+    pendingIdentity = identity;
+    pendingPlacement = {
+      kind,
+      center: { ...center },
+      altKey,
+      continuous: continuePlacement,
+    };
+    publish();
+
     const added = await call(() => engine.addComponent(kind));
     if (!added.ok) {
-      pendingPlacement = {
-        kind,
-        center: { ...center },
-        altKey,
-        continuous: continuePlacement,
-      };
-      pendingIdentity = identity;
       return fail(added.error);
     }
 
@@ -1275,9 +1285,21 @@ export function createEditorSession(
     }
     if (command.type === "update-placement") {
       if (!pendingPlacement) return fail({ code: "no_pending_placement", message: "当前没有待放置的元件。", retryable: false });
+      if (!Number.isFinite(command.center.x) || !Number.isFinite(command.center.y)) {
+        return fail({ code: "invalid_placement", message: "元件放置位置无效。", retryable: false });
+      }
       pendingPlacement = { ...pendingPlacement, center: { ...command.center }, altKey: command.altKey ?? pendingPlacement.altKey };
       return { ok: true, snapshot: publish() };
     }
+
+    if (command.type === "retry-current-operation" || command.type === "retry-placement") {
+      if (!pendingPlacement?.center) {
+        return fail({ code: "no_pending_placement", message: "当前没有可重试的元件放置。", retryable: false });
+      }
+      if (!beginOperation()) return { ok: false, error: busyError, snapshot: currentSnapshot() };
+      return addComponentAt(pendingPlacement.kind, pendingPlacement.center, pendingPlacement.altKey);
+    }
+
     if (!beginOperation()) return { ok: false, error: busyError, snapshot: currentSnapshot() };
 
     if (command.type === "select") {
@@ -1307,6 +1329,7 @@ export function createEditorSession(
       else if (pendingPlacement) {
         pendingPlacement = null;
         pendingIdentity = null;
+        error = null;
       }
       else selection = null;
       return { ok: true, snapshot: finishOperation() };
