@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import type { NodeKey, RailPage } from "../composables/useEditorState";
+import type { ComponentDefinition } from "../canvas";
+import type { ComponentKindName } from "@circuit-platform/protocol";
 import type { InputKey } from "../workspace";
 
 interface InputControl {
@@ -15,12 +17,14 @@ defineProps<{
   selectedNode: NodeKey | null;
   componentVisibility: Record<NodeKey, boolean>;
   componentCount: number;
+  componentDefinitions: readonly ComponentDefinition[];
 }>();
 
 const emit = defineEmits<{
   close: [];
   selectNode: [node: NodeKey];
   toggleInput: [key: InputKey];
+  placeComponent: [kind: ComponentKindName, continuous: boolean];
 }>();
 </script>
 
@@ -29,15 +33,13 @@ const emit = defineEmits<{
     <div class="sidebar-heading"><div><span class="eyebrow">WORKSPACE / {{ activeRailPage }}</span><h1>{{ activeRailPage === "components" ? "元件库" : activeRailPage === "inputs" ? "输入设置" : "层级" }}</h1></div><button class="icon-button" type="button" aria-label="收起侧栏" title="收起侧栏" @click="emit('close')">‹</button></div>
 
     <template v-if="activeRailPage === 'components'">
-      <div class="sidebar-section-title"><span>基础元件</span><span class="component-count">5</span></div>
+      <div class="sidebar-section-title"><span>元件库</span><span class="component-count">{{ componentDefinitions.length }}</span></div>
       <div class="component-list">
-        <button class="component-item" type="button" disabled title="元件添加将在画布编辑模式中开放"><span class="component-symbol component-symbol--input">↗</span><span><strong>输入</strong><small>INPUT / 1 bit</small></span><span class="drag-hint">＋</span></button>
-        <button class="component-item" type="button" disabled title="元件添加将在画布编辑模式中开放"><span class="component-symbol component-symbol--output">↙</span><span><strong>输出</strong><small>OUTPUT / 1 bit</small></span><span class="drag-hint">＋</span></button>
-        <button class="component-item component-item--selected" type="button" :disabled="!componentVisibility.andGate" @click="emit('selectNode', 'andGate')"><span class="component-symbol component-symbol--gate">&amp;</span><span><strong>AND 门</strong><small>LOGIC / 2 → 1</small></span><span class="drag-hint">＋</span></button>
-        <button class="component-item" type="button" disabled title="暂未开放"><span class="component-symbol">≥1</span><span><strong>OR 门</strong><small>LOGIC / 2 → 1</small></span><span class="drag-hint">＋</span></button>
-        <button class="component-item" type="button" disabled title="暂未开放"><span class="component-symbol">¬</span><span><strong>NOT 门</strong><small>LOGIC / 1 → 1</small></span><span class="drag-hint">＋</span></button>
+        <button v-for="definition in componentDefinitions" :key="definition.kind" class="component-item" :class="{ 'component-item--disabled': !definition.available }" type="button" :disabled="!definition.available" :title="definition.disabledReason ?? `添加${definition.displayName}`" @click="emit('placeComponent', definition.kind, $event.shiftKey)">
+          <span class="component-symbol">{{ definition.symbol }}</span><span><strong>{{ definition.displayName }}</strong><small>{{ definition.kind.toUpperCase() }} / {{ definition.ports.filter((port) => port.direction === 'input').length }} → {{ definition.ports.filter((port) => port.direction === 'output').length }}</small></span><span class="drag-hint">＋</span>
+        </button>
       </div>
-      <p class="sidebar-hint">当前展示示例所用元件；添加和拖动将在后续编辑切片开放。</p>
+      <p class="sidebar-hint">单击元件后移动到画布并单击放置；按 Esc 取消。</p>
     </template>
 
     <template v-else-if="activeRailPage === 'inputs'">

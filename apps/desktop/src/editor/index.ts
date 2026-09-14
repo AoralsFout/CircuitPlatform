@@ -1,4 +1,12 @@
 import type { ComponentKindName } from "@circuit-platform/protocol";
+import { positionFromPlacementCenter } from "./placement.ts";
+
+export {
+  EDITOR_GRID_SIZE,
+  positionFromPlacementCenter,
+  snapWorldPoint,
+  type ComponentPlacementIntent,
+} from "./placement.ts";
 
 export type EditorComponentId = string;
 export type EditorConnectionId = string;
@@ -80,6 +88,8 @@ export interface CircuitEnginePort {
   removeConnection(
     connectionId: EngineConnectionId,
   ): Promise<EngineResult<{ connectionId: EngineConnectionId }>>;
+  /** 结构命令成功后可选地让仿真引擎重新稳定；失败不回滚合法结构。 */
+  settle?(): Promise<EngineResult<{ status: "ok" }>>;
 }
 
 export type EditorSelection =
@@ -89,6 +99,12 @@ export type EditorSelection =
 
 export type EditorCommand =
   | { type: "select"; selection: EditorSelection }
+  | { type: "begin-placement"; kind: ComponentKindName; center?: Point; altKey?: boolean; continuous?: boolean }
+  | { type: "start-placement"; kind: ComponentKindName; center?: Point; altKey?: boolean; continuous?: boolean }
+  | { type: "update-placement"; center: Point; altKey?: boolean }
+  | { type: "place-component"; kind?: ComponentKindName; center: Point; altKey?: boolean; continuous?: boolean }
+  | { type: "commit-placement"; kind?: ComponentKindName; center: Point; altKey?: boolean; continuous?: boolean }
+  | { type: "add-component"; kind: ComponentKindName; position: Point; altKey?: boolean }
   | { type: "delete-selected" }
   | { type: "delete-component"; componentId: EditorComponentId }
   | { type: "delete-connection"; connectionId: EditorConnectionId }
@@ -112,6 +128,15 @@ export interface EditorSnapshot {
   canRedo: boolean;
   confirmation: EditorConfirmation | null;
   error: EngineError | null;
+  /** 元件库点击后的临时放置状态；不会进入 EditorDocument 或历史。 */
+  pendingPlacement?: PendingPlacement | null;
+}
+
+export interface PendingPlacement {
+  kind: ComponentKindName;
+  center: Point | null;
+  altKey: boolean;
+  continuous: boolean;
 }
 
 export type CommandResult =
@@ -174,7 +199,15 @@ interface ClearDocumentFrame {
   }>;
 }
 
-type HistoryFrame = DeleteComponentFrame | DeleteConnectionFrame | ClearDocumentFrame;
+interface AddComponentFrame {
+  type: "add-component";
+  componentId: EditorComponentId;
+  kind: ComponentKindName;
+  displayName: string;
+  position: Point;
+}
+
+type HistoryFrame = DeleteComponentFrame | DeleteConnectionFrame | ClearDocumentFrame | AddComponentFrame;
 
 const busyError: EngineError = {
   code: "editor_busy",
@@ -322,6 +355,7 @@ function visibleSnapshot(
   redoStack: readonly HistoryFrame[],
   confirmation: EditorConfirmation | null,
   error: EngineError | null,
+  pendingPlacement: PendingPlacement | null,
 ): EditorSnapshot {
   return {
     document: cloneVisibleDocument(document),
@@ -331,6 +365,9 @@ function visibleSnapshot(
     canRedo: redoStack.length > 0,
     confirmation: confirmation ? { ...confirmation } : null,
     error: error ? { ...error } : null,
+    pendingPlacement: pendingPlacement
+      ? { ...pendingPlacement, center: pendingPlacement.center ? { ...pendingPlacement.center } : null }
+      : null,
   };
 }
 
@@ -366,6 +403,17 @@ export function createEditorSession(
   let confirmation: EditorConfirmation | null = null;
   let operation: EditorSnapshot["operation"] = "idle";
   let error: EngineError | null = null;
+  let pendingPlacement: PendingPlacement | null = null;
+  let nextEditorComponentSequence = 1;
+  const componentNameSequences = new Map<ComponentKindName, number>();
+  for (const component of document.components.values()) {
+    const match = component.displayName.match(/(\d+)$/);
+    const sequence = match ? Number(match[1]) : 0;
+    const currentSequence = componentNameSequences.get(component.kind) ?? 0;
+    componentNameSequences.set(component.kind, Math.max(currentSequence + 1, sequence));
+    const editorSequence = component.id.match(/^component-(\d+)$/);
+    if (editorSequence) nextEditorComponentSequence = Math.max(nextEditorComponentSequence, Number(editorSequence[1]) + 1);
+  }
 
   function isLiveConnection(connection: EditorConnection): boolean {
     return connection.lifecycle === "visible" &&
@@ -395,7 +443,7 @@ export function createEditorSession(
   }
 
   function currentSnapshot(): EditorSnapshot {
-    return visibleSnapshot(document, selection, operation, undoStack, redoStack, confirmation, error);
+    return visibleSnapshot(document, selection, operation, undoStack, redoStack, confirmation, error, pendingPlacement);
   }
 
   function publish(): EditorSnapshot {
@@ -438,6 +486,45 @@ export function createEditorSession(
   function requireComponent(id: EditorComponentId): EditorComponent | null {
     const component = document.components.get(id);
     return component && component.lifecycle === "active" ? component : null;
+  }
+
+  function displayNameForKind(kind: ComponentKindName): string {
+    const labels: Partial<Record<ComponentKindName, string>> = {
+      input: "输入",
+      output: "输出",
+      and: "AND 门",
+      or: "OR 门",
+      nand: "NAND 门",
+      nor: "NOR 门",
+      xor: "XOR 门",
+      xnor: "XNOR 门",
+      not: "NOT 门",
+      clock: "Clock",
+      d_flip_flop: "D Flip-Flop",
+    };
+    return labels[kind] ?? kind;
+  }
+
+  function nextComponentIdentity(kind: ComponentKindName): { id: EditorComponentId; displayName: string } {
+    const nextName = (componentNameSequences.get(kind) ?? 0) + 1;
+    componentNameSequences.set(kind, nextName);
+    return {
+      id: `component-${nextEditorComponentSequence++}`,
+      displayName: `${displayNameForKind(kind)} ${nextName}`,
+    };
+  }
+
+  function componentPosition(center: Point, altKey: boolean): Point {
+    return positionFromPlacementCenter(center, { width: 148, height: 84 }, altKey);
+  }
+
+  async function settleAfterStructure(): Promise<void> {
+    if (!engine.settle) return;
+    const settled = await call(() => engine.settle!());
+    if (!settled.ok) {
+      // 结构已经提交；仿真错误只作为可展示错误保留，不回滚 Component。
+      error = settled.error;
+    }
   }
 
   function makeDeleteComponentFrame(componentId: EditorComponentId): DeleteComponentFrame | null {
@@ -586,6 +673,86 @@ export function createEditorSession(
     undoStack.push(frame);
     redoStack.length = 0;
     selection = null;
+    publishBindings();
+    return { ok: true, snapshot: finishOperation() };
+  }
+
+  /**
+   * 通过统一 EditorSession 添加 Component；pending 仅属于交互投影，成功后才写入文档。
+   * @param kind 元件类型。
+   * @param center 目标世界坐标中心。
+   * @param altKey 是否关闭 16 单位网格吸附。
+   * @returns 添加成功后自动选中新元件的命令结果。
+   */
+  async function addComponentAt(kind: ComponentKindName, center: Point, altKey: boolean): Promise<CommandResult> {
+    const continuePlacement = pendingPlacement?.continuous ?? false;
+    const identity = nextComponentIdentity(kind);
+    const position = componentPosition(center, altKey);
+    const component: EditorComponent = {
+      id: identity.id,
+      kind,
+      displayName: identity.displayName,
+      position,
+      lifecycle: "active",
+    };
+    const added = await call(() => engine.addComponent(kind));
+    if (!added.ok) {
+      pendingPlacement = {
+        kind,
+        center: { ...center },
+        altKey,
+        continuous: continuePlacement,
+      };
+      return fail(added.error);
+    }
+
+    // 只有引擎确认成功后才把正式节点写入 EditorDocument；等待期间仅显示 pending ghost。
+    document.components.set(component.id, component);
+    bindings.components[component.id] = added.value.componentId;
+    await settleAfterStructure();
+    undoStack.push({ type: "add-component", componentId: component.id, kind, displayName: component.displayName, position: { ...position } });
+    redoStack.length = 0;
+    selection = { kind: "component", id: component.id };
+    pendingPlacement = continuePlacement
+      ? { kind, center: null, altKey, continuous: true }
+      : null;
+    publishBindings();
+    return { ok: true, snapshot: finishOperation() };
+  }
+
+  async function undoAddComponent(frame: AddComponentFrame): Promise<CommandResult> {
+    const component = document.components.get(frame.componentId);
+    if (!component || component.lifecycle !== "active") return fail(recoveryError("撤销所需的元件不存在。"));
+    const engineId = bindings.components[frame.componentId];
+    if (engineId === undefined) return fail(recoveryError("撤销所需的元件没有有效引擎绑定。"));
+    component.lifecycle = "deleted";
+    publish();
+    const removed = await call(() => engine.removeComponent(engineId));
+    if (!removed.ok) {
+      component.lifecycle = "active";
+      return fail(removed.error);
+    }
+    delete bindings.components[frame.componentId];
+    selection = null;
+    undoStack.pop();
+    redoStack.push(frame);
+    publishBindings();
+    return { ok: true, snapshot: finishOperation() };
+  }
+
+  async function redoAddComponent(frame: AddComponentFrame): Promise<CommandResult> {
+    const component = document.components.get(frame.componentId);
+    if (!component) return fail(recoveryError("重做所需的元件不存在。"));
+    const added = await call(() => engine.addComponent(frame.kind));
+    if (!added.ok) return fail(added.error);
+    component.lifecycle = "active";
+    component.position = { ...frame.position };
+    component.displayName = frame.displayName;
+    bindings.components[frame.componentId] = added.value.componentId;
+    await settleAfterStructure();
+    undoStack.push(frame);
+    redoStack.pop();
+    selection = { kind: "component", id: frame.componentId };
     publishBindings();
     return { ok: true, snapshot: finishOperation() };
   }
@@ -854,6 +1021,7 @@ export function createEditorSession(
   async function undo(): Promise<CommandResult> {
     const frame = undoStack[undoStack.length - 1];
     if (!frame) return fail({ code: "nothing_to_undo", message: "没有可撤销的操作。", retryable: false });
+    if (frame.type === "add-component") return undoAddComponent(frame);
     if (frame.type === "delete-component") return undoDeleteComponent(frame);
     if (frame.type === "clear-document") return undoClearDocument(frame);
     return undoDeleteConnection(frame);
@@ -870,6 +1038,7 @@ export function createEditorSession(
       if (result.ok) redoStack.push(...remainingRedo);
       return result;
     }
+    if (frame.type === "add-component") return redoAddComponent(frame);
     if (frame.type === "clear-document") {
       const refreshed = makeClearDocumentFrame();
       if (!refreshed) return fail(recoveryError("重做清空所需的文档不存在。"));
@@ -905,6 +1074,25 @@ export function createEditorSession(
       const snapshot = publish();
       return { ok: false, error: confirmationPendingError, snapshot };
     }
+
+    if (command.type === "begin-placement" || command.type === "start-placement") {
+      if (command.center && !Number.isFinite(command.center.x) || command.center && !Number.isFinite(command.center.y)) {
+        return fail({ code: "invalid_placement", message: "元件放置位置无效。", retryable: false });
+      }
+      pendingPlacement = {
+        kind: command.kind,
+        center: command.center ? { ...command.center } : null,
+        altKey: command.altKey ?? false,
+        continuous: command.continuous ?? false,
+      };
+      error = null;
+      return { ok: true, snapshot: publish() };
+    }
+    if (command.type === "update-placement") {
+      if (!pendingPlacement) return fail({ code: "no_pending_placement", message: "当前没有待放置的元件。", retryable: false });
+      pendingPlacement = { ...pendingPlacement, center: { ...command.center }, altKey: command.altKey ?? pendingPlacement.altKey };
+      return { ok: true, snapshot: publish() };
+    }
     if (!beginOperation()) return { ok: false, error: busyError, snapshot: currentSnapshot() };
 
     if (command.type === "select") {
@@ -923,8 +1111,17 @@ export function createEditorSession(
     }
     if (command.type === "cancel-current-operation") {
       if (confirmation) confirmation = null;
+      else if (pendingPlacement) pendingPlacement = null;
       else selection = null;
       return { ok: true, snapshot: finishOperation() };
+    }
+    if (command.type === "place-component" || command.type === "commit-placement" || command.type === "add-component") {
+      const kind = command.type === "add-component" ? command.kind : command.kind ?? pendingPlacement?.kind;
+      if (!kind) return fail({ code: "no_pending_placement", message: "当前没有待放置的元件。", retryable: false });
+      const altKey = command.altKey ?? pendingPlacement?.altKey ?? false;
+      const center = command.type === "add-component" ? command.position : command.center;
+      const result = await addComponentAt(kind, center, altKey);
+      return result;
     }
     if (command.type === "confirm-clear") {
       if (!confirmation) return fail(confirmationRequiredError);

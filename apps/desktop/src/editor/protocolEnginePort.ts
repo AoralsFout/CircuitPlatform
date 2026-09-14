@@ -60,5 +60,9 @@ export function createProtocolEnginePort(adapter: EngineAdapter): CircuitEngineP
       () => adapter.removeConnection(connectionId),
       (response) => response.type === "connection_removed" ? { connectionId: response.connectionId } : null,
     ),
+    settle: () => call(
+      () => adapter.settle(),
+      (response) => response.type === "settled" ? { status: "ok" as const } : null,
+    ),
   };
 }

@@ -15,6 +15,8 @@ import {
   type LabIds,
   type WorkspaceSnapshot,
 } from "../workspace";
+import type { ComponentKindName } from "@circuit-platform/protocol";
+import type { Point } from "../editor";
 
 interface WorkspaceBinding {
   state: DeepReadonly<Ref<WorkspaceSnapshot>>;
@@ -33,6 +35,9 @@ interface WorkspaceBinding {
   cancelCurrentOperation(): Promise<void>;
   undo(): Promise<void>;
   redo(): Promise<void>;
+  beginPlacement(kind: ComponentKindName, continuous?: boolean): Promise<void>;
+  updatePlacement(center: Point, altKey?: boolean): Promise<void>;
+  placeComponent(center: Point, altKey?: boolean): Promise<void>;
 }
 
 function toEditorBindings(bindings: DemoRuntimeBindings): EditorBindings {
@@ -143,5 +148,8 @@ export function useWorkspace(): WorkspaceBinding {
     cancelCurrentOperation: () => dispatch({ type: "cancel-current-operation" }),
     undo: () => dispatch({ type: "undo" }),
     redo: () => dispatch({ type: "redo" }),
+    beginPlacement: (kind, continuous = false) => dispatch({ type: "begin-placement", kind, continuous }),
+    updatePlacement: (center, altKey = false) => dispatch({ type: "update-placement", center, altKey }),
+    placeComponent: (center, altKey = false) => dispatch({ type: "place-component", center, altKey }),
   };
 }

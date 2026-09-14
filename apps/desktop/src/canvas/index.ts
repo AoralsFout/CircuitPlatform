@@ -236,6 +236,7 @@ export interface InteractionState {
   focusedId: string | null;
   draggingNodeId: string | null;
   connectionDraft: readonly Point[] | null;
+  pendingPlacement?: { kind: ComponentKindName; position: Point; size: { width: number; height: number } } | null;
   emptyState?: { title: string; message: string };
 }
 
@@ -252,6 +253,10 @@ function endpointKey(componentId: string, portId: string): string {
   return `${componentId}:${portId}`;
 }
 
+function getSignal(snapshot: SimulationSnapshot, componentId: string, portId: string): Signal {
+  return snapshot.signals[endpointKey(componentId, portId)] ?? "X";
+}
+
 function routeFor(connection: EditorConnection): readonly Point[] {
   const explicit = (connection as EditorConnection & { route?: readonly Point[] }).route;
   if (explicit && explicit.length >= 2) return explicit.map((point) => ({ ...point }));
@@ -264,10 +269,6 @@ function routeFor(connection: EditorConnection): readonly Point[] {
     { x: midpoint, y: end.y },
     { ...end },
   ];
-}
-
-function getSignal(snapshot: SimulationSnapshot, componentId: string, portId: string): Signal {
-  return snapshot.signals[endpointKey(componentId, portId)] ?? "X";
 }
 
 function portPoint(component: EditorComponent, definition: ComponentDefinition, port: PortDefinition): Point {
@@ -335,7 +336,9 @@ export function projectCanvasScene(
         direction: portDefinition.direction,
         point: connectedPoints.get(endpointKey(component.id, portDefinition.id)) ?? portPoint(component, definition, portDefinition),
         offset: { ...portDefinition.offset },
-        signal: getSignal(simulationSnapshot, component.id, portDefinition.id),
+        // 未提供仿真快照时，新 Input 的默认驱动值为 0，其余端口保持未知 X。
+        signal: simulationSnapshot.signals[endpointKey(component.id, portDefinition.id)]
+          ?? (component.kind === "input" && portDefinition.direction === "output" ? 0 : "X"),
         dangling: danglingPorts.has(portDefinition.id),
       })),
       selected: selected?.kind === "component" && selected.id === component.id,
