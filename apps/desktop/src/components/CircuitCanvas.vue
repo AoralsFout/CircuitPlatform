@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from "vue";
+import { nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import ComponentMenu from "./ComponentMenu.vue";
 import {
   applyWheelViewport,
   isViewportPanPointer,
@@ -11,11 +12,20 @@ import {
   type InteractionState,
   type ViewportState,
 } from "../canvas";
+import type { ComponentDefinition } from "../canvas";
+import type { ComponentKindName } from "@circuit-platform/protocol";
+import {
+  positionComponentMenu,
+} from "../editor/component-menu";
 
 const props = defineProps<{
   scene: CanvasScene;
   viewport: ViewportState;
   interaction: InteractionState;
+  componentDefinitions?: readonly ComponentDefinition[];
+  recentComponentKinds?: readonly ComponentKindName[];
+  addComponent?: (kind: ComponentKindName, center: { x: number; y: number }, altKey: boolean) => Promise<boolean>;
+  rememberComponentKind?: (kind: ComponentKindName) => void;
 }>();
 
 const emit = defineEmits<{
@@ -38,6 +48,11 @@ let panPointer: { pointerId: number; x: number; y: number } | null = null;
 let nodeDragPointer: { pointerId: number; nodeId: string } | null = null;
 let nodeDidMove = false;
 let suppressNodeClick = false;
+const componentMenu = ref<{
+  position: { x: number; y: number };
+  worldPoint: { x: number; y: number };
+  altKey: boolean;
+} | null>(null);
 
 function signalClass(value: 0 | 1 | "X"): string {
   if (value === 1) return "signal-state--high";
@@ -83,7 +98,7 @@ function gridStyle(): Record<string, string> {
   };
 }
 
-function pointerInCanvas(event: PointerEvent | WheelEvent): { x: number; y: number } {
+function pointerInCanvas(event: MouseEvent | PointerEvent | WheelEvent): { x: number; y: number } {
   const rect = canvasElement.value?.getBoundingClientRect();
   return {
     x: event.clientX - (rect?.left ?? 0),
@@ -93,6 +108,38 @@ function pointerInCanvas(event: PointerEvent | WheelEvent): { x: number; y: numb
 
 function pointerInWorld(event: PointerEvent): { x: number; y: number } {
   return screenToWorld(pointerInCanvas(event), props.viewport);
+}
+
+function closeComponentMenu(): void {
+  componentMenu.value = null;
+  void nextTick(() => canvasElement.value?.focus());
+}
+
+function openComponentMenu(anchor: { x: number; y: number }, altKey = false): void {
+  if (props.interaction.connectionDraft || props.interaction.pendingPlacement || !props.componentDefinitions) return;
+  componentMenu.value = {
+    position: positionComponentMenu(anchor, { width: canvasElement.value?.clientWidth ?? 0, height: canvasElement.value?.clientHeight ?? 0 }),
+    worldPoint: screenToWorld(anchor, props.viewport),
+    altKey,
+  };
+}
+
+async function selectComponentFromMenu(kind: ComponentKindName): Promise<void> {
+  const menu = componentMenu.value;
+  if (!menu) return;
+  const succeeded = await props.addComponent?.(kind, menu.worldPoint, menu.altKey);
+  if (succeeded) props.rememberComponentKind?.(kind);
+  closeComponentMenu();
+}
+
+function onContextMenu(event: MouseEvent): void {
+  event.preventDefault();
+  const target = event.target instanceof Element ? event.target : null;
+  // 对象右键菜单和布线状态由后续交互层处理；背景右键才打开添加元件菜单。
+  if (target?.closest(".circuit-node, .signal-wire-hit, .component-menu")) return;
+  const point = pointerInCanvas(event);
+  openComponentMenu(point, event.altKey);
+  canvasElement.value?.focus();
 }
 
 function onNodePointerDown(event: PointerEvent, node: CanvasNode): void {
@@ -177,6 +224,15 @@ function onKeyup(event: KeyboardEvent): void {
   if (event.key === " ") spacePressed = false;
 }
 
+function onCanvasKeydown(event: KeyboardEvent): void {
+  if ((event.key !== "F10" || !event.shiftKey) && event.key !== "ContextMenu") return;
+  event.preventDefault();
+  openComponentMenu({
+    x: (canvasElement.value?.clientWidth ?? 0) / 2,
+    y: (canvasElement.value?.clientHeight ?? 0) / 2,
+  });
+}
+
 function reportResize(): void {
   const element = canvasElement.value;
   if (element) emit("resize", element.clientWidth, element.clientHeight);
@@ -202,7 +258,7 @@ onBeforeUnmount(() => {
 <template>
   <div class="editor-canvas-wrap">
     <div class="canvas-info"><span class="canvas-mode"><span class="mode-dot" aria-hidden="true"></span>场景模式</span><span>Delete 删除 · Ctrl/Cmd+Z 撤销 · Esc 取消</span></div>
-    <div ref="canvasElement" class="circuit-canvas" role="application" tabindex="0" aria-label="电路画布" @wheel="onWheel" @pointerdown="onPointerDown" @pointermove="onPointerMove" @pointerup="onPointerUp" @pointercancel="onPointerUp">
+    <div ref="canvasElement" class="circuit-canvas" role="application" tabindex="0" aria-label="电路画布" @wheel="onWheel" @contextmenu="onContextMenu" @keydown="onCanvasKeydown" @pointerdown="onPointerDown" @pointermove="onPointerMove" @pointerup="onPointerUp" @pointercancel="onPointerUp">
       <div class="canvas-grid" :style="gridStyle()" aria-hidden="true"></div>
       <div class="canvas-viewport" :style="viewportStyle()">
         <svg class="signal-map" aria-label="电路连接">
@@ -225,6 +281,14 @@ onBeforeUnmount(() => {
         </article>
       </div>
       <div v-if="interaction.emptyState" class="canvas-empty-state"><span class="empty-orbit">＋</span><strong>{{ interaction.emptyState.title }}</strong><p>{{ interaction.emptyState.message }}</p></div>
+      <ComponentMenu
+        v-if="componentMenu && componentDefinitions"
+        :style="{ left: `${componentMenu.position.x}px`, top: `${componentMenu.position.y}px` }"
+        :definitions="componentDefinitions"
+        :recent-kinds="recentComponentKinds ?? []"
+        @select="selectComponentFromMenu"
+        @close="closeComponentMenu"
+      />
       <div class="canvas-crosshair canvas-crosshair--tl" aria-hidden="true"></div><div class="canvas-crosshair canvas-crosshair--br" aria-hidden="true"></div>
     </div>
     <div class="canvas-legend"><span><i class="legend-line legend-line--live"></i>高电平 <b>1</b></span><span><i class="legend-line"></i>低电平 <b>0</b></span><span><i class="legend-line legend-line--unknown"></i>未知 <b>X</b></span><span><i class="legend-line legend-line--dangling"></i>悬空</span></div>

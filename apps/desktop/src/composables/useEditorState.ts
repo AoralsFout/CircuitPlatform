@@ -1,5 +1,5 @@
 import { computed, ref, watch, type DeepReadonly, type Ref } from "vue";
-import type { Signal } from "@circuit-platform/protocol";
+import type { ComponentKindName, Signal } from "@circuit-platform/protocol";
 import type { EditorComponentId, EditorConnectionId, EditorSelection, EditorSnapshot, Point } from "../editor";
 import type { InputKey, WorkspaceSnapshot } from "../workspace";
 import {
@@ -14,6 +14,10 @@ import {
   type InteractionState,
   type ViewportState,
 } from "../canvas";
+import {
+  readRecentComponentKinds,
+  writeRecentComponentKind,
+} from "../editor/component-menu";
 import { positionFromPlacementCenter } from "../editor/placement.ts";
 
 export type NodeKey = "inputA" | "inputB" | "andGate" | "output";
@@ -84,6 +88,13 @@ export function useEditorState(
     },
   });
   const registry = createComponentDefinitionRegistry();
+  let recentStorage: Storage | null = null;
+  try {
+    recentStorage = typeof window === "undefined" ? null : window.localStorage;
+  } catch {
+    // 浏览器禁用持久化时，最近使用仍保存在当前内存会话中。
+  }
+  const recentComponentKinds = ref(readRecentComponentKinds(recentStorage, registry.list()));
   const draggingNodeId = ref<EditorComponentId | null>(null);
   const dragPreview = ref<{ nodeId: EditorComponentId; position: Point } | null>(null);
   const dragController = createNodeDragController({
@@ -264,6 +275,11 @@ export function useEditorState(
     void updatePlacement?.(center, altKey);
   }
 
+  /** 记录已成功添加的类型；失败的引擎命令不会经过此入口。 */
+  function rememberComponentKind(kind: ComponentKindName): void {
+    recentComponentKinds.value = writeRecentComponentKind(recentStorage, recentComponentKinds.value, kind);
+  }
+
   function selectRailPage(page: RailPage): void {
     activeRailPage.value = page;
     if (page !== "settings") showSidebar.value = true;
@@ -342,6 +358,8 @@ export function useEditorState(
     viewport,
     interaction,
     componentDefinitions: registry.list(),
+    recentComponentKinds,
+    rememberComponentKind,
     selectNode,
     selectConnection,
     selectRailPage,

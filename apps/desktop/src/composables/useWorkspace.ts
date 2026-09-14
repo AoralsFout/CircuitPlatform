@@ -39,7 +39,9 @@ interface WorkspaceBinding {
   redo(): Promise<void>;
   beginPlacement(kind: ComponentKindName, continuous?: boolean): Promise<void>;
   updatePlacement(center: Point, altKey?: boolean): Promise<void>;
-  placeComponent(center: Point, altKey?: boolean): Promise<void>;
+  placeComponent(center: Point, altKey?: boolean): Promise<boolean>;
+  /** 使用与画布待放置流程相同的添加命令，在指定 WorldPoint 添加一个元件。 */
+  addComponent(kind: ComponentKindName, center: Point, altKey?: boolean): Promise<boolean>;
 }
 
 function toEditorBindings(bindings: DemoRuntimeBindings): EditorBindings {
@@ -136,6 +138,28 @@ export function useWorkspace(): WorkspaceBinding {
     state.value = workspace.snapshot();
   }
 
+  /** 右键菜单直接复用 EditorSession 的 add-component 命令；成功才返回 true。 */
+  async function addComponent(kind: ComponentKindName, center: Point, altKey = false): Promise<boolean> {
+    if (!editor) return false;
+    const pending = editor.dispatch({ type: "add-component", kind, position: center, altKey });
+    editorState.value = editor.snapshot();
+    const result = await pending;
+    editorState.value = result.snapshot;
+    state.value = workspace.snapshot();
+    return result.ok;
+  }
+
+  /** 提交元件库产生的待放置意图；成功才返回 true，供最近使用偏好记录使用。 */
+  async function placeComponent(center: Point, altKey = false): Promise<boolean> {
+    if (!editor) return false;
+    const pending = editor.dispatch({ type: "place-component", center, altKey });
+    editorState.value = editor.snapshot();
+    const result = await pending;
+    editorState.value = result.snapshot;
+    state.value = workspace.snapshot();
+    return result.ok;
+  }
+
   return {
     state: readonly(state),
     editorState: readonly(editorState),
@@ -153,6 +177,7 @@ export function useWorkspace(): WorkspaceBinding {
     redo: () => dispatch({ type: "redo" }),
     beginPlacement: (kind, continuous = false) => dispatch({ type: "begin-placement", kind, continuous }),
     updatePlacement: (center, altKey = false) => dispatch({ type: "update-placement", center, altKey }),
-    placeComponent: (center, altKey = false) => dispatch({ type: "place-component", center, altKey }),
+    placeComponent,
+    addComponent,
   };
 }
