@@ -451,6 +451,9 @@ function onPointerDown(event: PointerEvent): void {
     objectMenu.value = null;
     componentMenu.value = null;
     emit("clearSelection");
+    // 选择与键盘焦点是两套独立状态；空白点击必须同时结束 Wire 的焦点反馈。
+    emit("focusChange", null);
+    canvasElement.value?.focus();
   }
   if (!isViewportPanPointer(event.button, spacePressed, hit?.kind === "background")) return;
   panPointer = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
