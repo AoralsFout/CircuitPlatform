@@ -111,6 +111,8 @@ export interface EngineError {
   code: string;
   message: string;
   retryable: boolean;
+  /** 错误来源；仿真失败不会使已提交的 Circuit 结构失效。 */
+  category?: "structure" | "simulation";
 }
 
 export type EngineResult<T> =
@@ -194,6 +196,8 @@ export interface EditorSnapshot {
   canRedo: boolean;
   confirmation: EditorConfirmation | null;
   error: EngineError | null;
+  /** 最近一次自动稳定化的仿真错误；与结构事务错误分开保存。 */
+  simulationError?: EngineError | null;
   /** 元件库点击后的临时放置状态；不会进入 EditorDocument 或历史。 */
   pendingPlacement?: PendingPlacement | null;
 }
@@ -216,11 +220,17 @@ export interface EditorSession {
   dispatch(command: EditorCommand): Promise<CommandResult>;
   /** 订阅快照变化，并返回取消订阅函数。 */
   subscribe(listener: (snapshot: EditorSnapshot) => void): () => void;
+  /** 更新引擎可用性；只影响结构命令，不影响离线本地布局编辑。 */
+  setEngineAvailability(available: boolean): void;
 }
 
 export interface EditorSessionOptions {
   /** 结构提交后发布仍然有效的运行时绑定；仅供工作区组合层同步仿真身份。 */
   onBindingsChanged?(bindings: EditorBindings): void;
+  /** 返回当前引擎是否可接受 Circuit 结构事务；不进入 EditorSnapshot。 */
+  isEngineAvailable?(): boolean;
+  /** `engineAvailable` 是兼容性别名，便于组合层注入可用性 seam。 */
+  engineAvailable?: boolean | (() => boolean);
 }
 
 interface MutableDocument {
@@ -368,6 +378,13 @@ const recoveryError = (message: string): EngineError => ({
   retryable: true,
 });
 
+const engineUnavailableError: EngineError = {
+  code: "engine_unavailable",
+  message: "仿真引擎当前不可用，请恢复连接后重试结构操作。",
+  retryable: true,
+  category: "structure",
+};
+
 function cloneVisibleDocument(document: MutableDocument): EditorDocument {
   const isAttached = (componentId: EditorComponentId): boolean =>
     document.components.get(componentId)?.lifecycle === "active";
@@ -480,6 +497,7 @@ function visibleSnapshot(
   redoStack: readonly HistoryFrame[],
   confirmation: EditorConfirmation | null,
   error: EngineError | null,
+  simulationError: EngineError | null,
   pendingPlacement: PendingPlacement | null,
 ): EditorSnapshot {
   return {
@@ -490,6 +508,7 @@ function visibleSnapshot(
     canRedo: redoStack.length > 0,
     confirmation: confirmation ? { ...confirmation } : null,
     error: error ? { ...error } : null,
+    simulationError: simulationError ? { ...simulationError } : null,
     pendingPlacement: pendingPlacement
       ? { ...pendingPlacement, center: pendingPlacement.center ? { ...pendingPlacement.center } : null }
       : null,
@@ -589,8 +608,10 @@ export function createEditorSession(
   let confirmation: EditorConfirmation | null = null;
   let operation: EditorSnapshot["operation"] = "idle";
   let error: EngineError | null = null;
+  let simulationError: EngineError | null = null;
   let pendingPlacement: PendingPlacement | null = null;
   let pendingIdentity: { id: EditorComponentId; displayName: string } | null = null;
+  let engineAvailabilityOverride: boolean | null = null;
   let nextEditorComponentSequence = 1;
   let nextEditorConnectionSequence = 1;
   const componentNameSequences = new Map<ComponentKindName, number>();
@@ -635,7 +656,7 @@ export function createEditorSession(
   }
 
   function currentSnapshot(): EditorSnapshot {
-    return visibleSnapshot(document, selection, operation, undoStack, redoStack, confirmation, error, pendingPlacement);
+    return visibleSnapshot(document, selection, operation, undoStack, redoStack, confirmation, error, simulationError, pendingPlacement);
   }
 
   function publish(): EditorSnapshot {
@@ -645,17 +666,19 @@ export function createEditorSession(
   }
 
   function fail(errorValue: EngineError): CommandResult {
-    error = errorValue;
+    const structureError = { ...errorValue, category: errorValue.category ?? "structure" as const };
+    error = structureError;
     operation = "idle";
     const snapshot = publish();
-    return { ok: false, error: errorValue, snapshot };
+    return { ok: false, error: structureError, snapshot };
   }
 
   function enterRecovery(errorValue: EngineError): CommandResult {
-    error = errorValue;
+    const recovery = { ...errorValue, category: errorValue.category ?? "structure" as const };
+    error = recovery;
     operation = "recovery-required";
     const snapshot = publish();
-    return { ok: false, error: errorValue, snapshot };
+    return { ok: false, error: recovery, snapshot };
   }
 
   function beginOperation(): boolean {
@@ -672,7 +695,41 @@ export function createEditorSession(
   }
 
   function call<T>(action: () => Promise<EngineResult<T>>): Promise<EngineResult<T>> {
-    return action().catch((thrown) => failed(normalizeThrown(thrown)));
+    return action()
+      .catch((thrown): EngineResult<T> => failed<T>(normalizeThrown(thrown)))
+      .then((result) => {
+        // 传输/进程故障会冻结后续 Circuit 事务；协议业务拒绝仍可直接重试。
+        if (!result.ok && ["engine_unavailable", "engine_offline", "engine_connection_failed"].includes(result.error.code)) {
+          engineAvailabilityOverride = false;
+        }
+        return result;
+      });
+  }
+
+  function isEngineAvailable(): boolean {
+    if (engineAvailabilityOverride !== null) return engineAvailabilityOverride;
+    if (options.isEngineAvailable) return options.isEngineAvailable();
+    if (typeof options.engineAvailable === "function") return options.engineAvailable();
+    if (typeof options.engineAvailable === "boolean") return options.engineAvailable;
+    return true;
+  }
+
+  function structureUnavailable(): CommandResult {
+    return fail({ ...engineUnavailableError });
+  }
+
+  function isCircuitHistoryFrame(frame: HistoryFrame | undefined): boolean {
+    return frame !== undefined && frame.type !== "move-component" && frame.type !== "edit-route";
+  }
+
+  /** 仅阻止会改变 C++ Circuit 的命令，离线时仍可编辑本地几何和视口。 */
+  function changesCircuit(command: EditorCommand): boolean {
+    if (["add-component", "place-component", "commit-placement", "duplicate-component", "copy-component", "duplicate-selected", "delete-component", "delete-connection", "create-connection", "add-connection", "reconnect-connection", "repair-connection", "confirm-clear", "retry-placement", "retry-current-operation"].includes(command.type)) return true;
+    if (command.type === "delete-selected") return selection !== null;
+    if (command.type === "undo" || command.type === "redo") {
+      return operation === "recovery-required" || isCircuitHistoryFrame(command.type === "undo" ? undoStack.at(-1) : redoStack.at(-1));
+    }
+    return false;
   }
 
   function requireComponent(id: EditorComponentId): EditorComponent | null {
@@ -711,12 +768,17 @@ export function createEditorSession(
   }
 
   async function settleAfterStructure(): Promise<void> {
-    if (!engine.settle) return;
+    if (!engine.settle) {
+      simulationError = null;
+      return;
+    }
     const settled = await call(() => engine.settle!());
     if (!settled.ok) {
-      // 结构已经提交；仿真错误只作为可展示错误保留，不回滚 Component。
-      error = settled.error;
+      // 结构已经提交；仿真错误只作为可展示错误保留，不回滚 Circuit。
+      simulationError = { ...settled.error, category: "simulation" };
+      return;
     }
+    simulationError = null;
   }
 
   function makeDeleteComponentFrame(componentId: EditorComponentId): DeleteComponentFrame | null {
@@ -867,6 +929,7 @@ export function createEditorSession(
     redoStack.length = 0;
     selection = null;
     publishBindings();
+    await settleAfterStructure();
     return { ok: true, snapshot: finishOperation() };
   }
 
@@ -981,6 +1044,7 @@ export function createEditorSession(
     undoStack.pop();
     redoStack.push(frame);
     publishBindings();
+    await settleAfterStructure();
     return { ok: true, snapshot: finishOperation() };
   }
 
@@ -1251,6 +1315,7 @@ export function createEditorSession(
       undoStack.push(frame);
       redoStack.length = 0;
     }
+    await settleAfterStructure();
     publishBindings();
     return { ok: true, snapshot: finishOperation() };
   }
@@ -1287,6 +1352,7 @@ export function createEditorSession(
     selection = frame.selectionBefore;
     undoStack.pop();
     redoStack.push(frame);
+    await settleAfterStructure();
     publishBindings();
     return { ok: true, snapshot: finishOperation() };
   }
@@ -1306,6 +1372,7 @@ export function createEditorSession(
     redoStack.length = 0;
     redoStack.push(...remainingRedo);
     selection = { kind: "connection", id: frame.connectionId };
+    await settleAfterStructure();
     publishBindings();
     return { ok: true, snapshot: finishOperation() };
   }
@@ -1339,6 +1406,7 @@ export function createEditorSession(
     redoStack.length = 0;
     selection = null;
     publishBindings();
+    await settleAfterStructure();
     return { ok: true, snapshot: finishOperation() };
   }
 
@@ -1404,6 +1472,7 @@ export function createEditorSession(
     redoStack.length = 0;
     selection = null;
     publishBindings();
+    await settleAfterStructure();
     return { ok: true, snapshot: finishOperation() };
   }
 
@@ -1467,6 +1536,7 @@ export function createEditorSession(
     selection = frame.selectionBefore;
     undoStack.pop();
     redoStack.push(frame);
+    await settleAfterStructure();
     publishBindings();
     return { ok: true, snapshot: finishOperation() };
   }
@@ -1483,6 +1553,7 @@ export function createEditorSession(
       selection = frame.selectionBefore;
       undoStack.pop();
       redoStack.push(frame);
+      await settleAfterStructure();
       publishBindings();
       return { ok: true, snapshot: finishOperation() };
     }
@@ -1506,6 +1577,7 @@ export function createEditorSession(
     selection = frame.selectionBefore;
     undoStack.pop();
     redoStack.push(frame);
+    await settleAfterStructure();
     publishBindings();
     return { ok: true, snapshot: finishOperation() };
   }
@@ -1718,6 +1790,7 @@ export function createEditorSession(
     selection = frame.selectionBefore;
     undoStack.pop();
     redoStack.push(frame);
+    await settleAfterStructure();
     publishBindings();
     return { ok: true, snapshot: finishOperation() };
   }
@@ -1777,12 +1850,16 @@ export function createEditorSession(
   }
 
   async function dispatch(command: EditorCommand): Promise<CommandResult> {
-    if (operation === "recovery-required") {
+    const changesCircuitState = changesCircuit(command);
+    if (changesCircuitState && operation === "recovery-required") {
       const errorValue = error ?? recoveryError("编辑器需要重新加载后才能继续结构编辑。");
       return { ok: false, error: errorValue, snapshot: currentSnapshot() };
     }
-    if (operation === "busy") {
+    if (changesCircuitState && operation === "busy") {
       return { ok: false, error: busyError, snapshot: currentSnapshot() };
+    }
+    if (changesCircuitState && !isEngineAvailable()) {
+      return structureUnavailable();
     }
     if (
       confirmation &&
@@ -1955,6 +2032,11 @@ export function createEditorSession(
   return {
     snapshot: currentSnapshot,
     dispatch,
+    setEngineAvailability(available) {
+      engineAvailabilityOverride = available;
+      if (available && error?.code === engineUnavailableError.code) error = null;
+      publish();
+    },
     subscribe(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
