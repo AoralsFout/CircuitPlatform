@@ -25,6 +25,7 @@ CircuitPlatform 是一个可运行、可验证、可演进的数字电路仿真�
 ### Issue tracker
 
 Issues 和规格使用 `AoralsFout/CircuitPlatform` 的 GitHub Issues 管理。参见 `docs/agents/issue-tracker.md`。
+禁止使用浏览器操作Github。只能提权使用gh CLI，确保它可以读取用户级 GitHub CLI 配置并访问网络；如果 `gh` 尚未授权，运行 `gh auth login`，并由用户完成设备授权。
 
 ### Triage labels
 
