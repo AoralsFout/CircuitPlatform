@@ -16,6 +16,7 @@ import {
 import type { ComponentDefinition } from "../canvas";
 import type { ComponentKindName } from "@circuit-platform/protocol";
 import type { ConnectionDraftPort } from "../editor/connection-draft.ts";
+import { resolveCanvasKeyboardAction, isEditableKeyboardTarget } from "../editor/keyboard.ts";
 import {
   positionComponentMenu,
 } from "../editor/component-menu";
@@ -56,7 +57,9 @@ const emit = defineEmits<{
   connectionWaypoint: [payload: { point: { x: number; y: number }; altKey: boolean }];
   connectionEnd: [port: ConnectionDraftPort];
   connectionAxisToggle: [];
+  connectionWaypointRemove: [];
   connectionCancel: [];
+  focusChange: [id: string | null];
   clearSelection: [];
 }>();
 
@@ -106,16 +109,43 @@ function nodeStyle(node: CanvasNode): Record<string, string> {
   return { left: `${node.position.x}px`, top: `${node.position.y}px`, width: `${node.size.width}px`, height: `${node.size.height}px` };
 }
 
-function onNodeKeydown(event: KeyboardEvent, nodeId: string): void {
-  if (event.key !== "Enter" && event.key !== " ") return;
-  event.preventDefault();
-  emit("selectNode", nodeId);
+function focusByOffset(delta: number): void {
+  const targets = [...(canvasElement.value?.querySelectorAll<HTMLElement>("[data-canvas-focus]") ?? [])];
+  if (targets.length === 0) return;
+  const current = targets.indexOf(document.activeElement as HTMLElement);
+  const next = (current < 0 ? (delta > 0 ? -1 : 0) : current) + delta;
+  const element = targets[(next + targets.length) % targets.length];
+  if (!element) return;
+  element.focus();
+  emit("focusChange", element.dataset.focusId ?? null);
 }
 
-function onConnectionKeydown(event: KeyboardEvent, connectionId: string): void {
-  if (event.key !== "Enter" && event.key !== " ") return;
-  event.preventDefault();
-  emit("selectConnection", connectionId);
+/** 按空间方向在节点、Wire 和 Port 之间移动焦点，避免把选择状态当作焦点状态。 */
+function focusByDirection(dx: number, dy: number): void {
+  const targets = [...(canvasElement.value?.querySelectorAll<HTMLElement>("[data-canvas-focus]") ?? [])];
+  const current = document.activeElement as HTMLElement | null;
+  if (!current || !targets.includes(current)) {
+    focusByOffset(dx || dy || 1);
+    return;
+  }
+  const currentRect = current.getBoundingClientRect();
+  const currentCenter = { x: currentRect.left + currentRect.width / 2, y: currentRect.top + currentRect.height / 2 };
+  const candidates = targets
+    .filter((element) => element !== current)
+    .map((element) => {
+      const rect = element.getBoundingClientRect();
+      const center = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+      const offset = { x: center.x - currentCenter.x, y: center.y - currentCenter.y };
+      const primary = dx !== 0 ? offset.x * dx : offset.y * dy;
+      const secondary = dx !== 0 ? Math.abs(offset.y) : Math.abs(offset.x);
+      return { element, score: primary > 0 ? primary * 10 + secondary : Number.POSITIVE_INFINITY };
+    })
+    .filter((candidate) => Number.isFinite(candidate.score))
+    .sort((left, right) => left.score - right.score);
+  const next = candidates[0]?.element;
+  if (!next) return;
+  next.focus();
+  emit("focusChange", next.dataset.focusId ?? null);
 }
 
 function viewportStyle(): Record<string, string> {
@@ -170,6 +200,29 @@ function closeComponentMenu(): void {
 function closeObjectMenu(): void {
   objectMenu.value = null;
   void nextTick(() => canvasElement.value?.focus());
+}
+
+function focusObjectMenuFirst(): void {
+  void nextTick(() => canvasElement.value?.querySelector<HTMLButtonElement>(".object-context-menu button")?.focus());
+}
+
+function onObjectMenuKeydown(event: KeyboardEvent): void {
+  const menu = canvasElement.value?.querySelector<HTMLElement>(".object-context-menu");
+  if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    closeObjectMenu();
+    return;
+  }
+  if (event.key !== "ArrowDown" && event.key !== "ArrowUp" && event.key !== "Tab") return;
+  const buttons = [...(menu?.querySelectorAll<HTMLButtonElement>("button") ?? [])];
+  if (buttons.length === 0) return;
+  const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
+  const delta = event.key === "ArrowUp" || event.shiftKey ? -1 : 1;
+  const next = buttons[(Math.max(0, current) + delta + buttons.length) % buttons.length];
+  next?.focus();
+  event.preventDefault();
+  event.stopPropagation();
 }
 
 /** 执行 Component/Wire 的最小右键动作集合；Route 编辑本身仍由画布手柄完成。 */
@@ -261,6 +314,7 @@ function onContextMenu(event: MouseEvent): void {
       actions: contextActionsFor(objectHit),
     };
     canvasElement.value?.focus();
+    focusObjectMenuFirst();
     return;
   }
   if (hit.kind === "port") {
@@ -413,12 +467,81 @@ function onNodeClick(nodeId: string): void {
   emit("selectNode", nodeId);
 }
 
-function onKeydown(event: KeyboardEvent): void {
-  if (event.key === "Escape" && props.interaction.connectionDraft) {
-    emit("connectionCancel");
+function focusPortTarget(target: HTMLElement): ConnectionDraftPort | null {
+  const nodeId = target.dataset.nodeId;
+  const portId = target.dataset.portId;
+  const node = props.scene.nodes.find((candidate) => candidate.id === nodeId);
+  const port = node?.ports.find((candidate) => candidate.id === portId);
+  return node && port ? connectionPort(node, port) : null;
+}
+
+function draftCursor(): { x: number; y: number } | null {
+  const point = props.interaction.connectionDraft?.at(-1);
+  return point ? { ...point } : null;
+}
+
+function onCanvasKeyboard(event: KeyboardEvent): void {
+  if (isEditableKeyboardTarget(event.target)) return;
+  if (event.key === " " && !props.interaction.connectionDraft) {
+    spacePressed = true;
     event.preventDefault();
+    event.stopPropagation();
     return;
   }
+  const action = resolveCanvasKeyboardAction({
+    key: event.key,
+    shiftKey: event.shiftKey,
+    altKey: event.altKey,
+    ctrlKey: event.ctrlKey,
+    metaKey: event.metaKey,
+    hasDraft: Boolean(props.interaction.connectionDraft),
+    targetIsEditable: false,
+  });
+  if (!action) return;
+  const target = event.target instanceof Element ? event.target : canvasElement.value;
+  const focusDataset = target instanceof HTMLElement || target instanceof SVGElement ? target.dataset : undefined;
+  const port = target?.matches("[data-port-id]") && target instanceof HTMLElement ? focusPortTarget(target) : null;
+  if (action.type === "open-menu") {
+    if (!props.interaction.connectionDraft) {
+      openComponentMenu({ x: (canvasElement.value?.clientWidth ?? 0) / 2, y: (canvasElement.value?.clientHeight ?? 0) / 2 });
+    }
+  } else if (action.type === "pan") {
+    emit("viewportChange", panViewport(props.viewport, { x: action.dx * 48, y: action.dy * 48 }));
+  } else if (action.type === "move-draft") {
+    const cursor = draftCursor();
+    if (cursor) {
+      const next = { x: cursor.x + action.dx * 16 / Math.max(props.viewport.zoom, 0.01), y: cursor.y + action.dy * 16 / Math.max(props.viewport.zoom, 0.01) };
+      if (action.waypoint) emit("connectionWaypoint", { point: next, altKey: event.altKey });
+      else emit("connectionMove", { point: next, altKey: event.altKey });
+    }
+  } else if (action.type === "toggle-draft-axis") {
+    emit("connectionAxisToggle");
+  } else if (action.type === "remove-draft-waypoint") {
+    emit("connectionWaypointRemove");
+  } else if (action.type === "finish-draft") {
+    if (port) emit("connectionEnd", port);
+    else {
+      const cursor = draftCursor();
+      if (cursor) emit("connectionWaypoint", { point: cursor, altKey: event.altKey });
+    }
+  } else if (action.type === "next-focus") {
+    if (event.key === "Tab") focusByOffset(action.delta);
+    else focusByDirection(event.key === "ArrowLeft" ? -1 : event.key === "ArrowRight" ? 1 : 0, event.key === "ArrowUp" ? -1 : event.key === "ArrowDown" ? 1 : 0);
+  } else if (action.type === "select-focus") {
+    if (port && !props.interaction.connectionDraft) emit("connectionStart", port);
+    else if (focusDataset?.focusKind === "component") emit("selectNode", focusDataset.focusId ?? "");
+    else if (focusDataset?.focusKind === "connection") emit("selectConnection", focusDataset.focusId ?? "");
+  } else if (action.type === "cancel") {
+    if (props.interaction.connectionDraft) emit("connectionCancel");
+    else if (props.interaction.routeEditPreview) emit("routeEditCancel");
+    else if (props.interaction.draggingNodeId) emit("nodeDragCancel");
+    else return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function onKeydown(event: KeyboardEvent): void {
   if (event.key === " ") {
     if (props.interaction.connectionDraft) {
       emit("connectionAxisToggle");
@@ -497,12 +620,7 @@ function onKeyup(event: KeyboardEvent): void {
 }
 
 function onCanvasKeydown(event: KeyboardEvent): void {
-  if ((event.key !== "F10" || !event.shiftKey) && event.key !== "ContextMenu") return;
-  event.preventDefault();
-  openComponentMenu({
-    x: (canvasElement.value?.clientWidth ?? 0) / 2,
-    y: (canvasElement.value?.clientHeight ?? 0) / 2,
-  });
+  onCanvasKeyboard(event);
 }
 
 function reportResize(): void {
@@ -535,7 +653,7 @@ onBeforeUnmount(() => {
       <div class="canvas-viewport" :style="viewportStyle()">
         <svg class="signal-map" aria-label="电路连接">
           <template v-for="wire in scene.wires" :key="wire.id">
-            <path class="signal-wire-hit" :d="pathFor(wire.route)" role="button" tabindex="0" :aria-label="`选择连线 ${wire.id}`" @click.stop="emit('selectConnection', wire.id)" @keydown="onConnectionKeydown($event, wire.id)" />
+            <path class="signal-wire-hit" :d="pathFor(wire.route)" role="button" tabindex="0" data-canvas-focus data-focus-kind="connection" :data-focus-id="wire.id" :class="{ 'signal-wire-hit--focused': interaction.focusedId === wire.id }" :aria-label="`选择连线 ${wire.id}`" @focus="emit('focusChange', wire.id)" @click.stop="emit('selectConnection', wire.id)" />
             <template v-if="wire.selected" v-for="(_, segmentIndex) in wire.route.slice(0, -1)" :key="`${wire.id}-segment-${segmentIndex}`">
               <path class="route-segment-hit" :d="segmentPath(wire.route, segmentIndex)" :aria-label="`移动连线 ${wire.id} 线段 ${segmentIndex + 1}`" @pointerdown.stop="onRouteSegmentPointerDown($event, wire, segmentIndex)" />
             </template>
@@ -548,11 +666,11 @@ onBeforeUnmount(() => {
           </template>
           <path v-if="interaction.connectionDraft" class="signal-wire signal-wire--draft" :d="pathFor(interaction.connectionDraft)" />
         </svg>
-        <article v-for="node in scene.nodes" :key="node.id" class="circuit-node" :class="{ 'circuit-node--selected': node.selected, 'circuit-node--dragging': interaction.draggingNodeId === node.id }" :style="nodeStyle(node)" role="button" tabindex="0" :aria-label="`选择${node.displayName}`" @pointerdown.stop="onNodePointerDown($event, node)" @click="onNodeClick(node.id)" @keydown="onNodeKeydown($event, node.id)">
+        <article v-for="node in scene.nodes" :key="node.id" class="circuit-node" :class="{ 'circuit-node--selected': node.selected, 'circuit-node--focused': interaction.focusedId === node.id, 'circuit-node--dragging': interaction.draggingNodeId === node.id }" :style="nodeStyle(node)" role="button" tabindex="0" data-canvas-focus data-focus-kind="component" :data-focus-id="node.id" :aria-label="`选择${node.displayName}`" @focus="emit('focusChange', node.id)" @pointerdown.stop="onNodePointerDown($event, node)" @click="onNodeClick(node.id)">
           <span class="node-tag">{{ node.kind.toUpperCase() }} / {{ node.ports.length }}</span>
           <strong>{{ node.symbol }} <span class="node-display-name">{{ node.displayName }}</span></strong>
           <span class="node-description">{{ node.description }}</span>
-          <span v-for="port in node.ports" :key="port.id" class="node-port" :class="[port.direction === 'input' ? 'node-port--left' : 'node-port--right', signalClass(port.signal)]" :style="{ top: `${port.offset.y}px` }" :data-port-id="port.id" :aria-label="`${port.direction === 'input' ? '输入' : '输出'}端口 ${port.name}`" @pointerdown.stop="onPortPointerDown($event, node, port)" @pointerup.stop="onPortPointerUp($event, node, port)" @click.stop="onPortClick($event, node, port)">{{ port.name }} · {{ port.signal }}</span>
+          <span v-for="port in node.ports" :key="port.id" class="node-port" :class="[port.direction === 'input' ? 'node-port--left' : 'node-port--right', signalClass(port.signal)]" :style="{ top: `${port.offset.y}px` }" :data-port-id="port.id" :data-node-id="node.id" :data-focus-id="`port:${node.id}:${port.id}`" data-focus-kind="port" data-canvas-focus role="button" tabindex="0" :aria-label="`${port.direction === 'input' ? '输入' : '输出'}端口 ${port.name}`" @focus="emit('focusChange', `port:${node.id}:${port.id}`)" @pointerdown.stop="onPortPointerDown($event, node, port)" @pointerup.stop="onPortPointerUp($event, node, port)" @click.stop="onPortClick($event, node, port)">{{ port.name }} · {{ port.signal }}</span>
         </article>
         <article v-if="interaction.pendingPlacement" class="circuit-node circuit-node--pending" :style="{ left: `${interaction.pendingPlacement.position.x}px`, top: `${interaction.pendingPlacement.position.y}px`, width: `${interaction.pendingPlacement.size.width}px`, height: `${interaction.pendingPlacement.size.height}px` }" aria-hidden="true">
           <span class="node-tag">待放置</span><strong>{{ interaction.pendingPlacement.kind.toUpperCase() }}</strong><span class="node-description">单击画布放置 · Esc 取消</span>
@@ -576,6 +694,7 @@ onBeforeUnmount(() => {
         :style="{ left: `${objectMenu.position.x}px`, top: `${objectMenu.position.y}px` }"
         @pointerdown.stop
         @contextmenu.stop.prevent
+        @keydown="onObjectMenuKeydown"
       >
         <button
           v-for="action in objectMenu.actions"

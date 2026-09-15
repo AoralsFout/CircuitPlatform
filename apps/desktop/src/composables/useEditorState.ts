@@ -125,6 +125,8 @@ export function useEditorState(
   });
   const routeEditPreview = ref<{ connectionId: string; route: readonly Point[] } | null>(null);
   const connectionDraft = ref<ConnectionDraftState>(createConnectionDraft());
+  // 键盘焦点是临时的 DOM 导航状态，不能从 EditorSnapshot 的选择状态推导。
+  const focusedId = ref<string | null>(null);
   const routeEditController = createRouteEditController({
     onPreview(preview) {
       routeEditPreview.value = preview;
@@ -177,21 +179,21 @@ export function useEditorState(
   const viewport = computed<ViewportState>(() => viewportState.value);
   const interaction = computed<InteractionState>(() => {
     if (workspaceState.value.engineState !== "ready") {
-      return { focusedId: null, draggingNodeId: null, dragPreview: null, connectionDraft: null, routeEditPreview: null, emptyState: { title: "等待仿真引擎", message: workspaceState.value.message } };
+      return { focusedId: focusedId.value, draggingNodeId: null, dragPreview: null, connectionDraft: null, routeEditPreview: null, emptyState: { title: "等待仿真引擎", message: workspaceState.value.message } };
     }
     if (!workspaceState.value.hasLab) {
-      return { focusedId: null, draggingNodeId: null, dragPreview: null, connectionDraft: null, routeEditPreview: null, emptyState: { title: "正在准备示例电路", message: workspaceState.value.message } };
+      return { focusedId: focusedId.value, draggingNodeId: null, dragPreview: null, connectionDraft: null, routeEditPreview: null, emptyState: { title: "正在准备示例电路", message: workspaceState.value.message } };
     }
     if (!editorState.value) {
-      return { focusedId: null, draggingNodeId: null, dragPreview: null, connectionDraft: null, routeEditPreview: null, emptyState: { title: "还没有电路", message: "从左侧选择一个元件，或加载一份示例电路开始。" } };
+      return { focusedId: focusedId.value, draggingNodeId: null, dragPreview: null, connectionDraft: null, routeEditPreview: null, emptyState: { title: "还没有电路", message: "从左侧选择一个元件，或加载一份示例电路开始。" } };
     }
     if (editorState.value.document.components.length === 0 && !editorState.value.pendingPlacement) {
-      return { focusedId: null, draggingNodeId: null, dragPreview: null, connectionDraft: null, emptyState: { title: "还没有电路", message: "从左侧选择一个元件，或加载一份示例电路开始。" } };
+      return { focusedId: focusedId.value, draggingNodeId: null, dragPreview: null, connectionDraft: null, emptyState: { title: "还没有电路", message: "从左侧选择一个元件，或加载一份示例电路开始。" } };
     }
     const pending = editorState.value.pendingPlacement;
     const definition = pending ? registry.get(pending.kind) : undefined;
     return {
-      focusedId: editorState.value.selection?.id ?? null,
+      focusedId: focusedId.value,
       draggingNodeId: draggingNodeId.value,
       dragPreview: dragPreview.value,
       connectionDraft: connectionDraft.value.origin ? connectionDraftRoute(connectionDraft.value) : null,
@@ -252,8 +254,18 @@ export function useEditorState(
     connectionDraft.value = reduceConnectionDraft(connectionDraft.value, { type: "toggle-axis" });
   }
 
+  /** 键盘 Backspace 退回最近一个临时折点；不触碰历史记录或持久文档。 */
+  function removeConnectionWaypoint(): void {
+    connectionDraft.value = reduceConnectionDraft(connectionDraft.value, { type: "remove-waypoint" });
+  }
+
   function cancelConnection(): void {
     connectionDraft.value = reduceConnectionDraft(connectionDraft.value, { type: "cancel" });
+  }
+
+  /** 记录画布当前键盘焦点；焦点与单对象选择保持独立。 */
+  function focusCanvasObject(id: string | null): void {
+    focusedId.value = id;
   }
 
   const componentVisibility = computed<Record<NodeKey, boolean>>(() => ({
@@ -487,6 +499,8 @@ export function useEditorState(
     placeConnectionWaypoint,
     finishConnection,
     toggleConnectionAxis,
+    removeConnectionWaypoint,
     cancelConnection,
+    focusCanvasObject,
   };
 }

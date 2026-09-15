@@ -11,7 +11,7 @@ import WorkspaceSidebar from "./components/WorkspaceSidebar.vue";
 import { useEditorState } from "./composables/useEditorState";
 import { useThemePreference } from "./composables/useThemePreference";
 import { useWorkspace } from "./composables/useWorkspace";
-import { resolveEditorShortcut } from "./editor/keyboard";
+import { isEditableKeyboardTarget, resolveEditorShortcut } from "./editor/keyboard";
 
 const {
   state,
@@ -87,7 +87,9 @@ const {
   placeConnectionWaypoint,
   finishConnection,
   toggleConnectionAxis,
+  removeConnectionWaypoint,
   cancelConnection,
+  focusCanvasObject,
 } = useEditorState(state, editorState, select, moveComponent, updatePlacement, editRoute, createConnection);
 const {
   preference: themePreference,
@@ -123,16 +125,25 @@ function onEditorKeydown(event: KeyboardEvent): void {
     ctrlKey: event.ctrlKey,
     metaKey: event.metaKey,
     shiftKey: event.shiftKey,
-    editableTarget: target instanceof HTMLElement &&
-      (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)),
+    editableTarget: isEditableKeyboardTarget(target),
   });
   if (!shortcut) return;
   event.preventDefault();
-  if (editorState.value?.confirmation && shortcut !== "cancel") return;
+  if (shortcut === "cancel") {
+    // Esc 只取消当前最上层状态：确认框 → 恢复提示 → 草稿 → 拖动预览 → 选择。
+    if (editorState.value?.confirmation) void cancelCurrentOperation();
+    else if (editorState.value?.operation === "recovery-required") return;
+    else if (interaction.value.connectionDraft) cancelConnection();
+    else if (interaction.value.routeEditPreview) cancelRouteEdit();
+    else if (interaction.value.draggingNodeId) cancelNodeDrag();
+    else if (editorState.value?.pendingPlacement) void cancelCurrentOperation();
+    else if (editorState.value?.selection) void cancelCurrentOperation();
+    return;
+  }
+  if (editorState.value?.confirmation) return;
   if (shortcut === "undo") void undo();
   else if (shortcut === "redo") void redo();
   else if (shortcut === "duplicate-selection") void duplicateSelection();
-  else if (shortcut === "cancel") void cancelCurrentOperation();
   else void deleteSelection();
 }
 
@@ -222,7 +233,9 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           @connection-waypoint="placeConnectionWaypoint($event.point, $event.altKey)"
           @connection-end="finishConnection"
           @connection-axis-toggle="toggleConnectionAxis"
+          @connection-waypoint-remove="removeConnectionWaypoint"
           @connection-cancel="cancelConnection"
+          @focus-change="focusCanvasObject"
           @viewport-change="setViewport"
           @resize="resizeCanvas"
           @placement-move="placementMoved"

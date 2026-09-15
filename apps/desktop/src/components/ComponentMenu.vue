@@ -56,6 +56,20 @@ function selectActive(): void {
   if (activeKind.value) select(activeKind.value);
 }
 
+/** 在菜单分类之间移动；搜索结果是单层分类，左右键保持列表内导航。 */
+function moveGroup(delta: number): void {
+  if (groups.value.length <= 1) {
+    moveActive(delta);
+    return;
+  }
+  const currentGroup = groups.value.findIndex((group) => group.definitions.some((definition) => definition.kind === activeKind.value));
+  const nextGroupIndex = (Math.max(0, currentGroup) + delta + groups.value.length) % groups.value.length;
+  const nextGroup = groups.value[nextGroupIndex];
+  if (!nextGroup) return;
+  const nextItem = nextGroup.definitions.find((definition) => definition.available) ?? nextGroup.definitions[0];
+  if (nextItem) activeIndex.value = items.value.findIndex((item) => item.kind === nextItem.kind);
+}
+
 function onKeydown(event: KeyboardEvent): void {
   if (event.key === "Escape") {
     event.preventDefault();
@@ -66,6 +80,12 @@ function onKeydown(event: KeyboardEvent): void {
   } else if (event.key === "ArrowUp") {
     event.preventDefault();
     moveActive(-1);
+  } else if (event.key === "ArrowRight") {
+    event.preventDefault();
+    moveGroup(1);
+  } else if (event.key === "ArrowLeft") {
+    event.preventDefault();
+    moveGroup(-1);
   } else if (event.key === "Home") {
     event.preventDefault();
     activeIndex.value = 0;

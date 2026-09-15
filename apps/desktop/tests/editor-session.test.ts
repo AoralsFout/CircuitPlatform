@@ -8,7 +8,7 @@ import {
   type EngineConnectionId,
   type EngineResult,
 } from "../src/editor/index.ts";
-import { resolveEditorShortcut } from "../src/editor/keyboard.ts";
+import { resolveCanvasKeyboardAction, resolveEditorShortcut } from "../src/editor/keyboard.ts";
 
 class FakeEngine implements CircuitEnginePort {
   nextComponentId = 100;
@@ -76,6 +76,25 @@ test("maps editor keyboard shortcuts while preserving editable targets", () => {
   assert.equal(key({ key: "Escape" }), "cancel");
   assert.equal(key({ key: "Delete", editableTarget: true }), null);
   assert.equal(key({ key: "a" }), null);
+});
+
+test("maps canvas keyboard navigation, menu access, and draft editing", () => {
+  const input = (overrides: Partial<Parameters<typeof resolveCanvasKeyboardAction>[0]>) =>
+    resolveCanvasKeyboardAction({ key: "", shiftKey: false, altKey: false, ctrlKey: false, metaKey: false, hasDraft: false, targetIsEditable: false, ...overrides });
+
+  assert.deepEqual(input({ key: "F10", shiftKey: true }), { type: "open-menu" });
+  assert.deepEqual(input({ key: "ContextMenu" }), { type: "open-menu" });
+  assert.deepEqual(input({ key: "ArrowRight", shiftKey: true }), { type: "pan", dx: 1, dy: 0 });
+  assert.deepEqual(input({ key: "ArrowDown" }), { type: "next-focus", delta: 1 });
+  assert.deepEqual(input({ key: "Tab", shiftKey: true }), { type: "next-focus", delta: -1 });
+  assert.deepEqual(input({ key: "Space", hasDraft: true }), null);
+  assert.deepEqual(input({ key: " ", hasDraft: true }), { type: "toggle-draft-axis" });
+  assert.deepEqual(input({ key: "ArrowLeft", hasDraft: true }), { type: "move-draft", dx: -1, dy: 0, waypoint: false });
+  assert.deepEqual(input({ key: "ArrowLeft", shiftKey: true, hasDraft: true }), { type: "move-draft", dx: -1, dy: 0, waypoint: true });
+  assert.deepEqual(input({ key: "Backspace", hasDraft: true }), { type: "remove-draft-waypoint" });
+  assert.deepEqual(input({ key: "Enter", hasDraft: true }), { type: "finish-draft" });
+  assert.deepEqual(input({ key: "Escape", hasDraft: true }), { type: "cancel" });
+  assert.equal(input({ key: "ArrowRight", targetIsEditable: true }), null);
 });
 
 function createSession(engine: FakeEngine) {

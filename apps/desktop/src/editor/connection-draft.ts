@@ -41,6 +41,7 @@ export type ConnectionDraftAction =
   | { type: "move"; point: Point; altKey?: boolean }
   | { type: "place-waypoint"; point: Point; altKey?: boolean }
   | { type: "toggle-axis" }
+  | { type: "remove-waypoint" }
   | { type: "fail"; error: ConnectionDraftError }
   | { type: "clear-error" }
   | { type: "cancel" };
@@ -143,6 +144,17 @@ export function reduceConnectionDraft(
   if (action.type === "fail") return { ...copyState(state), phase: "failed", error: { ...action.error } };
   if (action.type === "clear-error") return { ...copyState(state), phase: "drawing", error: null };
   if (action.type === "toggle-axis") return { ...copyState(state), axis: state.axis === "horizontal" ? "vertical" : "horizontal", error: null };
+  if (action.type === "remove-waypoint") {
+    if (state.waypoints.length === 0) return copyState(state);
+    const waypoints = state.waypoints.slice(0, -1);
+    return {
+      ...copyState(state),
+      waypoints,
+      cursor: waypoints.at(-1) ? copyPoint(waypoints.at(-1)!) : copyPoint(state.origin.point),
+      hasPlacedFirstWaypoint: waypoints.length > 0,
+      error: null,
+    };
+  }
   const gridSize = options.gridSize ?? ROUTE_GRID_SIZE;
   const point = snapRoutePoint(action.point, action.altKey ?? false, gridSize);
   if (action.type === "move") return { ...copyState(state), cursor: point, error: null };
