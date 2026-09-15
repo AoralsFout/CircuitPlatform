@@ -45,6 +45,10 @@ interface WorkspaceBinding {
   resetRoute(connectionId: string): Promise<void>;
   deleteWaypoint(connectionId: string, pointIndex: number): Promise<void>;
   deleteSelection(): Promise<void>;
+  /** 删除指定 Component，供对象右键菜单直接复用稳定编辑器身份。 */
+  deleteComponent(componentId: EditorComponentId): Promise<void>;
+  /** 删除指定 Connection 对应的 Wire，供对象右键菜单使用。 */
+  deleteConnection(connectionId: string): Promise<void>;
   /** 请求显示清空确认；此步骤不会调用引擎。 */
   requestClear(): Promise<void>;
   /** 确认并执行可撤销的清空事务。 */
@@ -225,6 +229,8 @@ export function useWorkspace(): WorkspaceBinding {
     resetRoute: (connectionId) => dispatch({ type: "reset-route", connectionId }),
     deleteWaypoint: (connectionId, pointIndex) => dispatch({ type: "delete-waypoint", connectionId, pointIndex }),
     deleteSelection: () => dispatch({ type: "delete-selected" }),
+    deleteComponent: (componentId) => dispatch({ type: "delete-component", componentId }),
+    deleteConnection: (connectionId) => dispatch({ type: "delete-connection", connectionId }),
     requestClear: () => dispatch({ type: "request-clear" }),
     confirmClear: () => dispatch({ type: "confirm-clear" }),
     cancelCurrentOperation: () => dispatch({ type: "cancel-current-operation" }),

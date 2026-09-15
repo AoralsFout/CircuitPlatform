@@ -6,6 +6,7 @@ import {
   isViewportPanPointer,
   panViewport,
   screenToWorld,
+  hitTestCanvas,
   type CanvasNode,
   type CanvasScene,
   type CanvasWire,
@@ -18,6 +19,8 @@ import type { ConnectionDraftPort } from "../editor/connection-draft.ts";
 import {
   positionComponentMenu,
 } from "../editor/component-menu";
+import { contextActionsFor, type ContextAction, type ContextActionId } from "../editor/context-menu";
+import type { CanvasHitTarget } from "../canvas/hit-testing";
 
 const props = defineProps<{
   scene: CanvasScene;
@@ -27,6 +30,10 @@ const props = defineProps<{
   recentComponentKinds?: readonly ComponentKindName[];
   addComponent?: (kind: ComponentKindName, center: { x: number; y: number }, altKey: boolean, continuous?: boolean) => Promise<boolean>;
   rememberComponentKind?: (kind: ComponentKindName) => void;
+  duplicateComponent?: (componentId: string) => Promise<boolean>;
+  deleteComponent?: (componentId: string) => Promise<void>;
+  resetRoute?: (connectionId: string) => Promise<void>;
+  deleteConnection?: (connectionId: string) => Promise<void>;
 }>();
 
 const emit = defineEmits<{
@@ -50,6 +57,7 @@ const emit = defineEmits<{
   connectionEnd: [port: ConnectionDraftPort];
   connectionAxisToggle: [];
   connectionCancel: [];
+  clearSelection: [];
 }>();
 
 const canvasElement = ref<HTMLElement | null>(null);
@@ -63,6 +71,11 @@ const componentMenu = ref<{
   position: { x: number; y: number };
   worldPoint: { x: number; y: number };
   altKey: boolean;
+} | null>(null);
+const objectMenu = ref<{
+  position: { x: number; y: number };
+  target: Exclude<CanvasHitTarget, { kind: "background" | "port" | "wire-handle" }>;
+  actions: readonly ContextAction[];
 } | null>(null);
 let routeEditPointer: { pointerId: number; connectionId: string; route: readonly { x: number; y: number }[]; target: { kind: "waypoint" | "segment"; index: number } } | null = null;
 let connectionPointer: { pointerId: number; ended: boolean } | null = null;
@@ -154,6 +167,31 @@ function closeComponentMenu(): void {
   void nextTick(() => canvasElement.value?.focus());
 }
 
+function closeObjectMenu(): void {
+  objectMenu.value = null;
+  void nextTick(() => canvasElement.value?.focus());
+}
+
+/** 执行 Component/Wire 的最小右键动作集合；Route 编辑本身仍由画布手柄完成。 */
+async function selectObjectAction(action: ContextActionId): Promise<void> {
+  const menu = objectMenu.value;
+  if (!menu) return;
+  const target = menu.target;
+  closeObjectMenu();
+  if (target.kind === "component") {
+    if (action === "copy-component") await props.duplicateComponent?.(target.nodeId);
+    else if (action === "delete-component") await props.deleteComponent?.(target.nodeId);
+    return;
+  }
+  if (action === "edit-route") {
+    emit("selectConnection", target.connectionId);
+  } else if (action === "reset-route") {
+    await props.resetRoute?.(target.connectionId);
+  } else if (action === "delete-connection") {
+    await props.deleteConnection?.(target.connectionId);
+  }
+}
+
 function openComponentMenu(anchor: { x: number; y: number }, altKey = false): void {
   if (props.interaction.connectionDraft || props.interaction.pendingPlacement || !props.componentDefinitions) return;
   componentMenu.value = {
@@ -203,10 +241,34 @@ async function onDrop(event: DragEvent): Promise<void> {
 
 function onContextMenu(event: MouseEvent): void {
   event.preventDefault();
-  const target = event.target instanceof Element ? event.target : null;
-  // 对象右键菜单和布线状态由后续交互层处理；背景右键才打开添加元件菜单。
-  if (target?.closest(".circuit-node, .signal-wire-hit, .component-menu")) return;
+  if (props.interaction.connectionDraft || props.interaction.pendingPlacement) {
+    objectMenu.value = null;
+    return;
+  }
   const point = pointerInCanvas(event);
+  const worldPoint = screenToWorld(point, props.viewport);
+  const hit = hitTestCanvas(props.scene, worldPoint, { zoom: props.viewport.zoom });
+  objectMenu.value = null;
+  const objectHit = hit.kind === "wire-handle"
+    ? { kind: "wire", connectionId: hit.connectionId } as const
+    : hit;
+  if (objectHit.kind === "component" || objectHit.kind === "wire") {
+    if (objectHit.kind === "component") emit("selectNode", objectHit.nodeId);
+    else emit("selectConnection", objectHit.connectionId);
+    objectMenu.value = {
+      position: point,
+      target: objectHit,
+      actions: contextActionsFor(objectHit),
+    };
+    canvasElement.value?.focus();
+    return;
+  }
+  if (hit.kind === "port") {
+    emit("selectNode", hit.nodeId);
+    canvasElement.value?.focus();
+    return;
+  }
+  // 只有统一命中结果为背景时才打开添加元件菜单。
   openComponentMenu(point, event.altKey);
   canvasElement.value?.focus();
 }
@@ -263,6 +325,14 @@ function onPointerDown(event: PointerEvent): void {
     event.preventDefault();
     event.stopPropagation();
     return;
+  }
+  if (event.button === 0 && !spacePressed) {
+    const hit = hitTestCanvas(props.scene, pointerInWorld(event), { zoom: props.viewport.zoom });
+    if (hit.kind === "background") {
+      objectMenu.value = null;
+      componentMenu.value = null;
+      emit("clearSelection");
+    }
   }
   if (!isViewportPanPointer(event.button, spacePressed)) return;
   panPointer = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
@@ -498,6 +568,24 @@ onBeforeUnmount(() => {
         @select="selectComponentFromMenu"
         @close="closeComponentMenu"
       />
+      <div
+        v-if="objectMenu"
+        class="object-context-menu"
+        role="menu"
+        aria-label="对象操作"
+        :style="{ left: `${objectMenu.position.x}px`, top: `${objectMenu.position.y}px` }"
+        @pointerdown.stop
+        @contextmenu.stop.prevent
+      >
+        <button
+          v-for="action in objectMenu.actions"
+          :key="action.id"
+          type="button"
+          role="menuitem"
+          :class="{ 'object-context-menu__item--destructive': action.destructive }"
+          @click="selectObjectAction(action.id)"
+        >{{ action.label }}</button>
+      </div>
       <div class="canvas-crosshair canvas-crosshair--tl" aria-hidden="true"></div><div class="canvas-crosshair canvas-crosshair--br" aria-hidden="true"></div>
     </div>
     <div class="canvas-legend"><span><i class="legend-line legend-line--live"></i>高电平 <b>1</b></span><span><i class="legend-line"></i>低电平 <b>0</b></span><span><i class="legend-line legend-line--unknown"></i>未知 <b>X</b></span><span><i class="legend-line legend-line--dangling"></i>悬空</span></div>

@@ -23,6 +23,8 @@ const {
   select,
   moveComponent,
   deleteSelection,
+  deleteComponent,
+  deleteConnection,
   requestClear,
   confirmClear,
   cancelCurrentOperation,
@@ -34,6 +36,7 @@ const {
   addComponent,
   duplicateComponent,
   editRoute,
+  resetRoute,
   createConnection,
 } = useWorkspace();
 const {
@@ -54,6 +57,7 @@ const {
   selectedNodeName,
   selectedNodeValue,
   selectedNodeDescription,
+  inspector,
   selectedNodeId,
   zoomLabel,
   canvasScene,
@@ -198,8 +202,13 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           :recent-component-kinds="recentComponentKinds"
           :add-component="addComponent"
           :remember-component-kind="rememberComponentKind"
+          :duplicate-component="duplicateComponent"
+          :delete-component="deleteComponent"
+          :reset-route="resetRoute"
+          :delete-connection="deleteConnection"
           @select-node="select({ kind: 'component', id: $event })"
           @select-connection="select({ kind: 'connection', id: $event })"
+          @clear-selection="select(null)"
           @node-drag-start="startNodeDrag($event.nodeId, $event.pointerWorld)"
           @node-drag-move="moveNodeDrag($event.pointerWorld, $event.altKey)"
           @node-drag-end="endNodeDrag()"
@@ -232,6 +241,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           :engine-state="state.engineState"
           :engine-name="state.engineName"
           :operation-error="editorState?.error?.message ?? state.operationError"
+          :inspector="inspector"
           :waveform="state.waveform"
           :waveform-rows="waveformRows"
           :simulation-step="state.simulationStep"
