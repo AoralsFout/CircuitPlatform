@@ -12,6 +12,7 @@ export interface ConnectionDraftPort {
 
 export type ConnectionDraftAxis = "horizontal" | "vertical";
 export type ConnectionDraftPhase = "idle" | "drawing" | "failed";
+export type ConnectionPortPointerAction = "start" | "finish";
 
 export interface ConnectionDraftError {
   code:
@@ -61,6 +62,32 @@ export const EMPTY_CONNECTION_DRAFT: ConnectionDraftState = {
   error: null,
   connectionId: null,
 };
+
+/**
+ * 把 Port 按下事件归一为开始或完成布线，避免用目标 Port 覆盖现有草稿起点。
+ * @param hasDraft 当前是否已经存在连接草稿。
+ * @returns 空闲时开始布线，已有草稿时完成布线。
+ */
+export function resolveConnectionPortPointerAction(hasDraft: boolean): ConnectionPortPointerAction {
+  return hasDraft ? "finish" : "start";
+}
+
+/**
+ * 判断指针下的 Port 能否作为当前草稿的目标，并供画布显示悬浮反馈。
+ * @param origin 草稿起点；普通布线要求目标方向相反。
+ * @param target 指针下的候选 Port。
+ * @param allowSameDirection 修复悬空端点时允许用同方向 Port 替换失效端点。
+ * @returns 候选 Port 是否可作为当前交互的目标。
+ */
+export function isConnectionDraftTarget(
+  origin: ConnectionDraftPort | null,
+  target: ConnectionDraftPort | null,
+  allowSameDirection = false,
+): boolean {
+  if (!origin || !target) return false;
+  if (origin.componentId === target.componentId && origin.port === target.port) return false;
+  return allowSameDirection ? origin.direction === target.direction : origin.direction !== target.direction;
+}
 
 function copyPoint(point: Point): Point {
   return { x: point.x, y: point.y };
@@ -184,14 +211,6 @@ export function connectionDraftRoute(
   if (!end) return [copyPoint(state.origin.point)];
   const terminalLength = Math.max(ROUTE_TERMINAL_LENGTH, options.terminalLength ?? ROUTE_TERMINAL_LENGTH);
   const originTerminal = portTerminal(state.origin, terminalLength);
-  const targetPort = target ?? {
-    componentId: "__cursor__",
-    port: "__cursor__",
-    direction: state.origin.direction === "input" ? "output" : "input",
-    point: end,
-    outward: state.origin.direction === "input" ? "right" : "left",
-  } satisfies ConnectionDraftPort;
-  const targetTerminal = portTerminal(targetPort, terminalLength);
   const points: Point[] = [copyPoint(state.origin.point), originTerminal];
   let previous = originTerminal;
   for (const waypoint of state.waypoints) {
@@ -199,6 +218,12 @@ export function connectionDraftRoute(
     points.push(copyPoint(waypoint));
     previous = waypoint;
   }
+  // 游标和临时 Waypoint 不是 Port，不能伪造 Port 终端段；否则草稿末端会多出一个直角短线。
+  if (!target) {
+    points.push(axisPoint(previous, end, state.axis), copyPoint(end));
+    return normalizeOrthogonalRoute(points);
+  }
+  const targetTerminal = portTerminal(target, terminalLength);
   points.push(axisPoint(previous, targetTerminal, state.axis));
   points.push(targetTerminal, copyPoint(end));
   return normalizeOrthogonalRoute(points);

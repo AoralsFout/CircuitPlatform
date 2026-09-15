@@ -73,7 +73,8 @@ export function hitTestCanvas(scene: CanvasScene, point: Point, options: HitTest
         return { kind: "wire-handle", connectionId: selectedWire.id, handle: "waypoint", index };
       }
     }
-    for (let index = 0; index < selectedWire.route.length - 1; index += 1) {
+    // 首尾线段固定连接 Port，不暴露可拖动手柄。
+    for (let index = 1; index < selectedWire.route.length - 2; index += 1) {
       if (distanceToSegment(point, selectedWire.route[index], selectedWire.route[index + 1]) <= wireHitRadius) {
         return { kind: "wire-handle", connectionId: selectedWire.id, handle: "segment", index };
       }

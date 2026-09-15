@@ -28,7 +28,10 @@ function scene(): CanvasScene {
 test("hit testing honors Port, selected Wire handles, node, Wire, then background priority", () => {
   const current = scene();
   assert.deepEqual(hitTestCanvas(current, { x: 100, y: 130 }), { kind: "port", nodeId: "and-1", portId: "in1" });
-  assert.deepEqual(hitTestCanvas(current, { x: 25, y: 142 }, { selectedConnectionId: "wire-1" }), { kind: "wire-handle", connectionId: "wire-1", handle: "segment", index: 0 });
+  const segmentScene = scene();
+  segmentScene.wires[0].route = [{ x: 0, y: 142 }, { x: 50, y: 142 }, { x: 50, y: 110 }, { x: 100, y: 110 }];
+  assert.deepEqual(hitTestCanvas(segmentScene, { x: 50, y: 126 }, { selectedConnectionId: "wire-1" }), { kind: "wire-handle", connectionId: "wire-1", handle: "segment", index: 1 });
+  assert.deepEqual(hitTestCanvas(current, { x: 25, y: 142 }, { selectedConnectionId: "wire-1" }), { kind: "wire", connectionId: "wire-1" });
   assert.deepEqual(hitTestCanvas(current, { x: 120, y: 170 }), { kind: "component", nodeId: "and-1" });
   assert.deepEqual(hitTestCanvas(current, { x: 50, y: 130 }), { kind: "wire", connectionId: "wire-1" });
   assert.deepEqual(hitTestCanvas(current, { x: 500, y: 500 }), { kind: "background" });
@@ -38,6 +41,7 @@ test("object context actions keep Component and Wire vocabulary separate", () =>
   assert.deepEqual(contextActionsFor({ kind: "component", nodeId: "and-1" }).map((item) => item.id), ["copy-component", "delete-component"]);
   assert.deepEqual(contextActionsFor({ kind: "wire", connectionId: "wire-1" }).map((item) => item.id), ["edit-route", "reset-route", "delete-connection"]);
   assert.deepEqual(contextActionsFor({ kind: "wire-handle", connectionId: "wire-1", handle: "segment", index: 0 }).map((item) => item.id), ["edit-route", "reset-route", "delete-connection"]);
+  assert.deepEqual(contextActionsFor({ kind: "wire-handle", connectionId: "wire-1", handle: "waypoint", index: 1 }).map((item) => item.id), ["edit-route", "delete-waypoint", "reset-route", "delete-connection"]);
   assert.deepEqual(contextActionsFor({ kind: "port", nodeId: "and-1", portId: "in1" }), []);
 });
 

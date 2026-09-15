@@ -309,6 +309,8 @@ button:disabled { cursor: not-allowed; }
 .node-port--upper { top: 37%; }
 .node-port--lower { top: 63%; }
 .node-port:hover, .node-port:focus-visible { color: var(--color-focus); outline: 2px solid color-mix(in srgb, var(--color-focus) 58%, transparent); outline-offset: 2px; }
+.node-port--connection-target { color: var(--color-focus); outline: 2px solid var(--color-focus); outline-offset: 2px; }
+.node-port--connection-target::before { border-color: var(--color-focus); box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-focus) 28%, transparent), 0 0 10px var(--color-focus); }
 .canvas-draft-error { position: absolute; z-index: 4; right: 16px; bottom: 16px; max-width: min(430px, calc(100% - 32px)); border: 1px solid color-mix(in srgb, var(--color-status-error) 55%, var(--color-border)); padding: 8px 10px; color: var(--color-status-error); background: color-mix(in srgb, var(--theme-panel) 92%, transparent); font-size: 10px; }
 .circuit-node:hover { border-color: var(--color-text-muted); }
 .circuit-node:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 3px; }

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import ComponentMenu from "./ComponentMenu.vue";
 import {
   applyWheelViewport,
@@ -17,7 +17,7 @@ import {
 } from "../canvas";
 import type { ComponentDefinition } from "../canvas";
 import type { ComponentKindName } from "@circuit-platform/protocol";
-import type { ConnectionDraftPort } from "../editor/connection-draft.ts";
+import { isConnectionDraftTarget, resolveConnectionPortPointerAction, type ConnectionDraftPort } from "../editor/connection-draft.ts";
 import type { Point } from "../editor";
 import { resolveCanvasKeyboardAction, isEditableKeyboardTarget } from "../editor/keyboard.ts";
 import {
@@ -34,6 +34,7 @@ export interface CanvasController {
   duplicateComponent: (componentId: string) => Promise<boolean>;
   deleteComponent: (componentId: string) => Promise<void>;
   resetRoute: (connectionId: string) => Promise<void>;
+  deleteWaypoint: (connectionId: string, pointIndex: number) => Promise<void>;
   deleteConnection: (connectionId: string) => Promise<void>;
 }
 
@@ -92,11 +93,14 @@ const componentMenu = ref<{
 } | null>(null);
 const objectMenu = ref<{
   position: { x: number; y: number };
-  target: Exclude<CanvasHitTarget, { kind: "background" | "port" | "wire-handle" }>;
+  target: Exclude<CanvasHitTarget, { kind: "background" | "port" }>;
   actions: readonly ContextAction[];
 } | null>(null);
 let routeEditPointer: { pointerId: number; connectionId: string; route: readonly { x: number; y: number }[]; target: { kind: "waypoint" | "segment"; index: number } } | null = null;
 let connectionPointer: { pointerId: number; ended: boolean } | null = null;
+let connectionDraftOrigin: ConnectionDraftPort | null = null;
+let allowSameDirectionDraftTarget = false;
+const hoveredConnectionTarget = ref<string | null>(null);
 let lastPointerAnchor: { x: number; y: number } | null = null;
 
 function keyboardMenuAnchor(target: EventTarget | null): { x: number; y: number } {
@@ -216,6 +220,22 @@ function portAtWorld(point: { x: number; y: number }): ConnectionDraftPort | nul
   return null;
 }
 
+function portKey(port: Pick<ConnectionDraftPort, "componentId" | "port">): string {
+  return `${port.componentId}:${port.port}`;
+}
+
+/** 更新当前合法目标 Port 的悬浮反馈；非法或离开的目标立即清除。 */
+function updateConnectionTargetHover(point: Point): void {
+  const target = portAtWorld(point);
+  hoveredConnectionTarget.value = isConnectionDraftTarget(connectionDraftOrigin, target, allowSameDirectionDraftTarget) && target
+    ? portKey(target)
+    : null;
+}
+
+function isHoveredConnectionTarget(nodeId: string, portId: string): boolean {
+  return hoveredConnectionTarget.value === `${nodeId}:${portId}`;
+}
+
 function closeComponentMenu(): void {
   componentMenu.value = null;
   void nextTick(() => canvasElement.value?.focus());
@@ -260,7 +280,9 @@ async function selectObjectAction(action: ContextActionId): Promise<void> {
     else if (action === "delete-component") await props.controller.deleteComponent(target.nodeId);
     return;
   }
-  if (action === "edit-route") {
+  if (action === "delete-waypoint" && target.kind === "wire-handle" && target.handle === "waypoint") {
+    await props.controller.deleteWaypoint(target.connectionId, target.index);
+  } else if (action === "edit-route") {
     emit("selectConnection", target.connectionId);
   } else if (action === "reset-route") {
     await props.controller.resetRoute(target.connectionId);
@@ -318,7 +340,14 @@ async function onDrop(event: DragEvent): Promise<void> {
 
 function onContextMenu(event: MouseEvent): void {
   event.preventDefault();
-  if (props.interaction.connectionDraft || props.interaction.pendingPlacement) {
+  if (props.interaction.connectionDraft) {
+    objectMenu.value = null;
+    componentMenu.value = null;
+    emit("connectionWaypointRemove");
+    canvasElement.value?.focus();
+    return;
+  }
+  if (props.interaction.pendingPlacement) {
     objectMenu.value = null;
     return;
   }
@@ -326,12 +355,21 @@ function onContextMenu(event: MouseEvent): void {
   const worldPoint = screenToWorld(point, props.viewport);
   const hit = hitTestCanvas(props.scene, worldPoint, { zoom: props.viewport.zoom });
   objectMenu.value = null;
-  const objectHit = hit.kind === "wire-handle"
-    ? { kind: "wire", connectionId: hit.connectionId } as const
-    : hit;
+  const objectHit = hit;
   if (objectHit.kind === "component" || objectHit.kind === "wire") {
     if (objectHit.kind === "component") emit("selectComponent", objectHit.nodeId);
     else emit("selectConnection", objectHit.connectionId);
+    objectMenu.value = {
+      position: point,
+      target: objectHit,
+      actions: contextActionsFor(objectHit),
+    };
+    canvasElement.value?.focus();
+    focusObjectMenuFirst();
+    return;
+  }
+  if (objectHit.kind === "wire-handle") {
+    emit("selectConnection", objectHit.connectionId);
     objectMenu.value = {
       position: point,
       target: objectHit,
@@ -423,7 +461,9 @@ function onPointerDown(event: PointerEvent): void {
 function onPointerMove(event: PointerEvent): void {
   lastPointerAnchor = pointerInCanvas(event);
   if (connectionPointer?.pointerId === event.pointerId) {
-    emit("connectionMove", { point: pointerInWorld(event), altKey: event.altKey });
+    const point = pointerInWorld(event);
+    emit("connectionMove", { point, altKey: event.altKey });
+    updateConnectionTargetHover(point);
     event.preventDefault();
     return;
   }
@@ -441,6 +481,11 @@ function onPointerMove(event: PointerEvent): void {
   if (props.interaction.pendingPlacement && !nodeDragPointer && !panPointer && !spacePressed) {
     emit("placementMove", screenToWorld(pointerInCanvas(event), props.viewport), event.altKey);
   }
+  if (props.interaction.connectionDraft && !nodeDragPointer && !routeEditPointer && !panPointer && !spacePressed) {
+    const point = pointerInWorld(event);
+    emit("connectionMove", { point, altKey: event.altKey });
+    updateConnectionTargetHover(point);
+  }
   if (!panPointer || panPointer.pointerId !== event.pointerId) return;
   panMoveCoalescer.schedule({ pointerId: event.pointerId, x: event.clientX, y: event.clientY });
   event.preventDefault();
@@ -450,12 +495,15 @@ function onPointerUp(event: PointerEvent): void {
   if (connectionPointer?.pointerId === event.pointerId) {
     if (canvasElement.value?.hasPointerCapture(event.pointerId)) canvasElement.value.releasePointerCapture(event.pointerId);
     if (!connectionPointer.ended && event.type !== "pointercancel") {
-      const target = portAtWorld(pointerInWorld(event));
-      if (target) emit("connectionEnd", target);
-      else emit("connectionWaypoint", { point: pointerInWorld(event), altKey: event.altKey });
+      const releasePoint = pointerInWorld(event);
+      const target = portAtWorld(releasePoint);
+      const isNearOrigin = connectionDraftOrigin && Math.hypot(connectionDraftOrigin.point.x - releasePoint.x, connectionDraftOrigin.point.y - releasePoint.y) <= 12 / Math.max(props.viewport.zoom, 0.01);
+      if (target && !isNearOrigin) emit("connectionEnd", target);
+      else if (!isNearOrigin) emit("connectionWaypoint", { point: releasePoint, altKey: event.altKey });
     }
     if (event.type === "pointercancel") emit("connectionCancel");
     connectionPointer = null;
+    hoveredConnectionTarget.value = null;
     event.preventDefault();
     return;
   }
@@ -554,7 +602,11 @@ function onCanvasKeyboard(event: KeyboardEvent): void {
     if (event.key === "Tab") focusByOffset(action.delta);
     else focusByDirection(event.key === "ArrowLeft" ? -1 : event.key === "ArrowRight" ? 1 : 0, event.key === "ArrowUp" ? -1 : event.key === "ArrowDown" ? 1 : 0);
   } else if (action.type === "select-focus") {
-    if (port && !props.interaction.connectionDraft) emit("connectionStart", port);
+    if (port && !props.interaction.connectionDraft) {
+      connectionDraftOrigin = port;
+      allowSameDirectionDraftTarget = false;
+      emit("connectionStart", port);
+    }
     else if (focusDataset?.focusKind === "component") emit("selectComponent", focusDataset.focusId ?? "");
     else if (focusDataset?.focusKind === "connection") emit("selectConnection", focusDataset.focusId ?? "");
   } else if (action.type === "cancel") {
@@ -581,9 +633,19 @@ function onKeydown(event: KeyboardEvent): void {
 
 function onPortPointerDown(event: PointerEvent, node: CanvasNode, port: CanvasNode["ports"][number]): void {
   if (event.button !== 0 || spacePressed || props.interaction.pendingPlacement) return;
+  const draftPort = connectionPort(node, port);
+  if (resolveConnectionPortPointerAction(Boolean(props.interaction.connectionDraft)) === "finish") {
+    hoveredConnectionTarget.value = null;
+    emit("connectionEnd", draftPort);
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
+  connectionDraftOrigin = draftPort;
+  allowSameDirectionDraftTarget = false;
   connectionPointer = { pointerId: event.pointerId, ended: false };
   canvasElement.value?.setPointerCapture(event.pointerId);
-  emit("connectionStart", connectionPort(node, port));
+  emit("connectionStart", draftPort);
   emit("connectionMove", { point: pointerInWorld(event), altKey: event.altKey });
   event.preventDefault();
   event.stopPropagation();
@@ -616,11 +678,10 @@ function onPortPointerUp(event: PointerEvent, node: CanvasNode, port: CanvasNode
   event.stopPropagation();
 }
 
-function onPortClick(event: MouseEvent, node: CanvasNode, port: CanvasNode["ports"][number]): void {
+function onPortClick(event: MouseEvent): void {
   event.preventDefault();
   event.stopPropagation();
-  // 指针按下/释放已经覆盖拖拽提交；没有位移的单击只启动一个草稿。
-  if (!props.interaction.connectionDraft) emit("connectionStart", connectionPort(node, port));
+  // Port 的开始/完成意图都在 pointerdown 处理；click 只阻止节点选择冒泡。
 }
 
 /** 从悬空 Wire 的冻结端点发起修复草稿，保留原 Connection 的稳定身份。 */
@@ -629,13 +690,16 @@ function onDanglingEndpointPointerDown(event: PointerEvent, wire: CanvasWire, si
   connectionPointer = { pointerId: event.pointerId, ended: false };
   canvasElement.value?.setPointerCapture(event.pointerId);
   const endpoint = side === "source" ? wire.source : wire.target;
-  emit("connectionStart", {
+  const draftPort: ConnectionDraftPort = {
     componentId: endpoint.componentId,
     port: endpoint.port,
     direction: side === "source" ? "output" : "input",
     point: { ...endpoint.point },
     outward: side === "source" ? "right" : "left",
-  });
+  };
+  connectionDraftOrigin = draftPort;
+  allowSameDirectionDraftTarget = true;
+  emit("connectionStart", draftPort);
   emit("connectionMove", { point: pointerInWorld(event), altKey: event.altKey });
   event.preventDefault();
   event.stopPropagation();
@@ -670,6 +734,13 @@ onBeforeUnmount(() => {
   window.removeEventListener("keydown", onKeydown);
   window.removeEventListener("keyup", onKeyup);
 });
+
+watch(() => props.interaction.connectionDraft, (draft) => {
+  if (draft) return;
+  connectionDraftOrigin = null;
+  allowSameDirectionDraftTarget = false;
+  hoveredConnectionTarget.value = null;
+});
 </script>
 
 <template>
@@ -682,7 +753,7 @@ onBeforeUnmount(() => {
           <template v-for="wire in scene.wires" :key="wire.id">
             <path class="signal-wire-hit" :d="pathFor(wire.route)" role="button" tabindex="0" data-canvas-focus data-focus-kind="connection" :data-focus-id="wire.id" :class="{ 'signal-wire-hit--focused': interaction.focusedId === wire.id }" :aria-label="`${wire.danglingEndpoints.length > 0 ? '悬空' : '正常'}连线 ${wire.id}，信号 ${wire.signal}`" @focus="emit('focusChange', wire.id)" @click.stop="emit('selectConnection', wire.id)" />
             <template v-if="wire.selected" v-for="(_, segmentIndex) in wire.route.slice(0, -1)" :key="`${wire.id}-segment-${segmentIndex}`">
-              <path class="route-segment-hit" :d="segmentPath(wire.route, segmentIndex)" :aria-label="`移动连线 ${wire.id} 线段 ${segmentIndex + 1}`" @pointerdown.stop="onRouteSegmentPointerDown($event, wire, segmentIndex)" />
+              <path v-if="segmentIndex > 0 && segmentIndex < wire.route.length - 2" class="route-segment-hit" :d="segmentPath(wire.route, segmentIndex)" :aria-label="`移动连线 ${wire.id} 线段 ${segmentIndex + 1}`" @pointerdown.stop="onRouteSegmentPointerDown($event, wire, segmentIndex)" />
             </template>
             <template v-if="wire.selected" v-for="(point, pointIndex) in wire.route.slice(1, -1)" :key="`${wire.id}-waypoint-${pointIndex}`">
               <circle class="route-waypoint-handle" :cx="point.x" :cy="point.y" r="7" role="button" tabindex="0" :aria-label="`编辑连线 ${wire.id} 折点 ${pointIndex + 1}`" @pointerdown.stop="onRouteWaypointPointerDown($event, wire, pointIndex + 1)" />
@@ -695,7 +766,7 @@ onBeforeUnmount(() => {
         </svg>
         <article v-for="node in scene.nodes" :key="node.id" class="circuit-node" :class="{ 'circuit-node--selected': node.selected, 'circuit-node--focused': interaction.focusedId === node.id, 'circuit-node--dragging': interaction.draggingComponentId === node.id }" :style="nodeStyle(node)" role="button" tabindex="0" data-canvas-focus data-focus-kind="component" :data-focus-id="node.id" :data-selected="node.selected ? 'true' : 'false'" :aria-label="`选择${node.kind.toUpperCase()} 元件`" @focus="emit('focusChange', node.id)" @pointerdown.stop="onNodePointerDown($event, node)" @click="onNodeClick(node.id)">
           <strong>{{ node.kind.toUpperCase() }}</strong>
-          <span v-for="port in node.ports" :key="port.id" class="node-port" :class="[port.direction === 'input' ? 'node-port--left' : 'node-port--right', signalClass(port.signal), { 'node-port--dangling': port.dangling }]" :style="{ top: `${port.offset.y}px` }" :data-port-id="port.id" :data-node-id="node.id" :data-signal="port.signal" :data-dangling="port.dangling ? 'true' : 'false'" :data-focus-id="`port:${node.id}:${port.id}`" data-focus-kind="port" data-canvas-focus role="button" tabindex="0" :aria-label="`${port.direction === 'input' ? '输入' : '输出'}端口 ${port.name}，信号 ${port.signal}${port.dangling ? '，悬空' : ''}`" @focus="emit('focusChange', `port:${node.id}:${port.id}`)" @pointerdown.stop="onPortPointerDown($event, node, port)" @pointerup.stop="onPortPointerUp($event, node, port)" @click.stop="onPortClick($event, node, port)">{{ port.name }} · {{ port.signal }}<template v-if="port.dangling"> · 悬空</template></span>
+          <span v-for="port in node.ports" :key="port.id" class="node-port" :class="[port.direction === 'input' ? 'node-port--left' : 'node-port--right', signalClass(port.signal), { 'node-port--dangling': port.dangling, 'node-port--connection-target': isHoveredConnectionTarget(node.id, port.id) }]" :style="{ top: `${port.offset.y}px` }" :data-port-id="port.id" :data-node-id="node.id" :data-signal="port.signal" :data-dangling="port.dangling ? 'true' : 'false'" :data-focus-id="`port:${node.id}:${port.id}`" data-focus-kind="port" data-canvas-focus role="button" tabindex="0" :aria-label="`${port.direction === 'input' ? '输入' : '输出'}端口 ${port.name}，信号 ${port.signal}${port.dangling ? '，悬空' : ''}`" @focus="emit('focusChange', `port:${node.id}:${port.id}`)" @pointerdown.stop="onPortPointerDown($event, node, port)" @pointerup.stop="onPortPointerUp($event, node, port)" @click.stop="onPortClick($event)">{{ port.name }} · {{ port.signal }}<template v-if="port.dangling"> · 悬空</template></span>
         </article>
         <article v-if="interaction.pendingPlacement" class="circuit-node circuit-node--pending" :class="{ 'circuit-node--error': interaction.pendingPlacement.error }" :style="{ left: `${interaction.pendingPlacement.position.x}px`, top: `${interaction.pendingPlacement.position.y}px`, width: `${interaction.pendingPlacement.size.width}px`, height: `${interaction.pendingPlacement.size.height}px` }" role="status" :aria-label="`${interaction.pendingPlacement.error ? '放置失败' : '正在放置'} ${interaction.pendingPlacement.kind} 元件`">
           <span class="node-tag">{{ interaction.pendingPlacement.error ? '放置失败' : '待放置' }}</span><strong>{{ interaction.pendingPlacement.kind.toUpperCase() }}</strong>

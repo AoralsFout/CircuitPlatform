@@ -38,6 +38,7 @@ const {
   duplicateComponent,
   editRoute,
   resetRoute,
+  deleteWaypoint,
   createConnection,
 } = useWorkspace();
 const {
@@ -208,7 +209,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           :scene="canvasScene"
           :viewport="viewport"
           :interaction="interaction"
-          :controller="{ componentDefinitions, recentComponentKinds, addComponent, rememberComponentKind, duplicateComponent, deleteComponent, resetRoute, deleteConnection }"
+          :controller="{ componentDefinitions, recentComponentKinds, addComponent, rememberComponentKind, duplicateComponent, deleteComponent, resetRoute, deleteWaypoint, deleteConnection }"
           @select-component="select({ kind: 'component', id: $event })"
           @select-connection="select({ kind: 'connection', id: $event })"
           @clear-selection="select(null)"

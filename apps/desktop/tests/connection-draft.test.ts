@@ -3,8 +3,10 @@ import test from "node:test";
 import {
   connectionDraftRoute,
   createConnectionDraft,
+  isConnectionDraftTarget,
   normalizeConnectionEndpoints,
   reduceConnectionDraft,
+  resolveConnectionPortPointerAction,
   validateConnectionDraftTarget,
   type ConnectionDraftPort,
 } from "../src/editor/connection-draft.ts";
@@ -36,6 +38,29 @@ test("click and drag use one draft state machine and retain the first blank-rele
   assert.deepEqual(route[0], output.point);
   assert.deepEqual(route.at(-1), input.point);
   assert.ok(route.every((point, index) => index === 0 || point.x === route[index - 1].x || point.y === route[index - 1].y));
+});
+
+test("clicking a Port finishes an existing draft instead of replacing its origin", () => {
+  assert.equal(resolveConnectionPortPointerAction(false), "start");
+  assert.equal(resolveConnectionPortPointerAction(true), "finish");
+});
+
+test("target hover accepts compatible Ports and rejects the origin or same-direction Ports", () => {
+  assert.equal(isConnectionDraftTarget(output, input), true);
+  assert.equal(isConnectionDraftTarget(output, output), false);
+  assert.equal(isConnectionDraftTarget(output, { ...output, componentId: "other" }), false);
+  assert.equal(isConnectionDraftTarget(output, { ...output, componentId: "other" }, true), true);
+});
+
+test("cursor preview ends at the temporary point without a fake target terminal segment", () => {
+  let state = reduceConnectionDraft(createConnectionDraft(), { type: "start", port: output });
+  state = reduceConnectionDraft(state, { type: "move", point: { x: 43, y: 71 } });
+
+  assert.deepEqual(connectionDraftRoute(state), [
+    { x: 0, y: 32 },
+    { x: 48, y: 32 },
+    { x: 48, y: 64 },
+  ]);
 });
 
 test("Space toggles axis while origin and route remain stable", () => {

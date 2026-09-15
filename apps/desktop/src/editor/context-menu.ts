@@ -1,6 +1,6 @@
 import type { CanvasHitTarget } from "../canvas/hit-testing";
 
-export type ContextActionId = "copy-component" | "delete-component" | "edit-route" | "reset-route" | "delete-connection";
+export type ContextActionId = "copy-component" | "delete-component" | "edit-route" | "delete-waypoint" | "reset-route" | "delete-connection";
 
 export interface ContextAction {
   id: ContextActionId;
@@ -21,11 +21,17 @@ export function contextActionsFor(target: CanvasHitTarget): readonly ContextActi
     ];
   }
   if (target.kind === "wire" || target.kind === "wire-handle") {
-    return [
+    const actions: ContextAction[] = [
       { id: "edit-route", label: "编辑 Route" },
+    ];
+    if (target.kind === "wire-handle" && target.handle === "waypoint") {
+      actions.push({ id: "delete-waypoint", label: "删除 Waypoint", destructive: true });
+    }
+    actions.push(
       { id: "reset-route", label: "重置 Route" },
       { id: "delete-connection", label: "删除 Wire", destructive: true },
-    ];
+    );
+    return actions;
   }
   return [];
 }

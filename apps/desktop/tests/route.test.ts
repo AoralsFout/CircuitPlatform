@@ -37,12 +37,9 @@ test("waypoint movement preserves Port endpoints and supports Alt precision", ()
   assert.deepEqual(snapRoutePoint({ x: 23, y: 25 }, true), { x: 23, y: 25 });
 });
 
-test("moving an endpoint segment inserts a two-corner detour", () => {
+test("endpoint terminal segments cannot be dragged", () => {
   const moved = moveRouteSegment([{ x: 0, y: 0 }, { x: 160, y: 0 }], 0, { x: 0, y: 32 });
-  assert.equal(moved.length, 4);
-  assert.deepEqual(moved[0], { x: 0, y: 0 });
-  assert.deepEqual(moved.at(-1), { x: 160, y: 0 });
-  assert.equal(isOrthogonalRoute(moved), true);
+  assert.deepEqual(moved, [{ x: 0, y: 0 }, { x: 160, y: 0 }]);
 });
 
 test("deleting a waypoint is one geometry operation and remains orthogonal", () => {

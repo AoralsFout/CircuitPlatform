@@ -294,13 +294,13 @@ CircuitNode
 
 每条 Wire 是一个领域 Connection 的视觉投影。它的 Route 由起点 Port、零个或多个有序 Waypoint 和终点 Port 组成：已连接端点的位置从 CircuitNode 的 Port 推导，Waypoint 使用世界坐标并保存在编辑器文档中；DanglingConnection 的失效端点继续保存最后有效世界坐标。Route 修改进入撤销和重做历史，但不得写入领域 Connection。
 
-第一版支持在创建 Connection 时添加 Waypoint、编辑既有 Wire 的线段或折点，以及把悬空端点重新连接到合法 Port。Wire 始终保持水平或垂直的正交线段；渲染圆角只是视觉效果，不改变 Route 数据。
+第一版支持在创建 Connection 时添加 Waypoint、编辑既有 Wire 的内部线段或折点，以及把悬空端点重新连接到合法 Port。直接连接 Port 的首尾终端线段固定且不可拖动。Wire 始终保持水平或垂直的正交线段；渲染圆角只是视觉效果，不改变 Route 数据。
 
-用户可以从输入或输出 Port 发起布线，编辑器在提交时统一规范化为 `output Port → input Port`。从输出 Port 发起时创建新的 fan-out Connection；从空闲输入 Port 发起时创建 Connection；从已占用输入 Port 发起时进入重接状态；从悬空端点发起时继续编辑原 Connection。重接成功前保留原 Connection，取消或失败不得造成短暂断路。
+用户可以从输入或输出 Port 发起布线，编辑器在提交时统一规范化为 `output Port → input Port`。从输出 Port 发起时创建新的 fan-out Connection；从空闲输入 Port 发起时创建 Connection；从已占用输入 Port 发起时进入重接状态；从悬空端点发起时继续编辑原 Connection。鼠标移入合法目标 Port 时显示明确的悬浮边框。重接成功前保留原 Connection，取消或失败不得造成短暂断路。
 
 布线同时支持点击和拖拽：单击 Port 后可依次单击画布添加 Waypoint，再单击兼容 Port 完成；从 Port 拖拽并释放到兼容 Port 时快速完成，释放到空白处时放置首个 Waypoint 并转为持续的点击布线状态。两种手势使用同一个连接草稿状态机。
 
-Waypoint 表示 Wire 上实际可见的正交折点。水平线段只能上下拖动，垂直线段只能左右拖动；内部折点移动时同步调整相邻线段和必要的相邻折点，靠近 Port 的折点受端点方向约束。拖动没有可移动空间的直线段时，编辑器插入两个折点形成可调整的绕行段。
+Waypoint 表示 Wire 上实际可见的正交折点。内部水平线段只能上下拖动，内部垂直线段只能左右拖动；内部折点移动时同步调整相邻线段和必要的相邻折点，靠近 Port 的折点受端点方向约束。直接连接 Port 的首尾终端线段不显示拖动手柄，也不会因拖动而自动插入绕行折点。
 
 创建 Route 时，第一段默认沿 Port 朝外方向延伸，后续线段在水平和垂直轴向之间交替；布线过程中按 `Space` 切换当前段轴向。合法目标 Port 可以触发最后一个正交折点的预览。Port 外至少保留 `16` 世界单位的终端线段。
 
@@ -363,7 +363,7 @@ Editor ID 只放在折叠的高级信息中。检查器不展示 position、engi
 
 右键菜单、元件库单击后放置和元件库拖放统一调用同一个添加命令。元件库单击进入待放置状态，拖放以释放点为放置位置；`Esc` 取消待放置状态。双击元件库项目不自动放到视口中心。
 
-对象右键菜单保持精简：CircuitNode 提供复制和删除；Wire 提供编辑 Route、重置为默认 Route 和删除；Port 显示只读摘要以及开始连接或重接；Waypoint 提供删除折点。右键对象会先选中它，只有命中画布背景时才显示元件添加菜单。
+对象右键菜单保持精简：CircuitNode 提供复制和删除；Wire 提供编辑 Route、重置为默认 Route 和删除；Port 显示只读摘要以及开始连接或重接；既有 Waypoint 提供删除折点。布线草稿期间右键直接删除最近一个临时 Waypoint。右键对象会先选中它，只有命中画布背景时才显示元件添加菜单。
 
 Component 显示名称使用文档内按类型递增且删除后不复用的序号，例如“输入 1”和“AND 2”；撤销恢复原名称，Editor ID 仍是稳定身份。
 

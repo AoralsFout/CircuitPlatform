@@ -30,6 +30,7 @@ test("canvas exposes non-color state hooks for ports and wires", async () => {
   assert.match(canvas, /data-signal/);
   assert.match(canvas, /data-dangling/);
   assert.match(canvas, /node-port--dangling/);
+  assert.match(canvas, /node-port--connection-target/);
   assert.match(canvas, /signal-wire--draft/);
   assert.match(canvas, /正在放置/);
   assert.match(canvas, /放置失败/);

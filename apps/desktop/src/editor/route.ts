@@ -162,7 +162,7 @@ export function moveRouteWaypoint(route: readonly Point[], pointIndex: number, d
 }
 
 /**
- * 移动一条水平/垂直线段；首尾受终端约束时会插入可继续调整的绕行折点。
+ * 移动一条水平/垂直线段；连接 Port 的首尾终端线段固定，不允许拖动。
  * @param route 完整 Route。
  * @param segmentIndex 线段起点下标。
  * @param offset 沿线段法向的位移（另一轴的分量被忽略）。
@@ -176,10 +176,10 @@ export function moveRouteSegment(route: readonly Point[], segmentIndex: number, 
   const end = result[segmentIndex + 1];
   const axis = axisBetween(start, end);
   if (!axis) return result;
+  if (segmentIndex === 0 || segmentIndex === result.length - 2) return result;
   const requested = axis === "horizontal" ? offset.y : offset.x;
   const amount = snapRoutePoint({ x: requested, y: requested }, altKey).x;
   if (amount === 0) return result;
-  if (segmentIndex === 0 || segmentIndex === result.length - 2) return insertRouteDetour(result, segmentIndex, amount, altKey);
   if (axis === "horizontal") {
     result[segmentIndex].y += amount;
     result[segmentIndex + 1].y += amount;
