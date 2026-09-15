@@ -289,6 +289,9 @@ button:disabled { cursor: not-allowed; }
 .signal-wire { fill: none; stroke: var(--color-signal-low); stroke-width: 2.2; vector-effect: non-scaling-stroke; pointer-events: none; }
 .signal-wire--low { stroke: var(--color-signal-low); }
 .signal-wire--live { stroke: var(--color-signal-high); stroke-width: 3; filter: drop-shadow(0 0 5px color-mix(in srgb, var(--color-signal-high) 42%, transparent)); }
+.circuit-canvas--dense { box-shadow: none; }
+.circuit-canvas--dense .canvas-grid::after { background: none; }
+.circuit-canvas--dense .signal-wire--live { filter: none; }
 .signal-wire--unknown { stroke: var(--color-signal-unknown); stroke-dasharray: 6 5; }
 .signal-wire--dangling { stroke: var(--color-status-warning); stroke-width: 2.5; stroke-dasharray: 5 5; filter: none; }
 .signal-wire--draft { stroke: var(--color-focus); stroke-width: 3; stroke-dasharray: 5 4; }

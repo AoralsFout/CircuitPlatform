@@ -3,10 +3,12 @@ import { nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import ComponentMenu from "./ComponentMenu.vue";
 import {
   applyWheelViewport,
+  createFrameCoalescer,
   isViewportPanPointer,
   panViewport,
   screenToWorld,
   hitTestCanvas,
+  isDenseCanvasScene,
   type CanvasNode,
   type CanvasScene,
   type CanvasWire,
@@ -67,6 +69,12 @@ const canvasElement = ref<HTMLElement | null>(null);
 let resizeObserver: ResizeObserver | null = null;
 let spacePressed = false;
 let panPointer: { pointerId: number; x: number; y: number } | null = null;
+const panMoveCoalescer = createFrameCoalescer<{ pointerId: number; x: number; y: number }>((next) => {
+  if (!panPointer || panPointer.pointerId !== next.pointerId) return;
+  const delta = { x: next.x - panPointer.x, y: next.y - panPointer.y };
+  panPointer = { pointerId: next.pointerId, x: next.x, y: next.y };
+  emit("viewportChange", panViewport(props.viewport, delta));
+});
 let nodeDragPointer: { pointerId: number; nodeId: string } | null = null;
 let nodeDidMove = false;
 let suppressNodeClick = false;
@@ -416,9 +424,7 @@ function onPointerMove(event: PointerEvent): void {
     emit("placementMove", screenToWorld(pointerInCanvas(event), props.viewport), event.altKey);
   }
   if (!panPointer || panPointer.pointerId !== event.pointerId) return;
-  const delta = { x: event.clientX - panPointer.x, y: event.clientY - panPointer.y };
-  panPointer = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
-  emit("viewportChange", panViewport(props.viewport, delta));
+  panMoveCoalescer.schedule({ pointerId: event.pointerId, x: event.clientX, y: event.clientY });
   event.preventDefault();
 }
 
@@ -454,6 +460,8 @@ function onPointerUp(event: PointerEvent): void {
     return;
   }
   if (!panPointer || panPointer.pointerId !== event.pointerId) return;
+  if (event.type === "pointercancel") panMoveCoalescer.cancel();
+  else panMoveCoalescer.flush();
   if (canvasElement.value?.hasPointerCapture(event.pointerId)) canvasElement.value.releasePointerCapture(event.pointerId);
   panPointer = null;
 }
@@ -648,7 +656,7 @@ onBeforeUnmount(() => {
 <template>
   <div class="editor-canvas-wrap">
     <div class="canvas-info"><span class="canvas-mode"><span class="mode-dot" aria-hidden="true"></span>场景模式</span><span>Delete 删除 · Ctrl/Cmd+D 复制 · Ctrl/Cmd+Z 撤销 · Esc 取消</span></div>
-    <div ref="canvasElement" class="circuit-canvas" role="application" tabindex="0" aria-label="电路画布" @wheel="onWheel" @contextmenu="onContextMenu" @keydown="onCanvasKeydown" @dragover="onDragOver" @drop="onDrop" @pointerdown="onPointerDown" @pointermove="onPointerMove" @pointerup="onPointerUp" @pointercancel="onPointerUp">
+    <div ref="canvasElement" class="circuit-canvas" :class="{ 'circuit-canvas--dense': isDenseCanvasScene(scene) }" role="application" tabindex="0" aria-label="电路画布" @wheel="onWheel" @contextmenu="onContextMenu" @keydown="onCanvasKeydown" @dragover="onDragOver" @drop="onDrop" @pointerdown="onPointerDown" @pointermove="onPointerMove" @pointerup="onPointerUp" @pointercancel="onPointerUp">
       <div class="canvas-grid" :style="gridStyle()" aria-hidden="true"></div>
       <div class="canvas-viewport" :style="viewportStyle()">
         <svg class="signal-map" aria-label="电路连接">

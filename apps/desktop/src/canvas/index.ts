@@ -235,6 +235,11 @@ export interface CanvasScene {
   bounds: { min: Point; max: Point };
 }
 
+/** 判断是否应启用大场景降级视觉效果；只影响光晕、动画和次级网格。 */
+export function isDenseCanvasScene(scene: CanvasScene): boolean {
+  return scene.nodes.length > 500 || scene.wires.length > 1000;
+}
+
 export interface InteractionState {
   focusedId: string | null;
   draggingNodeId: string | null;
@@ -264,6 +269,11 @@ function endpointKey(componentId: string, portId: string): string {
 
 function getSignal(snapshot: SimulationSnapshot, componentId: string, portId: string): Signal {
   return snapshot.signals[endpointKey(componentId, portId)] ?? "X";
+}
+
+function defaultPortSignal(component: EditorComponent, port: PortDefinition): Signal {
+  // 新建 Input 的输出从 0 开始；其它端口在首次求值前保持 X。
+  return component.kind === "input" && port.direction === "output" ? 0 : "X";
 }
 
 function routeFor(connection: EditorConnection): readonly Point[] {
@@ -331,6 +341,15 @@ export function projectCanvasScene(
 
   const selected = editorSnapshot.selection;
   const componentsById = new Map(editorSnapshot.document.components.map((component) => [component.id, component]));
+  const danglingPortsByComponent = new Map<string, Set<string>>();
+  for (const connection of editorSnapshot.document.connections) {
+    for (const side of connection.danglingEndpoints) {
+      const endpoint = side === "source" ? connection.source : connection.target;
+      const ports = danglingPortsByComponent.get(endpoint.componentId) ?? new Set<string>();
+      ports.add(endpoint.port);
+      danglingPortsByComponent.set(endpoint.componentId, ports);
+    }
+  }
   const connectedPoints = new Map<string, Point>();
   for (const connection of editorSnapshot.document.connections) {
     connectedPoints.set(endpointKey(connection.source.componentId, connection.source.port), previewEndpoint(connection.source, componentsById, previewPositions));
@@ -339,13 +358,7 @@ export function projectCanvasScene(
   const nodes = editorSnapshot.document.components.map((component) => {
     const definition = registry.get(component.kind);
     if (!definition) return null;
-    const danglingPorts = new Set<string>();
-    for (const connection of editorSnapshot.document.connections) {
-      for (const side of connection.danglingEndpoints) {
-        const endpoint = side === "source" ? connection.source : connection.target;
-        if (endpoint.componentId === component.id) danglingPorts.add(endpoint.port);
-      }
-    }
+    const danglingPorts = danglingPortsByComponent.get(component.id) ?? new Set<string>();
     const nodePosition = previewPositions?.[component.id] ?? component.position;
     return {
       id: component.id,
@@ -366,7 +379,7 @@ export function projectCanvasScene(
         offset: { ...portDefinition.offset },
         // 未提供仿真快照时，新 Input 的默认驱动值为 0，其余端口保持未知 X。
         signal: simulationSnapshot.signals[endpointKey(component.id, portDefinition.id)]
-          ?? (component.kind === "input" && portDefinition.direction === "output" ? 0 : "X"),
+          ?? defaultPortSignal(component, portDefinition),
         dangling: danglingPorts.has(portDefinition.id),
       })),
       selected: selected?.kind === "component" && selected.id === component.id,
@@ -402,6 +415,59 @@ export function projectCanvasScene(
   });
 
   return { nodes, wires, bounds: boundsFor(nodes, wires) };
+}
+
+function applySimulationSignals(scene: CanvasScene, simulationSnapshot: SimulationSnapshot): CanvasScene {
+  return {
+    ...scene,
+    nodes: scene.nodes.map((node) => ({
+      ...node,
+      ports: node.ports.map((port) => ({
+        ...port,
+        signal: simulationSnapshot.signals[endpointKey(node.id, port.id)] ?? port.signal,
+      })),
+    })),
+    wires: scene.wires.map((wire) => ({
+      ...wire,
+      signal: getSignal(simulationSnapshot, wire.source.componentId, wire.source.port),
+    })),
+  };
+}
+
+/**
+ * 创建可复用的 CanvasScene 投影器。
+ * 相同编辑器快照和交互预览只重用几何结构，信号更新不重新计算 Route。
+ * @param registry 元件展示定义注册表。
+ * @returns 可按工作区快照变化调用的场景投影器。
+ */
+export function createCanvasSceneProjector(registry: ComponentDefinitionRegistry = defaultComponentDefinitionRegistry) {
+  let cachedSnapshot: EditorSnapshot | null | undefined;
+  let cachedPositions: Readonly<Record<string, Point>> | undefined;
+  let cachedRoutes: Readonly<Record<string, readonly Point[]>> | undefined;
+  let cachedStructure: CanvasScene | null = null;
+
+  return {
+    /** 投影信号并复用上一次的节点/连线几何。 */
+    project(
+      editorSnapshot: EditorSnapshot | null,
+      simulationSnapshot: SimulationSnapshot,
+      previewPositions?: Readonly<Record<string, Point>>,
+      previewRoutes?: Readonly<Record<string, readonly Point[]>>,
+    ): CanvasScene {
+      if (
+        cachedStructure === null ||
+        cachedSnapshot !== editorSnapshot ||
+        cachedPositions !== previewPositions ||
+        cachedRoutes !== previewRoutes
+      ) {
+        cachedSnapshot = editorSnapshot;
+        cachedPositions = previewPositions;
+        cachedRoutes = previewRoutes;
+        cachedStructure = projectCanvasScene(editorSnapshot, { signals: {} }, registry, previewPositions, previewRoutes);
+      }
+      return applySimulationSignals(cachedStructure, simulationSnapshot);
+    },
+  };
 }
 
 /** `projectCanvasScene` 的语义别名，供组合层以“创建场景”命名调用。 */
@@ -468,3 +534,8 @@ export {
   type CanvasHitTarget,
   type HitTestOptions,
 } from "./hit-testing.ts";
+
+export {
+  createFrameCoalescer,
+  type FrameCoalescer,
+} from "./frame.ts";

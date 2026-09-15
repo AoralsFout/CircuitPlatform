@@ -10,6 +10,7 @@ export {
 export {
   emptyCanvasScene,
   createCanvasScene,
+  createCanvasSceneProjector,
   projectCanvasScene,
   type CanvasNode,
   type CanvasPort,
@@ -19,6 +20,7 @@ export {
   type SimulationSnapshot,
   type ViewportState,
 } from "./index";
+export { isDenseCanvasScene } from "./index";
 
 export {
   DEFAULT_VIEWPORT_PADDING,
