@@ -2,6 +2,7 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "moduleResolution": "Bundler",
+    "allowImportingTsExtensions": true,
     "baseUrl": ".",
     "paths": {
       "@circuit-platform/protocol": ["../../packages/protocol/src/index.ts"]

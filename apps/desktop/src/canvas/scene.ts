@@ -1,0 +1,49 @@
+export {
+  NODE_GRID_SIZE,
+  createNodeDragController,
+  snapNodePosition,
+  type NodeDragController,
+  type NodeDragControllerOptions,
+  type NodeDragPreview,
+} from "./drag.ts";
+
+export {
+  emptyCanvasScene,
+  createCanvasScene,
+  createCanvasSceneProjector,
+  projectCanvasScene,
+  type CanvasNode,
+  type CanvasPort,
+  type CanvasScene,
+  type CanvasWire,
+  type InteractionState,
+  type SimulationSnapshot,
+  type ViewportState,
+} from "./index";
+export { isDenseCanvasScene } from "./index";
+
+export {
+  DEFAULT_VIEWPORT_PADDING,
+  DEFAULT_VIEWPORT_ZOOM,
+  MAX_VIEWPORT_ZOOM,
+  MIN_VIEWPORT_ZOOM,
+  applyWheelViewport,
+  applyViewportWheel,
+  clampViewportZoom,
+  createViewportState,
+  fitViewportToBounds,
+  fitToWindow,
+  isViewportPanPointer,
+  normalizeWheelDelta,
+  panViewport,
+  resizeViewport,
+  screenToWorld,
+  setViewportZoomAt,
+  worldToScreen,
+  zoomAt,
+  zoomViewportAt,
+  zoomViewportAtCenter,
+  type ViewportBounds,
+  type ViewportSize,
+  type ViewportTransform,
+} from "./viewport.ts";

@@ -6,7 +6,7 @@
 
 ## 背景
 
-当前画布只渲染固定 AND 示例：CircuitNode 使用 HTML 绝对定位，Wire 使用固定 SVG path，节点百分比位置、SVG 坐标和编辑器模型中的 position 是彼此独立的几何事实源。固定 `NodeKey`、`WireKey` 和十多个展示 props 也使新增 Component 必须同时修改模板、样式和 composable。
+旧版画布只渲染固定 AND 示例：CircuitNode 使用 HTML 绝对定位，Wire 使用固定 SVG path，节点百分比位置、SVG 坐标和编辑器模型中的 position 是彼此独立的几何事实源。固定 `NodeKey`、`WireKey` 和十多个展示 props 也使新增 Component 必须同时修改模板、样式和 composable；这些事实源现已迁移到通用投影。
 
 第一版通用画布需要支持任意编辑器文档、平移缩放、节点拖动、添加 Component 和手工布线，并在 500 个 Component、1,000 条 Wire 下保持接近 60 FPS，同时保留 HTML 排版、键盘焦点和 ARIA 能力。
 
@@ -25,7 +25,7 @@ EditorSnapshot + SimulationSnapshot + ComponentDefinitionRegistry
            CSS 网格层     SVG Wire 层    HTML Node/Port 层
 ```
 
-画布渲染组件只接收 `CanvasScene`、`ViewportState` 和 `InteractionState` 三个聚合输入。`CanvasScene` 是纯投影结果，包含可渲染的 CircuitNode、Port、Wire 和信号状态；`ViewportState` 只包含视口平移、缩放和可见范围；`InteractionState` 保存拖动预览、ConnectionDraft、悬停和键盘焦点。Vue 模板不再识别固定示例身份，也不保存另一套对象坐标。
+画布渲染组件接收 `CanvasScene`、`ViewportState` 和 `InteractionState` 三个聚合输入，并通过单一 `CanvasController` 端口接收交互命令；不再增加散落的展示 props。`CanvasScene` 是纯投影结果，包含可渲染的 CircuitNode、Port、Wire 和信号状态；`ViewportState` 只包含视口平移、缩放和可见范围；`InteractionState` 保存拖动预览、ConnectionDraft、悬停和键盘焦点。Vue 模板不再识别固定示例身份，也不保存另一套对象坐标。
 
 Component 使用 HTML 渲染，Wire、悬空端点、选择和连接草稿使用 SVG，网格使用 CSS；所有世界图层共享同一个 `ViewportTransform`。世界坐标与屏幕坐标通过集中、可测试的纯函数互转，缩放围绕指针或视口中心进行。视口状态独立于 EditorDocument，不进入撤销历史，第一版不随项目持久化。
 

@@ -19,3 +19,17 @@ CircuitPlatform 是一个可运行、可验证、可演进的数字电路仿真�
 - `packages/protocol/`：前端和 C++ 引擎共享的消息协议类型。
 - `engine/`：C++ 数字电路仿真引擎。
 - `docs/`：项目、架构和协作文档。
+
+## Agent skills
+
+### Issue tracker
+
+Issues 和规格使用 `AoralsFout/CircuitPlatform` 的 GitHub Issues 管理。参见 `docs/agents/issue-tracker.md`。
+
+### Triage labels
+
+使用五种标准 triage 标签：`needs-triage`、`needs-info`、`ready-for-agent`、`ready-for-human` 和 `wontfix`。参见 `docs/agents/triage-labels.md`。
+
+### Domain docs
+
+项目采用单上下文领域文档布局：根目录 `CONTEXT.md` 与 `docs/decisions/`。参见 `docs/agents/domain.md`。

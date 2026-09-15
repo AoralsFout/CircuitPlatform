@@ -1,4 +1,56 @@
 import type { ComponentKindName } from "@circuit-platform/protocol";
+import { positionFromPlacementCenter } from "./placement.ts";
+import {
+  createDefaultOrthogonalRoute,
+  deleteRouteWaypoint,
+  moveRouteSegment,
+  moveRouteWaypoint,
+  normalizeOrthogonalRoute,
+  resetOrthogonalRoute,
+  routeFromWaypoints,
+} from "./route.ts";
+export {
+  EMPTY_CONNECTION_DRAFT,
+  connectionDraftRoute,
+  createConnectionDraft,
+  normalizeConnectionEndpoints,
+  reduceConnectionDraft,
+  validateConnectionDraftTarget,
+  type ConnectionDraftAction,
+  type ConnectionDraftAxis,
+  type ConnectionDraftError,
+  type ConnectionDraftOptions,
+  type ConnectionDraftPhase,
+  type ConnectionDraftPort,
+  type ConnectionDraftState,
+} from "./connection-draft.ts";
+import type { ConnectionDraftPort } from "./connection-draft.ts";
+import { normalizeConnectionEndpoints, validateConnectionDraftTarget } from "./connection-draft.ts";
+
+export {
+  ROUTE_GRID_SIZE,
+  ROUTE_TERMINAL_LENGTH,
+  createDefaultOrthogonalRoute,
+  deleteRouteWaypoint,
+  insertRouteDetour,
+  isOrthogonalRoute,
+  moveRouteSegment,
+  moveRouteWaypoint,
+  normalizeOrthogonalRoute,
+  resetOrthogonalRoute,
+  routeFromWaypoints,
+  snapRoutePoint,
+  type PortOutwardDirection,
+  type RouteAxis,
+  type RouteOptions,
+} from "./route.ts";
+
+export {
+  EDITOR_GRID_SIZE,
+  positionFromPlacementCenter,
+  snapWorldPoint,
+  type ComponentPlacementIntent,
+} from "./placement.ts";
 
 export type EditorComponentId = string;
 export type EditorConnectionId = string;
@@ -32,6 +84,10 @@ export interface EditorConnection {
   target: EditorEndpoint;
   lifecycle: "visible" | "hidden" | "deleted";
   danglingEndpoints: readonly EditorEndpointSide[];
+  /** 可选的显式正交 Route；首尾点分别对应 source/target，旧文档可由投影层补齐。 */
+  route?: readonly Point[];
+  /** 可选的 Waypoint 语义投影；route 存在时 route 是渲染用的完整点列。 */
+  waypoints?: readonly Point[];
   hiddenReason?: "pending-operation";
 }
 
@@ -49,12 +105,16 @@ export interface EditorInitialState {
 export interface EditorBindings {
   components: Readonly<Partial<Record<EditorComponentId, EngineComponentId>>>;
   connections: Readonly<Partial<Record<EditorConnectionId, EngineConnectionId>>>;
+  /** 用于通用仿真投影的类型元数据；不包含任何固定示例身份。 */
+  componentKinds?: Readonly<Partial<Record<EditorComponentId, ComponentKindName>>>;
 }
 
 export interface EngineError {
   code: string;
   message: string;
   retryable: boolean;
+  /** 错误来源；仿真失败不会使已提交的 Circuit 结构失效。 */
+  category?: "structure" | "simulation";
 }
 
 export type EngineResult<T> =
@@ -78,6 +138,8 @@ export interface CircuitEnginePort {
   removeConnection(
     connectionId: EngineConnectionId,
   ): Promise<EngineResult<{ connectionId: EngineConnectionId }>>;
+  /** 结构命令成功后可选地让仿真引擎重新稳定；失败不回滚合法结构。 */
+  settle?(): Promise<EngineResult<{ status: "ok" }>>;
 }
 
 export type EditorSelection =
@@ -87,12 +149,28 @@ export type EditorSelection =
 
 export type EditorCommand =
   | { type: "select"; selection: EditorSelection }
+  | { type: "move-component"; componentId: EditorComponentId; position: Point }
+  | { type: "edit-route"; connectionId: EditorConnectionId; route: readonly Point[]; altKey?: boolean }
+  | { type: "move-route-waypoint"; connectionId: EditorConnectionId; pointIndex: number; delta: Point; altKey?: boolean }
+  | { type: "move-route-segment"; connectionId: EditorConnectionId; segmentIndex: number; offset: Point; altKey?: boolean }
+  | { type: "delete-waypoint"; connectionId: EditorConnectionId; pointIndex: number }
+  | { type: "reset-route"; connectionId: EditorConnectionId }
+  | { type: "create-connection"; left: ConnectionDraftPort; right: ConnectionDraftPort; route?: readonly Point[]; waypoints?: readonly Point[] }
+  /** 用同一个稳定 Editor Connection ID 替换连接端点，提交过程由会话补偿管理。 */
+  | { type: "reconnect-connection"; connectionId: EditorConnectionId; left: ConnectionDraftPort; right: ConnectionDraftPort; route?: readonly Point[]; waypoints?: readonly Point[] }
+  | { type: "begin-placement"; kind: ComponentKindName; center?: Point; altKey?: boolean; continuous?: boolean }
+  | { type: "update-placement"; center: Point; altKey?: boolean }
+  | { type: "place-component"; kind?: ComponentKindName; center: Point; altKey?: boolean; continuous?: boolean }
+  | { type: "add-component"; kind: ComponentKindName; position: Point; altKey?: boolean; continuous?: boolean }
+  | { type: "duplicate-component"; componentId: EditorComponentId }
   | { type: "delete-selected" }
   | { type: "delete-component"; componentId: EditorComponentId }
   | { type: "delete-connection"; connectionId: EditorConnectionId }
   | { type: "request-clear" }
   | { type: "confirm-clear" }
   | { type: "cancel-current-operation" }
+  | { type: "retry-current-operation" }
+  | { type: "retry-placement" }
   | { type: "undo" }
   | { type: "redo" };
 
@@ -110,6 +188,17 @@ export interface EditorSnapshot {
   canRedo: boolean;
   confirmation: EditorConfirmation | null;
   error: EngineError | null;
+  /** 最近一次自动稳定化的仿真错误；与结构事务错误分开保存。 */
+  simulationError?: EngineError | null;
+  /** 元件库点击后的临时放置状态；不会进入 EditorDocument 或历史。 */
+  pendingPlacement?: PendingPlacement | null;
+}
+
+export interface PendingPlacement {
+  kind: ComponentKindName;
+  center: Point | null;
+  altKey: boolean;
+  continuous: boolean;
 }
 
 export type CommandResult =
@@ -123,11 +212,17 @@ export interface EditorSession {
   dispatch(command: EditorCommand): Promise<CommandResult>;
   /** 订阅快照变化，并返回取消订阅函数。 */
   subscribe(listener: (snapshot: EditorSnapshot) => void): () => void;
+  /** 更新引擎可用性；只影响结构命令，不影响离线本地布局编辑。 */
+  setEngineAvailability(available: boolean): void;
 }
 
 export interface EditorSessionOptions {
   /** 结构提交后发布仍然有效的运行时绑定；仅供工作区组合层同步仿真身份。 */
   onBindingsChanged?(bindings: EditorBindings): void;
+  /** 返回当前引擎是否可接受 Circuit 结构事务；不进入 EditorSnapshot。 */
+  isEngineAvailable?(): boolean;
+  /** `engineAvailable` 是兼容性别名，便于组合层注入可用性 seam。 */
+  engineAvailable?: boolean | (() => boolean);
 }
 
 interface MutableDocument {
@@ -145,6 +240,8 @@ interface DeleteComponentFrame {
     id: EditorConnectionId;
     source: EditorConnection["source"];
     target: EditorConnection["target"];
+    route?: readonly Point[];
+    waypoints?: readonly Point[];
   }>;
 }
 
@@ -171,7 +268,71 @@ interface ClearDocumentFrame {
   }>;
 }
 
-type HistoryFrame = DeleteComponentFrame | DeleteConnectionFrame | ClearDocumentFrame;
+interface MoveComponentFrame {
+  type: "move-component";
+  componentId: EditorComponentId;
+  positionBefore: Point;
+  positionAfter: Point;
+  selectionBefore: EditorSelection;
+  connectionsBefore: Array<{
+    id: EditorConnectionId;
+    source: EditorConnection["source"];
+    target: EditorConnection["target"];
+    route?: readonly Point[];
+    waypoints?: readonly Point[];
+  }>;
+  connectionsAfter: Array<{
+    id: EditorConnectionId;
+    source: EditorConnection["source"];
+    target: EditorConnection["target"];
+    route?: readonly Point[];
+    waypoints?: readonly Point[];
+  }>;
+}
+interface AddComponentFrame {
+  type: "add-component";
+  componentId: EditorComponentId;
+  kind: ComponentKindName;
+  displayName: string;
+  position: Point;
+}
+
+interface CreateConnectionFrame {
+  type: "create-connection";
+  connectionId: EditorConnectionId;
+  source: EditorConnection["source"];
+  target: EditorConnection["target"];
+  route: readonly Point[];
+  waypoints: readonly Point[];
+  selectionBefore: EditorSelection;
+}
+
+interface ReconnectConnectionFrame {
+  type: "reconnect-connection";
+  connectionId: EditorConnectionId;
+  oldSource: EditorConnection["source"];
+  oldTarget: EditorConnection["target"];
+  oldRoute?: readonly Point[];
+  oldWaypoints?: readonly Point[];
+  oldWasLive: boolean;
+  source: EditorConnection["source"];
+  target: EditorConnection["target"];
+  route: readonly Point[];
+  waypoints: readonly Point[];
+  selectionBefore: EditorSelection;
+}
+
+interface EditRouteFrame {
+  type: "edit-route";
+  connectionId: EditorConnectionId;
+  routeBefore?: readonly Point[];
+  routeAfter: readonly Point[];
+  waypointsBefore?: readonly Point[];
+  waypointsAfter?: readonly Point[];
+  selectionBefore: EditorSelection;
+}
+
+type HistoryFrame = DeleteComponentFrame | DeleteConnectionFrame | ClearDocumentFrame | MoveComponentFrame | AddComponentFrame | CreateConnectionFrame | ReconnectConnectionFrame | EditRouteFrame;
 
 const busyError: EngineError = {
   code: "editor_busy",
@@ -209,6 +370,13 @@ const recoveryError = (message: string): EngineError => ({
   retryable: true,
 });
 
+const engineUnavailableError: EngineError = {
+  code: "engine_unavailable",
+  message: "仿真引擎当前不可用，请恢复连接后重试结构操作。",
+  retryable: true,
+  category: "structure",
+};
+
 function cloneVisibleDocument(document: MutableDocument): EditorDocument {
   const isAttached = (componentId: EditorComponentId): boolean =>
     document.components.get(componentId)?.lifecycle === "active";
@@ -222,6 +390,8 @@ function cloneVisibleDocument(document: MutableDocument): EditorDocument {
         ...connection,
         source: { ...connection.source, point: { ...connection.source.point } },
         target: { ...connection.target, point: { ...connection.target.point } },
+        ...(connection.route ? { route: connection.route.map((point) => ({ ...point })) } : {}),
+        ...(connection.waypoints ? { waypoints: connection.waypoints.map((point) => ({ ...point })) } : {}),
         danglingEndpoints: [
           ...(!isAttached(connection.source.componentId) ? ["source" as const] : []),
           ...(!isAttached(connection.target.componentId) ? ["target" as const] : []),
@@ -245,6 +415,8 @@ function toMutableDocument(document: EditorDocument): MutableDocument {
           ...connection,
           source: { ...connection.source, point: { ...connection.source.point } },
           target: { ...connection.target, point: { ...connection.target.point } },
+          ...(connection.route ? { route: connection.route.map((point) => ({ ...point })) } : {}),
+          ...(connection.waypoints ? { waypoints: connection.waypoints.map((point) => ({ ...point })) } : {}),
           danglingEndpoints: [...connection.danglingEndpoints],
         },
       ]),
@@ -255,10 +427,12 @@ function toMutableDocument(document: EditorDocument): MutableDocument {
 function cloneBindings(bindings: EditorBindings): {
   components: Partial<Record<EditorComponentId, EngineComponentId>>;
   connections: Partial<Record<EditorConnectionId, EngineConnectionId>>;
+  componentKinds?: Partial<Record<EditorComponentId, ComponentKindName>>;
 } {
   return {
     components: { ...bindings.components },
     connections: { ...bindings.connections },
+    componentKinds: bindings.componentKinds ? { ...bindings.componentKinds } : undefined,
   };
 }
 
@@ -302,9 +476,9 @@ export function createAndDemoDocument(): EditorDocument {
       { id: "output", kind: "output", displayName: "输出", position: { x: 800, y: 240 }, lifecycle: "active" },
     ],
     connections: [
-      { id: "wire-a", source: { componentId: "input-a", port: "out", point: { x: 210, y: 150 } }, target: { componentId: "and-gate", port: "in1", point: { x: 435, y: 250 } }, lifecycle: "visible", danglingEndpoints: [] },
-      { id: "wire-b", source: { componentId: "input-b", port: "out", point: { x: 210, y: 405 } }, target: { componentId: "and-gate", port: "in2", point: { x: 435, y: 290 } }, lifecycle: "visible", danglingEndpoints: [] },
-      { id: "wire-output", source: { componentId: "and-gate", port: "out", point: { x: 585, y: 270 } }, target: { componentId: "output", port: "in", point: { x: 805, y: 270 } }, lifecycle: "visible", danglingEndpoints: [] },
+      { id: "wire-a", source: { componentId: "input-a", port: "out", point: { x: 210, y: 150 } }, target: { componentId: "and-gate", port: "in1", point: { x: 435, y: 250 } }, route: [{ x: 210, y: 150 }, { x: 330, y: 150 }, { x: 330, y: 250 }, { x: 435, y: 250 }], lifecycle: "visible", danglingEndpoints: [] },
+      { id: "wire-b", source: { componentId: "input-b", port: "out", point: { x: 210, y: 405 } }, target: { componentId: "and-gate", port: "in2", point: { x: 435, y: 290 } }, route: [{ x: 210, y: 405 }, { x: 330, y: 405 }, { x: 330, y: 290 }, { x: 435, y: 290 }], lifecycle: "visible", danglingEndpoints: [] },
+      { id: "wire-output", source: { componentId: "and-gate", port: "out", point: { x: 585, y: 270 } }, target: { componentId: "output", port: "in", point: { x: 805, y: 270 } }, route: [{ x: 585, y: 270 }, { x: 805, y: 270 }], lifecycle: "visible", danglingEndpoints: [] },
     ],
   };
 }
@@ -317,6 +491,8 @@ function visibleSnapshot(
   redoStack: readonly HistoryFrame[],
   confirmation: EditorConfirmation | null,
   error: EngineError | null,
+  simulationError: EngineError | null,
+  pendingPlacement: PendingPlacement | null,
 ): EditorSnapshot {
   return {
     document: cloneVisibleDocument(document),
@@ -326,6 +502,10 @@ function visibleSnapshot(
     canRedo: redoStack.length > 0,
     confirmation: confirmation ? { ...confirmation } : null,
     error: error ? { ...error } : null,
+    simulationError: simulationError ? { ...simulationError } : null,
+    pendingPlacement: pendingPlacement
+      ? { ...pendingPlacement, center: pendingPlacement.center ? { ...pendingPlacement.center } : null }
+      : null,
   };
 }
 
@@ -339,6 +519,67 @@ function restoreComponent(document: MutableDocument, id: EditorComponentId): voi
   const component = document.components.get(id);
   if (!component) return;
   component.lifecycle = "active";
+}
+
+function cloneEndpoint(endpoint: EditorEndpoint): EditorEndpoint {
+  return { ...endpoint, point: { ...endpoint.point } };
+}
+
+function cloneConnectionGeometry(connection: EditorConnection): {
+  id: EditorConnectionId;
+  source: EditorConnection["source"];
+  target: EditorConnection["target"];
+  route?: readonly Point[];
+  waypoints?: readonly Point[];
+} {
+  return {
+    id: connection.id,
+    source: cloneEndpoint(connection.source),
+    target: cloneEndpoint(connection.target),
+    ...(connection.route ? { route: connection.route.map((point) => ({ ...point })) } : {}),
+    ...(connection.waypoints ? { waypoints: connection.waypoints.map((point) => ({ ...point })) } : {}),
+  };
+}
+
+function pointsEqual(left: Point, right: Point): boolean {
+  return left.x === right.x && left.y === right.y;
+}
+
+function updateMovedConnection(
+  connection: EditorConnection,
+  componentId: EditorComponentId,
+  beforePosition: Point,
+  afterPosition: Point,
+): void {
+  const moveEndpoint = (endpoint: EditorEndpoint): EditorEndpoint => {
+    if (endpoint.componentId !== componentId) return cloneEndpoint(endpoint);
+    return {
+      ...endpoint,
+      point: {
+        x: afterPosition.x + endpoint.point.x - beforePosition.x,
+        y: afterPosition.y + endpoint.point.y - beforePosition.y,
+      },
+    };
+  };
+  const source = moveEndpoint(connection.source);
+  const target = moveEndpoint(connection.target);
+  const oldRoute = connection.route;
+  const waypoints = connection.waypoints ?? (oldRoute && oldRoute.length > 2 ? oldRoute.slice(1, -1) : []);
+  connection.source = source;
+  connection.target = target;
+  connection.route = routeFromWaypoints(source.point, target.point, waypoints);
+}
+
+function restoreConnectionGeometry(
+  document: MutableDocument,
+  geometry: MoveComponentFrame["connectionsBefore"][number],
+): void {
+  const connection = document.connections.get(geometry.id);
+  if (!connection) return;
+  connection.source = cloneEndpoint(geometry.source);
+  connection.target = cloneEndpoint(geometry.target);
+  connection.route = geometry.route?.map((point) => ({ ...point }));
+  connection.waypoints = geometry.waypoints?.map((point) => ({ ...point }));
 }
 
 /**
@@ -361,6 +602,25 @@ export function createEditorSession(
   let confirmation: EditorConfirmation | null = null;
   let operation: EditorSnapshot["operation"] = "idle";
   let error: EngineError | null = null;
+  let simulationError: EngineError | null = null;
+  let pendingPlacement: PendingPlacement | null = null;
+  let pendingIdentity: { id: EditorComponentId; displayName: string } | null = null;
+  let engineAvailabilityOverride: boolean | null = null;
+  let nextEditorComponentSequence = 1;
+  let nextEditorConnectionSequence = 1;
+  const componentNameSequences = new Map<ComponentKindName, number>();
+  for (const component of document.components.values()) {
+    const match = component.displayName.match(/(\d+)$/);
+    const sequence = match ? Number(match[1]) : 0;
+    const currentSequence = componentNameSequences.get(component.kind) ?? 0;
+    componentNameSequences.set(component.kind, Math.max(currentSequence + 1, sequence));
+    const editorSequence = component.id.match(/^component-(\d+)$/);
+    if (editorSequence) nextEditorComponentSequence = Math.max(nextEditorComponentSequence, Number(editorSequence[1]) + 1);
+  }
+  for (const connection of document.connections.values()) {
+    const editorSequence = connection.id.match(/^connection-(\d+)$/);
+    if (editorSequence) nextEditorConnectionSequence = Math.max(nextEditorConnectionSequence, Number(editorSequence[1]) + 1);
+  }
 
   function isLiveConnection(connection: EditorConnection): boolean {
     return connection.lifecycle === "visible" &&
@@ -369,7 +629,7 @@ export function createEditorSession(
   }
 
   function publishBindings(): void {
-    options.onBindingsChanged?.({
+    const nextBindings: EditorBindings = {
       components: Object.fromEntries(
         [...document.components.values()]
           .filter((component) => component.lifecycle === "active")
@@ -386,11 +646,16 @@ export function createEditorSession(
             return engineId === undefined ? [] : [[connection.id, engineId]];
           }),
       ),
+    };
+    Object.defineProperty(nextBindings, "componentKinds", {
+      value: Object.fromEntries([...document.components.values()].map((component) => [component.id, component.kind])),
+      enumerable: false,
     });
+    options.onBindingsChanged?.(nextBindings);
   }
 
   function currentSnapshot(): EditorSnapshot {
-    return visibleSnapshot(document, selection, operation, undoStack, redoStack, confirmation, error);
+    return visibleSnapshot(document, selection, operation, undoStack, redoStack, confirmation, error, simulationError, pendingPlacement);
   }
 
   function publish(): EditorSnapshot {
@@ -400,17 +665,19 @@ export function createEditorSession(
   }
 
   function fail(errorValue: EngineError): CommandResult {
-    error = errorValue;
+    const structureError = { ...errorValue, category: errorValue.category ?? "structure" as const };
+    error = structureError;
     operation = "idle";
     const snapshot = publish();
-    return { ok: false, error: errorValue, snapshot };
+    return { ok: false, error: structureError, snapshot };
   }
 
   function enterRecovery(errorValue: EngineError): CommandResult {
-    error = errorValue;
+    const recovery = { ...errorValue, category: errorValue.category ?? "structure" as const };
+    error = recovery;
     operation = "recovery-required";
     const snapshot = publish();
-    return { ok: false, error: errorValue, snapshot };
+    return { ok: false, error: recovery, snapshot };
   }
 
   function beginOperation(): boolean {
@@ -427,12 +694,90 @@ export function createEditorSession(
   }
 
   function call<T>(action: () => Promise<EngineResult<T>>): Promise<EngineResult<T>> {
-    return action().catch((thrown) => failed(normalizeThrown(thrown)));
+    return action()
+      .catch((thrown): EngineResult<T> => failed<T>(normalizeThrown(thrown)))
+      .then((result) => {
+        // 传输/进程故障会冻结后续 Circuit 事务；协议业务拒绝仍可直接重试。
+        if (!result.ok && ["engine_unavailable", "engine_offline", "engine_connection_failed"].includes(result.error.code)) {
+          engineAvailabilityOverride = false;
+        }
+        return result;
+      });
+  }
+
+  function isEngineAvailable(): boolean {
+    if (engineAvailabilityOverride !== null) return engineAvailabilityOverride;
+    if (options.isEngineAvailable) return options.isEngineAvailable();
+    if (typeof options.engineAvailable === "function") return options.engineAvailable();
+    if (typeof options.engineAvailable === "boolean") return options.engineAvailable;
+    return true;
+  }
+
+  function structureUnavailable(): CommandResult {
+    return fail({ ...engineUnavailableError });
+  }
+
+  function isCircuitHistoryFrame(frame: HistoryFrame | undefined): boolean {
+    return frame !== undefined && frame.type !== "move-component" && frame.type !== "edit-route";
+  }
+
+  /** 仅阻止会改变 C++ Circuit 的命令，离线时仍可编辑本地几何和视口。 */
+  function changesCircuit(command: EditorCommand): boolean {
+    if (["add-component", "place-component", "duplicate-component", "delete-component", "delete-connection", "create-connection", "reconnect-connection", "confirm-clear", "retry-placement", "retry-current-operation"].includes(command.type)) return true;
+    if (command.type === "delete-selected") return selection !== null;
+    if (command.type === "undo" || command.type === "redo") {
+      return operation === "recovery-required" || isCircuitHistoryFrame(command.type === "undo" ? undoStack.at(-1) : redoStack.at(-1));
+    }
+    return false;
   }
 
   function requireComponent(id: EditorComponentId): EditorComponent | null {
     const component = document.components.get(id);
     return component && component.lifecycle === "active" ? component : null;
+  }
+
+  function displayNameForKind(kind: ComponentKindName): string {
+    const labels: Partial<Record<ComponentKindName, string>> = {
+      input: "输入",
+      output: "输出",
+      and: "AND 门",
+      or: "OR 门",
+      nand: "NAND 门",
+      nor: "NOR 门",
+      xor: "XOR 门",
+      xnor: "XNOR 门",
+      not: "NOT 门",
+      clock: "Clock",
+      d_flip_flop: "D Flip-Flop",
+    };
+    return labels[kind] ?? kind;
+  }
+
+  function nextComponentIdentity(kind: ComponentKindName): { id: EditorComponentId; displayName: string } {
+    const nextName = (componentNameSequences.get(kind) ?? 0) + 1;
+    componentNameSequences.set(kind, nextName);
+    return {
+      id: `component-${nextEditorComponentSequence++}`,
+      displayName: `${displayNameForKind(kind)} ${nextName}`,
+    };
+  }
+
+  function componentPosition(center: Point, altKey: boolean): Point {
+    return positionFromPlacementCenter(center, { width: 148, height: 84 }, altKey);
+  }
+
+  async function settleAfterStructure(): Promise<void> {
+    if (!engine.settle) {
+      simulationError = null;
+      return;
+    }
+    const settled = await call(() => engine.settle!());
+    if (!settled.ok) {
+      // 结构已经提交；仿真错误只作为可展示错误保留，不回滚 Circuit。
+      simulationError = { ...settled.error, category: "simulation" };
+      return;
+    }
+    simulationError = null;
   }
 
   function makeDeleteComponentFrame(componentId: EditorComponentId): DeleteComponentFrame | null {
@@ -448,6 +793,8 @@ export function createEditorSession(
         id: connection.id,
         source: { ...connection.source, point: { ...connection.source.point } },
         target: { ...connection.target, point: { ...connection.target.point } },
+        ...(connection.route ? { route: connection.route.map((point) => ({ ...point })) } : {}),
+        ...(connection.waypoints ? { waypoints: connection.waypoints.map((point) => ({ ...point })) } : {}),
       }));
     return {
       type: "delete-component",
@@ -581,6 +928,451 @@ export function createEditorSession(
     redoStack.length = 0;
     selection = null;
     publishBindings();
+    await settleAfterStructure();
+    return { ok: true, snapshot: finishOperation() };
+  }
+
+  /**
+   * 通过统一 EditorSession 添加 Component；pending 仅属于交互投影，成功后才写入文档。
+   * @param kind 元件类型。
+   * @param center 目标世界坐标中心。
+   * @param altKey 是否关闭 16 单位网格吸附。
+   * @returns 添加成功后自动选中新元件的命令结果。
+   */
+  async function addComponentAt(
+    kind: ComponentKindName,
+    center: Point,
+    altKey: boolean,
+    continuousOverride?: boolean,
+  ): Promise<CommandResult> {
+    const continuePlacement = continuousOverride ?? pendingPlacement?.continuous ?? false;
+    const identity = pendingIdentity ?? nextComponentIdentity(kind);
+    if (!Number.isFinite(center.x) || !Number.isFinite(center.y)) {
+      return fail({ code: "invalid_placement", message: "元件放置位置无效。", retryable: false });
+    }
+    const position = componentPosition(center, altKey);
+    const component: EditorComponent = {
+      id: identity.id,
+      kind,
+      displayName: identity.displayName,
+      position,
+      lifecycle: "active",
+    };
+
+    // 在请求发出前固定 pending 的身份和位置。pending 只属于交互投影，
+    // 文档、绑定和历史仍要等引擎确认成功后一次性提交。
+    pendingIdentity = identity;
+    pendingPlacement = {
+      kind,
+      center: { ...center },
+      altKey,
+      continuous: continuePlacement,
+    };
+    publish();
+
+    const added = await call(() => engine.addComponent(kind));
+    if (!added.ok) {
+      return fail(added.error);
+    }
+
+    // 只有引擎确认成功后才把正式节点写入 EditorDocument；等待期间仅显示 pending ghost。
+    document.components.set(component.id, component);
+    bindings.components[component.id] = added.value.componentId;
+    await settleAfterStructure();
+    undoStack.push({ type: "add-component", componentId: component.id, kind, displayName: component.displayName, position: { ...position } });
+    redoStack.length = 0;
+    selection = { kind: "component", id: component.id };
+    pendingIdentity = null;
+    pendingPlacement = continuePlacement
+      ? { kind, center: null, altKey, continuous: true }
+      : null;
+    publishBindings();
+    return { ok: true, snapshot: finishOperation() };
+  }
+
+  /**
+   * 复制一个 CircuitNode 的结构身份，不复制连接、路线、选择或信号状态。
+   * @param componentId 要复制的稳定编辑器元件 ID。
+   * @returns 创建成功后选中新副本的命令结果；引擎失败时保留原文档和历史。
+   */
+  async function duplicateComponent(componentId: EditorComponentId): Promise<CommandResult> {
+    const source = requireComponent(componentId);
+    if (!source) return fail(noSelectionError);
+    const identity = nextComponentIdentity(source.kind);
+    const position = { x: source.position.x + 32, y: source.position.y + 32 };
+    const added = await call(() => engine.addComponent(source.kind));
+    if (!added.ok) return fail(added.error);
+
+    const component: EditorComponent = {
+      id: identity.id,
+      kind: source.kind,
+      displayName: identity.displayName,
+      position,
+      lifecycle: "active",
+    };
+    document.components.set(component.id, component);
+    bindings.components[component.id] = added.value.componentId;
+    await settleAfterStructure();
+    undoStack.push({
+      type: "add-component",
+      componentId: component.id,
+      kind: component.kind,
+      displayName: component.displayName,
+      position: { ...position },
+    });
+    redoStack.length = 0;
+    selection = { kind: "component", id: component.id };
+    publishBindings();
+    return { ok: true, snapshot: finishOperation() };
+  }
+
+  async function undoAddComponent(frame: AddComponentFrame): Promise<CommandResult> {
+    const component = document.components.get(frame.componentId);
+    if (!component || component.lifecycle !== "active") return fail(recoveryError("撤销所需的元件不存在。"));
+    const engineId = bindings.components[frame.componentId];
+    if (engineId === undefined) return fail(recoveryError("撤销所需的元件没有有效引擎绑定。"));
+    component.lifecycle = "deleted";
+    publish();
+    const removed = await call(() => engine.removeComponent(engineId));
+    if (!removed.ok) {
+      component.lifecycle = "active";
+      return fail(removed.error);
+    }
+    delete bindings.components[frame.componentId];
+    selection = null;
+    undoStack.pop();
+    redoStack.push(frame);
+    publishBindings();
+    await settleAfterStructure();
+    return { ok: true, snapshot: finishOperation() };
+  }
+
+  async function redoAddComponent(frame: AddComponentFrame): Promise<CommandResult> {
+    const component = document.components.get(frame.componentId);
+    if (!component) return fail(recoveryError("重做所需的元件不存在。"));
+    const added = await call(() => engine.addComponent(frame.kind));
+    if (!added.ok) return fail(added.error);
+    component.lifecycle = "active";
+    component.position = { ...frame.position };
+    component.displayName = frame.displayName;
+    bindings.components[frame.componentId] = added.value.componentId;
+    await settleAfterStructure();
+    undoStack.push(frame);
+    redoStack.pop();
+    selection = { kind: "component", id: frame.componentId };
+    publishBindings();
+    return { ok: true, snapshot: finishOperation() };
+  }
+
+  function connectionOccupied(target: ConnectionDraftPort): boolean {
+    return [...document.connections.values()].some((connection) =>
+      isLiveConnection(connection) &&
+      connection.target.componentId === target.componentId &&
+      connection.target.port === target.port,
+    );
+  }
+
+  function nextConnectionIdentity(): EditorConnectionId {
+    return `connection-${nextEditorConnectionSequence++}`;
+  }
+
+  function connectionFrame(
+    left: ConnectionDraftPort,
+    right: ConnectionDraftPort,
+    route?: readonly Point[],
+    waypoints?: readonly Point[],
+  ): CreateConnectionFrame | EngineError {
+    const targetError = validateConnectionDraftTarget(left, right, false);
+    if (targetError) {
+      return {
+        code: targetError.code === "same-port" ? "same_port" : targetError.code === "same-direction" ? "same_direction" : targetError.code,
+        message: targetError.message,
+        retryable: false,
+      };
+    }
+    const endpoints = normalizeConnectionEndpoints(left, right);
+    const sourceComponent = requireComponent(endpoints.source.componentId);
+    const targetComponent = requireComponent(endpoints.target.componentId);
+    if (!sourceComponent || !targetComponent) {
+      return { code: "component_not_found", message: "连接端点所属的元件不存在或已被删除。", retryable: false };
+    }
+    if (connectionOccupied(endpoints.target)) {
+      return { code: "input_already_connected", message: "这个输入端口已经有有效连接。请选择空闲输入端口。", retryable: false };
+    }
+    const id = nextConnectionIdentity();
+    const endpointSource = { componentId: endpoints.source.componentId, port: endpoints.source.port, point: { ...endpoints.source.point } };
+    const endpointTarget = { componentId: endpoints.target.componentId, port: endpoints.target.port, point: { ...endpoints.target.point } };
+    const suppliedRoute = route && route.length >= 2
+      ? normalizeOrthogonalRoute(route)
+      : createDefaultOrthogonalRoute(endpointSource.point, endpointTarget.point);
+    const routeAfter = suppliedRoute.length >= 2 ? suppliedRoute : [endpointSource.point, endpointTarget.point];
+    routeAfter[0] = { ...endpointSource.point };
+    routeAfter[routeAfter.length - 1] = { ...endpointTarget.point };
+    return {
+      type: "create-connection",
+      connectionId: id,
+      source: endpointSource,
+      target: endpointTarget,
+      route: routeAfter.map((point) => ({ ...point })),
+      waypoints: (waypoints ?? routeAfter.slice(1, -1)).map((point) => ({ ...point })),
+      selectionBefore: selection ? { ...selection } : null,
+    };
+  }
+
+  function reconnectFrame(
+    connectionId: EditorConnectionId,
+    left: ConnectionDraftPort,
+    right: ConnectionDraftPort,
+    route?: readonly Point[],
+    waypoints?: readonly Point[],
+  ): ReconnectConnectionFrame | EngineError {
+    const connection = document.connections.get(connectionId);
+    if (!connection || connection.lifecycle === "deleted") {
+      return { code: "connection_not_found", message: "要重接的连接不存在。", retryable: false };
+    }
+    const oldSource = cloneEndpoint(connection.source);
+    const oldTarget = cloneEndpoint(connection.target);
+    const oldDangling = new Set<EditorEndpointSide>();
+    if (!requireComponent(oldSource.componentId)) oldDangling.add("source");
+    if (!requireComponent(oldTarget.componentId)) oldDangling.add("target");
+    const leftIsActive = requireComponent(left.componentId) !== null;
+    const rightIsActive = requireComponent(right.componentId) !== null;
+    const endpoints = normalizeConnectionEndpoints(left, right);
+    let source = { componentId: endpoints.source.componentId, port: endpoints.source.port, point: { ...endpoints.source.point } };
+    let target = { componentId: endpoints.target.componentId, port: endpoints.target.port, point: { ...endpoints.target.point } };
+
+    // 拖动冻结的 source/target 端点时，两端方向相同；新端点只替换对应悬空侧，另一侧继续沿用旧连接。
+    if (oldDangling.has("source") && left.direction === "output" && right.direction === "output") {
+      const replacement = leftIsActive ? left : rightIsActive ? right : null;
+      if (!replacement) return { code: "component_not_found", message: "修复连接需要一个仍然存在的输出端口。", retryable: false };
+      source = { componentId: replacement.componentId, port: replacement.port, point: { ...replacement.point } };
+      target = cloneEndpoint(oldTarget);
+    } else if (oldDangling.has("target") && left.direction === "input" && right.direction === "input") {
+      const replacement = leftIsActive ? left : rightIsActive ? right : null;
+      if (!replacement) return { code: "component_not_found", message: "修复连接需要一个仍然存在的输入端口。", retryable: false };
+      source = cloneEndpoint(oldSource);
+      target = { componentId: replacement.componentId, port: replacement.port, point: { ...replacement.point } };
+    } else {
+      const targetError = validateConnectionDraftTarget(left, right, false);
+      if (targetError) {
+        return { code: targetError.code === "same-port" ? "same_port" : targetError.code === "same-direction" ? "same_direction" : targetError.code, message: targetError.message, retryable: false };
+      }
+      if (!leftIsActive || !rightIsActive) {
+        return { code: "component_not_found", message: "重接端点所属的元件不存在或已被删除。", retryable: false };
+      }
+      // 允许把一个 live 连接的输入端重新接到新的来源；旧连接本身不计入占用判断。
+      if ([...document.connections.values()].some((candidate) => candidate.id !== connectionId && isLiveConnection(candidate) && candidate.target.componentId === endpoints.target.componentId && candidate.target.port === endpoints.target.port)) {
+        return { code: "input_already_connected", message: "目标输入端口已被另一条有效连接占用。", retryable: false };
+      }
+    }
+    if (!requireComponent(source.componentId) || !requireComponent(target.componentId)) {
+      return { code: "component_not_found", message: "重接端点所属的元件不存在或已被删除。", retryable: false };
+    }
+    const normalizedRoute = route && route.length >= 2 ? normalizeOrthogonalRoute(route) : createDefaultOrthogonalRoute(source.point, target.point);
+    const routeAfter = (normalizedRoute.length >= 2 ? normalizedRoute : [source.point, target.point]).map((point) => ({ ...point }));
+    routeAfter[0] = { ...source.point };
+    routeAfter[routeAfter.length - 1] = { ...target.point };
+    return {
+      type: "reconnect-connection",
+      connectionId,
+      oldSource,
+      oldTarget,
+      oldRoute: connection.route?.map((point) => ({ ...point })),
+      oldWaypoints: connection.waypoints?.map((point) => ({ ...point })),
+      oldWasLive: isLiveConnection(connection),
+      source,
+      target,
+      route: routeAfter,
+      waypoints: (waypoints ?? routeAfter.slice(1, -1)).map((point) => ({ ...point })),
+      selectionBefore: selection ? { ...selection } : null,
+    };
+  }
+
+  async function createConnection(frame: CreateConnectionFrame): Promise<CommandResult> {
+    const sourceEngineId = bindings.components[frame.source.componentId];
+    const targetEngineId = bindings.components[frame.target.componentId];
+    if (sourceEngineId === undefined || targetEngineId === undefined) {
+      return fail({ code: "component_not_found", message: "连接端点没有有效引擎绑定。", retryable: true });
+    }
+    const added = await call(() => engine.addConnection({
+      sourceComponentId: sourceEngineId,
+      sourcePort: frame.source.port,
+      targetComponentId: targetEngineId,
+      targetPort: frame.target.port,
+    }));
+    if (!added.ok) return fail(added.error);
+    document.connections.set(frame.connectionId, {
+      id: frame.connectionId,
+      source: { ...frame.source, point: { ...frame.source.point } },
+      target: { ...frame.target, point: { ...frame.target.point } },
+      route: frame.route.map((point) => ({ ...point })),
+      waypoints: frame.waypoints.map((point) => ({ ...point })),
+      lifecycle: "visible",
+      danglingEndpoints: [],
+    });
+    bindings.connections[frame.connectionId] = added.value.connectionId;
+    await settleAfterStructure();
+    undoStack.push(frame);
+    redoStack.length = 0;
+    selection = { kind: "connection", id: frame.connectionId };
+    publishBindings();
+    return { ok: true, snapshot: finishOperation() };
+  }
+
+  function applyReconnectGeometry(frame: ReconnectConnectionFrame, useNew: boolean): void {
+    const connection = document.connections.get(frame.connectionId);
+    if (!connection) return;
+    const source = useNew ? frame.source : frame.oldSource;
+    const target = useNew ? frame.target : frame.oldTarget;
+    connection.source = cloneEndpoint(source);
+    connection.target = cloneEndpoint(target);
+    const route = useNew ? frame.route : frame.oldRoute;
+    const waypoints = useNew ? frame.waypoints : frame.oldWaypoints;
+    if (route) connection.route = route.map((point) => ({ ...point }));
+    else delete connection.route;
+    if (waypoints) connection.waypoints = waypoints.map((point) => ({ ...point }));
+    else delete connection.waypoints;
+    connection.lifecycle = "visible";
+    delete connection.hiddenReason;
+  }
+
+  /**
+   * 以补偿事务替换一条 Connection 的端点；旧 Wire 在整个异步事务期间保持可见。
+   * @param frame 重接前后的编辑器几何与稳定连接身份。
+   * @param redo 是否按重做方向执行（当前连接已是旧几何）。
+   * @returns 成功后的结果；补偿失败时进入 recovery-required。
+   */
+  async function reconnectConnection(frame: ReconnectConnectionFrame, undoDirection = false, redoHistory = false): Promise<CommandResult> {
+    const connection = document.connections.get(frame.connectionId);
+    if (!connection) return fail(recoveryError("重接所需的连接不存在。"));
+    const currentIsNew = undoDirection;
+    const currentWasLive = currentIsNew || frame.oldWasLive;
+    const currentSource = currentIsNew ? frame.source : frame.oldSource;
+    const currentTarget = currentIsNew ? frame.target : frame.oldTarget;
+    const currentEngineId = bindings.connections[frame.connectionId];
+    const currentSourceId = bindings.components[currentSource.componentId];
+    const currentTargetId = bindings.components[currentTarget.componentId];
+    const desiredSource = currentIsNew ? frame.oldSource : frame.source;
+    const desiredTarget = currentIsNew ? frame.oldTarget : frame.target;
+    const desiredSourceId = bindings.components[desiredSource.componentId];
+    const desiredTargetId = bindings.components[desiredTarget.componentId];
+    const oldBinding = currentEngineId;
+
+    // 当前有效连接必须先解绑，才能满足引擎的单输入规则；Wire 的编辑器投影不隐藏。
+    if (currentWasLive && currentEngineId !== undefined) {
+      const removed = await call(() => engine.removeConnection(currentEngineId));
+      if (!removed.ok && !isAlreadyAbsent(removed.error)) return fail(removed.error);
+      delete bindings.connections[frame.connectionId];
+    } else if (currentWasLive && currentEngineId === undefined) {
+      return fail(recoveryError("重接所需的有效连接没有引擎绑定。"));
+    }
+
+    const desiredWasLive = undoDirection ? frame.oldWasLive : true;
+    const desiredCanExist = desiredSourceId !== undefined && desiredTargetId !== undefined;
+    let added: EngineResult<{ connectionId: EngineConnectionId }> | null = null;
+    if (desiredWasLive && desiredCanExist) {
+      added = await call(() => engine.addConnection({
+        sourceComponentId: desiredSourceId!,
+        sourcePort: desiredSource.port,
+        targetComponentId: desiredTargetId!,
+        targetPort: desiredTarget.port,
+      }));
+    }
+    if (desiredWasLive && (!added || !added.ok)) {
+      // 新连接失败时恢复旧有效连接；悬空旧连接则仍保留本地投影和原有绑定。
+      if (currentWasLive && currentSourceId !== undefined && currentTargetId !== undefined) {
+        const restored = await call(() => engine.addConnection({
+          sourceComponentId: currentSourceId,
+          sourcePort: currentSource.port,
+          targetComponentId: currentTargetId,
+          targetPort: currentTarget.port,
+        }));
+        if (!restored.ok) return enterRecovery(recoveryError(`重接失败且旧连接补偿未完成：${restored.error.message}`));
+        bindings.connections[frame.connectionId] = restored.value.connectionId;
+      } else if (oldBinding !== undefined && !currentWasLive) {
+        bindings.connections[frame.connectionId] = oldBinding;
+      }
+      return fail(added?.error ?? recoveryError("重接端点没有有效引擎绑定。"));
+    }
+
+    const newEngineId = added?.ok ? added.value.connectionId : undefined;
+    if (!currentWasLive && currentEngineId !== undefined) {
+      if (newEngineId === undefined) return enterRecovery(recoveryError("重接补偿缺少新连接身份。"));
+      const removed = await call(() => engine.removeConnection(currentEngineId));
+      if (!removed.ok && !isAlreadyAbsent(removed.error)) {
+        const compensated = await call(() => engine.removeConnection(newEngineId));
+        if (!compensated.ok && !isAlreadyAbsent(compensated.error)) return enterRecovery(recoveryError(`重接完成后清理旧悬空连接失败，且新连接补偿未完成：${compensated.error.message}`));
+        bindings.connections[frame.connectionId] = oldBinding!;
+        return fail(removed.error);
+      }
+    }
+    if (newEngineId === undefined) delete bindings.connections[frame.connectionId];
+    else bindings.connections[frame.connectionId] = newEngineId;
+    applyReconnectGeometry(frame, !undoDirection);
+    selection = { kind: "connection", id: frame.connectionId };
+    if (!undoDirection && !redoHistory) {
+      undoStack.push(frame);
+      redoStack.length = 0;
+    }
+    await settleAfterStructure();
+    publishBindings();
+    return { ok: true, snapshot: finishOperation() };
+  }
+
+  async function undoReconnectConnection(frame: ReconnectConnectionFrame): Promise<CommandResult> {
+    const result = await reconnectConnection(frame, true);
+    if (!result.ok) return result;
+    // 撤销方向可能无法在引擎重建原 dangling 端点，因此仅恢复本地悬空投影。
+    applyReconnectGeometry(frame, false);
+    selection = frame.selectionBefore;
+    undoStack.pop();
+    redoStack.push(frame);
+    publishBindings();
+    return { ok: true, snapshot: finishOperation() };
+  }
+
+  async function undoCreateConnection(frame: CreateConnectionFrame): Promise<CommandResult> {
+    const connection = document.connections.get(frame.connectionId);
+    const engineId = bindings.connections[frame.connectionId];
+    if (!connection || connection.lifecycle !== "visible" || engineId === undefined) {
+      return fail(recoveryError("撤销所需的连接不存在或没有有效引擎绑定。"));
+    }
+    connection.lifecycle = "hidden";
+    connection.hiddenReason = "pending-operation";
+    publish();
+    const removed = await call(() => engine.removeConnection(engineId));
+    if (!removed.ok) {
+      connection.lifecycle = "visible";
+      delete connection.hiddenReason;
+      return fail(removed.error);
+    }
+    connection.lifecycle = "deleted";
+    delete bindings.connections[frame.connectionId];
+    selection = frame.selectionBefore;
+    undoStack.pop();
+    redoStack.push(frame);
+    await settleAfterStructure();
+    publishBindings();
+    return { ok: true, snapshot: finishOperation() };
+  }
+
+  async function redoCreateConnection(frame: CreateConnectionFrame, remainingRedo: readonly HistoryFrame[]): Promise<CommandResult> {
+    const connection = document.connections.get(frame.connectionId);
+    if (!connection) return fail(recoveryError("重做所需的连接不存在。"));
+    const sourceEngineId = bindings.components[frame.source.componentId];
+    const targetEngineId = bindings.components[frame.target.componentId];
+    if (sourceEngineId === undefined || targetEngineId === undefined) return fail(recoveryError("重做所需的连接端点没有有效引擎绑定。"));
+    const added = await call(() => engine.addConnection({ sourceComponentId: sourceEngineId, sourcePort: frame.source.port, targetComponentId: targetEngineId, targetPort: frame.target.port }));
+    if (!added.ok) return fail(added.error);
+    connection.lifecycle = "visible";
+    delete connection.hiddenReason;
+    bindings.connections[frame.connectionId] = added.value.connectionId;
+    undoStack.push(frame);
+    redoStack.length = 0;
+    redoStack.push(...remainingRedo);
+    selection = { kind: "connection", id: frame.connectionId };
+    await settleAfterStructure();
+    publishBindings();
     return { ok: true, snapshot: finishOperation() };
   }
 
@@ -613,6 +1405,7 @@ export function createEditorSession(
     redoStack.length = 0;
     selection = null;
     publishBindings();
+    await settleAfterStructure();
     return { ok: true, snapshot: finishOperation() };
   }
 
@@ -678,6 +1471,7 @@ export function createEditorSession(
     redoStack.length = 0;
     selection = null;
     publishBindings();
+    await settleAfterStructure();
     return { ok: true, snapshot: finishOperation() };
   }
 
@@ -741,6 +1535,7 @@ export function createEditorSession(
     selection = frame.selectionBefore;
     undoStack.pop();
     redoStack.push(frame);
+    await settleAfterStructure();
     publishBindings();
     return { ok: true, snapshot: finishOperation() };
   }
@@ -757,6 +1552,7 @@ export function createEditorSession(
       selection = frame.selectionBefore;
       undoStack.pop();
       redoStack.push(frame);
+      await settleAfterStructure();
       publishBindings();
       return { ok: true, snapshot: finishOperation() };
     }
@@ -780,7 +1576,159 @@ export function createEditorSession(
     selection = frame.selectionBefore;
     undoStack.pop();
     redoStack.push(frame);
+    await settleAfterStructure();
     publishBindings();
+    return { ok: true, snapshot: finishOperation() };
+  }
+
+  function makeMoveComponentFrame(
+    componentId: EditorComponentId,
+    position: Point,
+  ): MoveComponentFrame | null {
+    const component = requireComponent(componentId);
+    if (!component) return null;
+    const positionBefore = { ...component.position };
+    const positionAfter = { ...position };
+    const connectionsBefore = [...document.connections.values()]
+      .filter((connection) =>
+        connection.lifecycle === "visible" &&
+        (connection.source.componentId === componentId || connection.target.componentId === componentId),
+      )
+      .map(cloneConnectionGeometry);
+    for (const connection of connectionsBefore) {
+      const current = document.connections.get(connection.id);
+      if (current) updateMovedConnection(current, componentId, positionBefore, positionAfter);
+    }
+    component.position = positionAfter;
+    const connectionsAfter = connectionsBefore
+      .map(({ id }) => document.connections.get(id))
+      .filter((connection): connection is EditorConnection => connection !== undefined)
+      .map(cloneConnectionGeometry);
+    for (const connection of connectionsBefore) restoreConnectionGeometry(document, connection);
+    component.position = positionBefore;
+    return {
+      type: "move-component",
+      componentId,
+      positionBefore,
+      positionAfter,
+      selectionBefore: selection ? { ...selection } : null,
+      connectionsBefore,
+      connectionsAfter,
+    };
+  }
+
+  function applyMoveFrame(frame: MoveComponentFrame, after: boolean): void {
+    const component = document.components.get(frame.componentId);
+    if (!component || component.lifecycle !== "active") return;
+    component.position = { ...(after ? frame.positionAfter : frame.positionBefore) };
+    for (const connection of after ? frame.connectionsAfter : frame.connectionsBefore) {
+      restoreConnectionGeometry(document, connection);
+    }
+  }
+
+  async function moveComponent(frame: MoveComponentFrame): Promise<CommandResult> {
+    if (pointsEqual(frame.positionBefore, frame.positionAfter)) {
+      selection = frame.selectionBefore;
+      return { ok: true, snapshot: finishOperation() };
+    }
+    applyMoveFrame(frame, true);
+    selection = { kind: "component", id: frame.componentId };
+    undoStack.push(frame);
+    redoStack.length = 0;
+    return { ok: true, snapshot: finishOperation() };
+  }
+
+  async function undoMoveComponent(frame: MoveComponentFrame): Promise<CommandResult> {
+    applyMoveFrame(frame, false);
+    selection = frame.selectionBefore;
+    undoStack.pop();
+    redoStack.push(frame);
+    return { ok: true, snapshot: finishOperation() };
+  }
+
+  async function redoMoveComponent(
+    frame: MoveComponentFrame,
+    remainingRedo: readonly HistoryFrame[],
+  ): Promise<CommandResult> {
+    applyMoveFrame(frame, true);
+    selection = { kind: "component", id: frame.componentId };
+    redoStack.length = 0;
+    redoStack.push(...remainingRedo);
+    undoStack.push(frame);
+    return { ok: true, snapshot: finishOperation() };
+  }
+
+  function routePointsEqual(left: readonly Point[] | undefined, right: readonly Point[] | undefined): boolean {
+    if (!left || !right) return !left && !right;
+    return left.length === right.length && left.every((point, index) => pointsEqual(point, right[index]));
+  }
+
+  function clonePoints(points: readonly Point[] | undefined): readonly Point[] | undefined {
+    return points?.map((point) => ({ ...point }));
+  }
+
+  function routeForConnection(connection: EditorConnection): Point[] {
+    if (connection.route && connection.route.length >= 2) return connection.route.map((point) => ({ ...point }));
+    return createDefaultOrthogonalRoute(connection.source.point, connection.target.point);
+  }
+
+  function routeWithEndpoints(connection: EditorConnection, route: readonly Point[]): Point[] {
+    const points = route.length >= 2 ? route.map((point) => ({ ...point })) : routeForConnection(connection);
+    points[0] = { ...connection.source.point };
+    points[points.length - 1] = { ...connection.target.point };
+    return normalizeOrthogonalRoute(points);
+  }
+
+  function makeEditRouteFrame(connection: EditorConnection, route: readonly Point[]): EditRouteFrame {
+    const routeAfter = routeWithEndpoints(connection, route);
+    return {
+      type: "edit-route",
+      connectionId: connection.id,
+      routeBefore: clonePoints(connection.route),
+      routeAfter,
+      waypointsBefore: clonePoints(connection.waypoints),
+      waypointsAfter: routeAfter.slice(1, -1).map((point) => ({ ...point })),
+      selectionBefore: selection ? { ...selection } : null,
+    };
+  }
+
+  function applyRouteFrame(frame: EditRouteFrame, after: boolean): void {
+    const connection = document.connections.get(frame.connectionId);
+    if (!connection || connection.lifecycle !== "visible") return;
+    const route = after ? frame.routeAfter : frame.routeBefore;
+    const waypoints = after ? frame.waypointsAfter : frame.waypointsBefore;
+    if (route) connection.route = route.map((point) => ({ ...point }));
+    else delete connection.route;
+    if (waypoints) connection.waypoints = waypoints.map((point) => ({ ...point }));
+    else delete connection.waypoints;
+  }
+
+  async function editRoute(frame: EditRouteFrame): Promise<CommandResult> {
+    if (routePointsEqual(frame.routeBefore, frame.routeAfter) && routePointsEqual(frame.waypointsBefore, frame.waypointsAfter)) {
+      selection = frame.selectionBefore;
+      return { ok: true, snapshot: finishOperation() };
+    }
+    applyRouteFrame(frame, true);
+    selection = { kind: "connection", id: frame.connectionId };
+    undoStack.push(frame);
+    redoStack.length = 0;
+    return { ok: true, snapshot: finishOperation() };
+  }
+
+  async function undoEditRoute(frame: EditRouteFrame): Promise<CommandResult> {
+    applyRouteFrame(frame, false);
+    selection = frame.selectionBefore;
+    undoStack.pop();
+    redoStack.push(frame);
+    return { ok: true, snapshot: finishOperation() };
+  }
+
+  async function redoEditRoute(frame: EditRouteFrame, remainingRedo: readonly HistoryFrame[]): Promise<CommandResult> {
+    applyRouteFrame(frame, true);
+    selection = { kind: "connection", id: frame.connectionId };
+    redoStack.length = 0;
+    redoStack.push(...remainingRedo);
+    undoStack.push(frame);
     return { ok: true, snapshot: finishOperation() };
   }
 
@@ -841,6 +1789,7 @@ export function createEditorSession(
     selection = frame.selectionBefore;
     undoStack.pop();
     redoStack.push(frame);
+    await settleAfterStructure();
     publishBindings();
     return { ok: true, snapshot: finishOperation() };
   }
@@ -848,8 +1797,13 @@ export function createEditorSession(
   async function undo(): Promise<CommandResult> {
     const frame = undoStack[undoStack.length - 1];
     if (!frame) return fail({ code: "nothing_to_undo", message: "没有可撤销的操作。", retryable: false });
+    if (frame.type === "add-component") return undoAddComponent(frame);
     if (frame.type === "delete-component") return undoDeleteComponent(frame);
     if (frame.type === "clear-document") return undoClearDocument(frame);
+    if (frame.type === "move-component") return undoMoveComponent(frame);
+    if (frame.type === "create-connection") return undoCreateConnection(frame);
+    if (frame.type === "reconnect-connection") return undoReconnectConnection(frame);
+    if (frame.type === "edit-route") return undoEditRoute(frame);
     return undoDeleteConnection(frame);
   }
 
@@ -864,6 +1818,7 @@ export function createEditorSession(
       if (result.ok) redoStack.push(...remainingRedo);
       return result;
     }
+    if (frame.type === "add-component") return redoAddComponent(frame);
     if (frame.type === "clear-document") {
       const refreshed = makeClearDocumentFrame();
       if (!refreshed) return fail(recoveryError("重做清空所需的文档不存在。"));
@@ -871,6 +1826,17 @@ export function createEditorSession(
       if (result.ok) redoStack.push(...remainingRedo);
       return result;
     }
+    if (frame.type === "move-component") return redoMoveComponent(frame, remainingRedo);
+    if (frame.type === "create-connection") return redoCreateConnection(frame, remainingRedo);
+    if (frame.type === "reconnect-connection") {
+      const result = await reconnectConnection(frame, false, true);
+      if (result.ok) {
+        redoStack.length = 0;
+        redoStack.push(...remainingRedo);
+      }
+      return result;
+    }
+    if (frame.type === "edit-route") return redoEditRoute(frame, remainingRedo);
     const connection = document.connections.get(frame.connectionId);
     if (!connection) return fail(recoveryError("重做所需的连接不存在。"));
     const result = await deleteConnection({
@@ -883,12 +1849,16 @@ export function createEditorSession(
   }
 
   async function dispatch(command: EditorCommand): Promise<CommandResult> {
-    if (operation === "recovery-required") {
+    const changesCircuitState = changesCircuit(command);
+    if (changesCircuitState && operation === "recovery-required") {
       const errorValue = error ?? recoveryError("编辑器需要重新加载后才能继续结构编辑。");
       return { ok: false, error: errorValue, snapshot: currentSnapshot() };
     }
-    if (operation === "busy") {
+    if (changesCircuitState && operation === "busy") {
       return { ok: false, error: busyError, snapshot: currentSnapshot() };
+    }
+    if (changesCircuitState && !isEngineAvailable()) {
+      return structureUnavailable();
     }
     if (
       confirmation &&
@@ -899,11 +1869,82 @@ export function createEditorSession(
       const snapshot = publish();
       return { ok: false, error: confirmationPendingError, snapshot };
     }
+
+    if (command.type === "begin-placement") {
+      if (command.center && !Number.isFinite(command.center.x) || command.center && !Number.isFinite(command.center.y)) {
+        return fail({ code: "invalid_placement", message: "元件放置位置无效。", retryable: false });
+      }
+      pendingPlacement = {
+        kind: command.kind,
+        center: command.center ? { ...command.center } : null,
+        altKey: command.altKey ?? false,
+        continuous: command.continuous ?? false,
+      };
+      pendingIdentity = null;
+      error = null;
+      return { ok: true, snapshot: publish() };
+    }
+    if (command.type === "update-placement") {
+      if (!pendingPlacement) return fail({ code: "no_pending_placement", message: "当前没有待放置的元件。", retryable: false });
+      if (!Number.isFinite(command.center.x) || !Number.isFinite(command.center.y)) {
+        return fail({ code: "invalid_placement", message: "元件放置位置无效。", retryable: false });
+      }
+      pendingPlacement = { ...pendingPlacement, center: { ...command.center }, altKey: command.altKey ?? pendingPlacement.altKey };
+      return { ok: true, snapshot: publish() };
+    }
+
+    if (command.type === "retry-current-operation" || command.type === "retry-placement") {
+      if (!pendingPlacement?.center) {
+        return fail({ code: "no_pending_placement", message: "当前没有可重试的元件放置。", retryable: false });
+      }
+      if (!beginOperation()) return { ok: false, error: busyError, snapshot: currentSnapshot() };
+      return addComponentAt(pendingPlacement.kind, pendingPlacement.center, pendingPlacement.altKey);
+    }
+
     if (!beginOperation()) return { ok: false, error: busyError, snapshot: currentSnapshot() };
 
     if (command.type === "select") {
       selection = command.selection;
       return { ok: true, snapshot: finishOperation() };
+    }
+    if (command.type === "move-component") {
+      const frame = makeMoveComponentFrame(command.componentId, command.position);
+      if (!frame) return fail(noSelectionError);
+      return moveComponent(frame);
+    }
+    if (
+      command.type === "edit-route" ||
+      command.type === "move-route-waypoint" ||
+      command.type === "move-route-segment" ||
+      command.type === "delete-waypoint" ||
+      command.type === "reset-route"
+    ) {
+      const connection = document.connections.get(command.connectionId);
+      if (!connection || connection.lifecycle !== "visible") return fail(noSelectionError);
+      const currentRoute = routeForConnection(connection);
+      let nextRoute: readonly Point[];
+      if (command.type === "edit-route") {
+        nextRoute = command.route;
+      } else if (command.type === "move-route-waypoint") {
+        nextRoute = moveRouteWaypoint(currentRoute, command.pointIndex, command.delta, command.altKey);
+      } else if (command.type === "move-route-segment") {
+        nextRoute = moveRouteSegment(currentRoute, command.segmentIndex, command.offset, command.altKey);
+      } else if (command.type === "delete-waypoint") {
+        nextRoute = deleteRouteWaypoint(currentRoute, command.pointIndex);
+      } else {
+        nextRoute = resetOrthogonalRoute(connection.source.point, connection.target.point);
+      }
+      return editRoute(makeEditRouteFrame(connection, nextRoute));
+    }
+    if (command.type === "reconnect-connection") {
+      const frame = reconnectFrame(command.connectionId, command.left, command.right, command.route, command.waypoints);
+      if ("code" in frame) return fail(frame);
+      return reconnectConnection(frame);
+    }
+    if (command.type === "create-connection") {
+      const frame = connectionFrame(command.left, command.right, command.route, command.waypoints);
+      if ("code" in frame) return fail(frame);
+      return createConnection(frame);
     }
     if (command.type === "request-clear") {
       const frame = makeClearDocumentFrame();
@@ -917,8 +1958,24 @@ export function createEditorSession(
     }
     if (command.type === "cancel-current-operation") {
       if (confirmation) confirmation = null;
+      else if (pendingPlacement) {
+        pendingPlacement = null;
+        pendingIdentity = null;
+        error = null;
+      }
       else selection = null;
       return { ok: true, snapshot: finishOperation() };
+    }
+    if (command.type === "place-component" || command.type === "add-component") {
+      const kind = command.type === "add-component" ? command.kind : command.kind ?? pendingPlacement?.kind;
+      if (!kind) return fail({ code: "no_pending_placement", message: "当前没有待放置的元件。", retryable: false });
+      const altKey = command.altKey ?? pendingPlacement?.altKey ?? false;
+      const center = command.type === "add-component" ? command.position : command.center;
+      const result = await addComponentAt(kind, center, altKey, command.continuous);
+      return result;
+    }
+    if (command.type === "duplicate-component") {
+      return duplicateComponent(command.componentId);
     }
     if (command.type === "confirm-clear") {
       if (!confirmation) return fail(confirmationRequiredError);
@@ -966,6 +2023,11 @@ export function createEditorSession(
   return {
     snapshot: currentSnapshot,
     dispatch,
+    setEngineAvailability(available) {
+      engineAvailabilityOverride = available;
+      if (available && error?.code === engineUnavailableError.code) error = null;
+      publish();
+    },
     subscribe(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);

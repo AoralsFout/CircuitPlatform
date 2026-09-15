@@ -11,7 +11,7 @@ import WorkspaceSidebar from "./components/WorkspaceSidebar.vue";
 import { useEditorState } from "./composables/useEditorState";
 import { useThemePreference } from "./composables/useThemePreference";
 import { useWorkspace } from "./composables/useWorkspace";
-import { resolveEditorShortcut } from "./editor/keyboard";
+import { isEditableKeyboardTarget, resolveEditorShortcut } from "./editor/keyboard";
 
 const {
   state,
@@ -21,19 +21,29 @@ const {
   runSimulation,
   toggleInput,
   select,
+  moveComponent,
   deleteSelection,
+  deleteComponent,
+  deleteConnection,
   requestClear,
   confirmClear,
   cancelCurrentOperation,
   undo,
   redo,
+  beginPlacement,
+  updatePlacement,
+  placeComponent: placeComponentCommand,
+  retryPlacement,
+  addComponent,
+  duplicateComponent,
+  editRoute,
+  resetRoute,
+  createConnection,
 } = useWorkspace();
 const {
-  selectedNode,
   selectedConnection,
-  componentVisibility,
-  wireVisibility,
-  wireDangling,
+  sidebarComponents,
+  selectedComponentId,
   showDetails,
   showSidebar,
   activeRailPage,
@@ -43,16 +53,43 @@ const {
   inputControls,
   outputs,
   engineStateLabel,
-  selectedNodeName,
-  selectedNodeValue,
-  selectedNodeDescription,
-  selectedNodeId,
+  selectedComponentName,
+  selectedComponentValue,
+  selectedComponentDescription,
+  inspector,
+  selectedObjectId,
   zoomLabel,
-  selectNode,
+  canvasScene,
+  viewport,
+  interaction,
+  componentDefinitions,
+  recentComponentKinds,
+  rememberComponentKind,
+  selectComponent,
   selectConnection,
   selectRailPage,
   adjustZoom,
-} = useEditorState(state, editorState, select);
+  setViewport,
+  fitViewport,
+  resizeCanvas,
+  startNodeDrag,
+  moveNodeDrag,
+  endNodeDrag,
+  cancelNodeDrag,
+  placementMoved,
+  startRouteEdit,
+  moveRouteEdit,
+  endRouteEdit,
+  cancelRouteEdit,
+  startConnection,
+  moveConnection,
+  placeConnectionWaypoint,
+  finishConnection,
+  toggleConnectionAxis,
+  removeConnectionWaypoint,
+  cancelConnection,
+  focusCanvasObject,
+} = useEditorState(state, editorState, select, moveComponent, updatePlacement, editRoute, createConnection);
 const {
   preference: themePreference,
   label: themeLabel,
@@ -61,6 +98,25 @@ const {
   cycle: cycleTheme,
 } = useThemePreference();
 
+/** 提交画布待放置元件；成功后与右键菜单添加共用最近使用记录。 */
+async function placeComponent(center: { x: number; y: number }, altKey: boolean): Promise<void> {
+  const kind = editorState.value?.pendingPlacement?.kind;
+  const succeeded = await placeComponentCommand(center, altKey);
+  if (succeeded && kind) rememberComponentKind(kind);
+}
+
+/** 布线草稿存在时冻结元件放置，避免两种结构意图同时进行。 */
+async function beginPlacementFromSidebar(kind: Parameters<typeof beginPlacement>[0], continuous = false): Promise<void> {
+  if (interaction.value.connectionDraft) return;
+  await beginPlacement(kind, continuous);
+}
+
+/** 布线草稿期间保持结构意图单一，不允许键盘或工具栏启动复制事务。 */
+async function duplicateSelection(): Promise<void> {
+  if (interaction.value.connectionDraft) return;
+  await duplicateComponent();
+}
+
 function onEditorKeydown(event: KeyboardEvent): void {
   const target = event.target;
   const shortcut = resolveEditorShortcut({
@@ -68,15 +124,25 @@ function onEditorKeydown(event: KeyboardEvent): void {
     ctrlKey: event.ctrlKey,
     metaKey: event.metaKey,
     shiftKey: event.shiftKey,
-    editableTarget: target instanceof HTMLElement &&
-      (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)),
+    editableTarget: isEditableKeyboardTarget(target),
   });
   if (!shortcut) return;
   event.preventDefault();
-  if (editorState.value?.confirmation && shortcut !== "cancel") return;
+  if (shortcut === "cancel") {
+    // Esc 只取消当前最上层状态：确认框 → 恢复提示 → 草稿 → 拖动预览 → 选择。
+    if (editorState.value?.confirmation) void cancelCurrentOperation();
+    else if (editorState.value?.operation === "recovery-required") return;
+    else if (interaction.value.connectionDraft) cancelConnection();
+    else if (interaction.value.routeEditPreview) cancelRouteEdit();
+    else if (interaction.value.draggingComponentId) cancelNodeDrag();
+    else if (editorState.value?.pendingPlacement) void cancelCurrentOperation();
+    else if (editorState.value?.selection) void cancelCurrentOperation();
+    return;
+  }
+  if (editorState.value?.confirmation) return;
   if (shortcut === "undo") void undo();
   else if (shortcut === "redo") void redo();
-  else if (shortcut === "cancel") void cancelCurrentOperation();
+  else if (shortcut === "duplicate-selection") void duplicateSelection();
   else void deleteSelection();
 }
 
@@ -108,12 +174,14 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
         :active-rail-page="activeRailPage"
         :input-controls="inputControls"
         :can-run="state.canRun"
-        :selected-node="selectedNode"
-        :component-visibility="componentVisibility"
+        :selected-component-id="selectedComponentId"
+        :components="sidebarComponents"
         :component-count="editorState?.document.components.length ?? 0"
+        :component-definitions="componentDefinitions"
         @close="showSidebar = false"
-        @select-node="selectNode"
+        @select-component="selectComponent"
         @toggle-input="toggleInput"
+        @place-component="beginPlacementFromSidebar"
       />
 
       <section v-if="activeRailPage !== 'settings'" class="editor-main" aria-label="电路编辑器">
@@ -124,53 +192,67 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           :can-undo="editorState?.operation === 'idle' && !editorState.confirmation && editorState.canUndo"
           :can-redo="editorState?.operation === 'idle' && !editorState.confirmation && editorState.canRedo"
           :can-delete="editorState?.operation === 'idle' && !editorState.confirmation && Boolean(editorState.selection)"
+          :can-duplicate="editorState?.operation === 'idle' && !editorState.confirmation && !interaction.connectionDraft && editorState.selection?.kind === 'component'"
           :can-clear="editorState?.operation === 'idle' && !editorState.confirmation && (editorState.document.components.length > 0 || editorState.document.connections.length > 0)"
           :simulation-state="state.simulationState"
           @adjust-zoom="adjustZoom"
-          @reset-zoom="zoom = 100"
+          @reset-zoom="fitViewport"
           @run-simulation="runSimulation"
           @undo="undo"
           @redo="redo"
           @delete-selection="deleteSelection"
+          @duplicate-selection="duplicateSelection"
           @request-clear="requestClear"
         />
         <CircuitCanvas
-          :zoom="zoom"
-          :input-a="state.inputA"
-          :input-b="state.inputB"
-          :output-value="state.outputValue"
-          :output-description="state.outputDescription"
-          :engine-state="state.engineState"
-          :engine-message="state.message"
-          :has-lab="state.hasLab"
-          :waveform-length="state.waveform.length"
-          :selected-node="selectedNode"
-          :selected-connection="selectedConnection"
-          :component-visibility="componentVisibility"
-          :wire-visibility="wireVisibility"
-          :wire-dangling="wireDangling"
-          :is-empty="Boolean(editorState && editorState.document.components.length === 0 && editorState.document.connections.length === 0)"
-          @select-node="selectNode"
-          @select-connection="selectConnection"
+          :scene="canvasScene"
+          :viewport="viewport"
+          :interaction="interaction"
+          :controller="{ componentDefinitions, recentComponentKinds, addComponent, rememberComponentKind, duplicateComponent, deleteComponent, resetRoute, deleteConnection }"
+          @select-component="select({ kind: 'component', id: $event })"
+          @select-connection="select({ kind: 'connection', id: $event })"
+          @clear-selection="select(null)"
+          @node-drag-start="startNodeDrag($event.nodeId, $event.pointerWorld)"
+          @node-drag-move="moveNodeDrag($event.pointerWorld, $event.altKey)"
+          @node-drag-end="endNodeDrag()"
+          @node-drag-cancel="cancelNodeDrag()"
+          @route-edit-start="startRouteEdit($event.connectionId, $event.route, $event.target, $event.pointerWorld)"
+          @route-edit-move="moveRouteEdit($event.pointerWorld, $event.altKey)"
+          @route-edit-end="endRouteEdit()"
+          @route-edit-cancel="cancelRouteEdit()"
+          @connection-start="startConnection"
+          @connection-move="moveConnection($event.point, $event.altKey)"
+          @connection-waypoint="placeConnectionWaypoint($event.point, $event.altKey)"
+          @connection-end="finishConnection"
+          @connection-axis-toggle="toggleConnectionAxis"
+          @connection-waypoint-remove="removeConnectionWaypoint"
+          @connection-cancel="cancelConnection"
+          @focus-change="focusCanvasObject"
+          @viewport-change="setViewport"
+          @resize="resizeCanvas"
+          @placement-move="placementMoved"
+        @place-component="placeComponent"
+          @retry-placement="retryPlacement"
+          @cancel-placement="cancelCurrentOperation"
         />
         <BottomPanel
           :bottom-tab="bottomTab"
           :outputs="outputs"
-          :selected-node="selectedNode"
           :selected-connection="selectedConnection"
-          :selected-node-name="selectedNodeName"
-          :selected-node-value="selectedNodeValue"
-          :selected-node-description="selectedNodeDescription"
-          :selected-node-id="selectedNodeId"
+          :selected-component-name="selectedComponentName"
+          :selected-component-value="selectedComponentValue"
+          :selected-component-description="selectedComponentDescription"
+          :selected-object-id="selectedObjectId"
           :show-details="showDetails"
           :engine-state="state.engineState"
           :engine-name="state.engineName"
-          :operation-error="editorState?.error?.message ?? state.operationError"
+          :operation-error="editorState?.error?.message ?? editorState?.simulationError?.message ?? state.operationError"
+          :inspector="inspector"
           :waveform="state.waveform"
           :waveform-rows="waveformRows"
           :simulation-step="state.simulationStep"
           @select-tab="bottomTab = $event"
-          @select-node="selectNode"
+          @select-component="selectComponent"
           @toggle-details="showDetails = !showDetails"
         />
       </section>

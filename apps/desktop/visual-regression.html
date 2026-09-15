@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN" data-motion="reduced">
+  <head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><title>CircuitPlatform visual regression</title></head>
+  <body><div id="app"></div>
+    <script type="module">
+      // 截图使用真实 Vue 应用和 CircuitCanvas；此 adapter 只替代 Electron 引擎边界。
+      const params = new URLSearchParams(location.search);
+      const state = params.get("state") || "default";
+      const theme = params.get("theme") === "light" ? "light" : "dark";
+      const reducedMotion = params.get("motion") === "reduced";
+      document.documentElement.dataset.theme = theme;
+      document.documentElement.dataset.motion = reducedMotion ? "reduced" : "normal";
+      let nextComponentId = 1;
+      let nextConnectionId = 1;
+      let failAdds = false;
+      const response = (value) => Promise.resolve(value);
+      window.circuitPlatform = {
+        checkEngine: () => response({ status: "ok", engine: "Visual test engine" }),
+        addComponent: (kind) => failAdds
+          ? response({ type: "error", requestId: "visual", code: "visual_add_failed", message: "视觉回归模拟：元件提交失败" })
+          : response({ type: "component_added", requestId: "visual", componentId: nextComponentId++ }),
+        addConnection: () => response({ type: "connection_added", requestId: "visual", connectionId: nextConnectionId++ }),
+        removeComponent: (componentId) => response({ type: "component_removed", requestId: "visual", componentId }),
+        removeConnection: (connectionId) => response({ type: "connection_removed", requestId: "visual", connectionId }),
+        setInput: () => response({ type: "input_set", requestId: "visual" }),
+        settle: () => response({ type: "settled", requestId: "visual", status: "ok" }),
+        getSignal: () => response({ type: "signal_result", requestId: "visual", value: "X" }),
+      };
+      await import("/src/main.ts");
+      const waitFor = async (selector) => {
+        for (let attempt = 0; attempt < 1000; attempt += 1) {
+          const element = document.querySelector(selector);
+          if (element) return element;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        return null;
+      };
+      const click = (element) => {
+        if (!element) return;
+        if (typeof element.click === "function") element.click();
+        else element.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+      };
+      const prepare = async () => {
+        await waitFor(".circuit-node");
+        failAdds = state === "error";
+        if (state === "selected-component") click(document.querySelector(".circuit-node"));
+        if (state === "selected-wire") click(document.querySelector(".signal-wire-hit"));
+        if (state === "draft") click(document.querySelector("[data-port-id]"));
+        if (state === "pending" || state === "error") {
+          click([...document.querySelectorAll(".component-item")].find((item) => item.textContent?.includes("XOR")));
+          if (state === "error") {
+            const canvas = await waitFor(".circuit-canvas");
+            const bounds = canvas.getBoundingClientRect();
+            canvas.dispatchEvent(new PointerEvent("pointerdown", {
+              bubbles: true,
+              button: 0,
+              clientX: bounds.left + bounds.width * 0.65,
+              clientY: bounds.top + bounds.height * 0.45,
+            }));
+          }
+        }
+        if (state === "dangling") {
+          click(document.querySelector(".circuit-node"));
+          click(document.querySelector('[aria-label="删除选中对象 (Delete)"]'));
+        }
+        if (state === "empty") {
+          click(document.querySelector('[aria-label="清空画布"]'));
+          await waitFor(".confirmation-dialog");
+          click(document.querySelector(".confirmation-dialog button:last-child"));
+        }
+        await new Promise((resolve) => setTimeout(resolve, 120));
+      };
+      await prepare();
+    </script>
+  </body>
+</html>

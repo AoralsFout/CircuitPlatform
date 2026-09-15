@@ -1,12 +1,8 @@
 <script setup lang="ts">
 import type { Signal } from "@circuit-platform/protocol";
-import type {
-  BottomTab,
-  NodeKey,
-  WaveformKey,
-  WaveformRow,
-} from "../composables/useEditorState";
+import type { BottomTab, WaveformKey, WaveformRow } from "../composables/useEditorState";
 import type { EditorConnectionId } from "../editor";
+import type { InspectorModel } from "../editor/inspector";
 import type { WaveformPoint, WorkspaceEngineState } from "../workspace";
 
 interface OutputItem {
@@ -22,21 +18,21 @@ defineProps<{
   waveform: readonly WaveformPoint[];
   simulationStep: number;
   outputs: readonly OutputItem[];
-  selectedNodeName: string;
-  selectedNode: NodeKey | null;
+  selectedComponentName: string;
   selectedConnection: EditorConnectionId | null;
-  selectedNodeId: string | null;
-  selectedNodeValue: Signal;
-  selectedNodeDescription: string;
+  selectedObjectId: string | null;
+  selectedComponentValue: Signal;
+  selectedComponentDescription: string;
   showDetails: boolean;
   engineState: WorkspaceEngineState;
   engineName: string;
   operationError: string | null;
+  inspector: InspectorModel;
 }>();
 
 const emit = defineEmits<{
   selectTab: [tab: BottomTab];
-  selectNode: [node: NodeKey];
+  selectComponent: [componentId: string];
   toggleDetails: [];
 }>();
 
@@ -60,15 +56,25 @@ function waveformValue(point: WaveformPoint, key: WaveformKey): Signal {
       <button type="button" :class="{ 'bottom-tab--active': bottomTab === 'waveform' }" :disabled="!waveform.length" @click="emit('selectTab', 'waveform')">波形 <span class="tab-count">{{ waveform.length }}</span></button>
     </div>
     <div v-if="bottomTab === 'inspector'" class="bottom-content bottom-content--inspector" aria-live="polite">
-      <div class="bottom-inspector-heading"><div><span class="eyebrow">INSPECTOR</span><strong>{{ selectedNodeName }}</strong></div><span class="inspector-kind">{{ selectedConnection ? "WIRE" : selectedNode === "andGate" ? "LOGIC" : "NODE" }}</span></div>
-      <p>{{ selectedNodeDescription }}</p>
-      <div class="inspector-value"><span>当前值</span><strong :class="signalClass(selectedNodeValue)">{{ selectedNodeValue }}</strong></div>
-      <button class="details-button" type="button" @click="emit('toggleDetails')">{{ showDetails ? "收起详细信息" : "显示详细信息" }} <span aria-hidden="true">{{ showDetails ? "⌃" : "⌄" }}</span></button>
-      <div v-if="showDetails" class="inspector-details"><span>端口：{{ selectedConnection ? "source → target" : selectedNode === null ? "—" : selectedNode === "andGate" ? "in1 / in2 / out" : selectedNode === "output" ? "in" : "out" }}</span><span>编辑器 ID：{{ selectedNodeId ?? "—" }}</span></div>
+      <template v-if="inspector?.kind === 'component'">
+        <div class="bottom-inspector-heading"><div><span class="eyebrow">COMPONENT</span><strong>{{ inspector.displayName }}</strong></div><span class="inspector-kind">{{ inspector.type }}</span></div>
+        <div class="inspector-copy"><p>{{ inspector.behavior }}</p><span>类型：{{ inspector.type }}</span></div>
+        <div class="inspector-value"><span>当前信号</span><strong :class="signalClass(inspector.signal)">{{ inspector.signal }}</strong></div>
+        <div class="inspector-port-list" aria-label="端口信号">
+          <span v-for="port in inspector.ports" :key="port.id" class="inspector-port-row"><span>{{ port.direction === 'input' ? '输入' : '输出' }} · {{ port.name }}</span><strong :class="signalClass(port.signal)">{{ port.signal }}</strong><small>{{ port.connectionState === 'connected' ? '已连接' : port.connectionState === 'dangling' ? '悬空' : '未连接' }}</small></span>
+        </div>
+      </template>
+      <template v-else-if="inspector?.kind === 'wire'">
+        <div class="bottom-inspector-heading"><div><span class="eyebrow">WIRE</span><strong>选中 Wire</strong></div><span class="inspector-kind">{{ inspector.status === 'dangling' ? '悬空' : '正常' }}</span></div>
+        <div class="inspector-copy"><p>起点端口：{{ inspector.source.port }}</p><p>终点端口：{{ inspector.target.port }}</p></div>
+        <div class="inspector-value"><span>当前信号</span><strong :class="signalClass(inspector.signal)">{{ inspector.signal }}</strong></div>
+        <div class="inspector-details"><span>状态：{{ inspector.status === 'dangling' ? '悬空' : '正常' }}</span><span>Waypoint 数：{{ inspector.waypointCount }}</span></div>
+      </template>
+      <div v-else class="inspector-empty"><strong>未选择对象</strong><span>选择一个 Component 或 Wire 查看只读详情。</span></div>
     </div>
     <div v-else-if="bottomTab === 'outputs'" class="bottom-content bottom-content--outputs" aria-live="polite">
       <div class="output-panel-heading"><div><span class="eyebrow">OUTPUT MONITOR</span><strong>当前电路输出</strong></div><span>{{ outputs.length }} 个输出</span></div>
-      <div class="output-list"><button v-for="output in outputs" :key="output.key" class="output-readout" type="button" @click="emit('selectNode', 'output')"><span class="output-readout-symbol" :class="signalClass(output.value)">OUT</span><span class="output-readout-copy"><strong>{{ output.label }}</strong><small>{{ output.description }}</small></span><b :class="signalClass(output.value)">{{ output.value }}</b></button></div>
+      <div class="output-list"><button v-for="output in outputs" :key="output.key" class="output-readout" type="button" @click="emit('selectComponent', output.key)"><span class="output-readout-symbol" :class="signalClass(output.value)">OUT</span><span class="output-readout-copy"><strong>{{ output.label }}</strong><small>{{ output.description }}</small></span><b :class="signalClass(output.value)">{{ output.value }}</b></button></div>
       <div class="bottom-engine"><span class="engine-indicator" :class="`engine-indicator--${engineState}`"></span><span>{{ engineName }}</span></div>
     </div>
     <div v-else class="bottom-content bottom-content--waveform">

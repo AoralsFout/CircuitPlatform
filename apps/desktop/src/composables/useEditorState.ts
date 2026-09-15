@@ -1,18 +1,39 @@
-import { computed, ref, type DeepReadonly, type Ref } from "vue";
-import type { Signal } from "@circuit-platform/protocol";
-import type { EditorComponentId, EditorConnectionId, EditorSelection, EditorSnapshot } from "../editor";
+import { computed, ref, watch, type DeepReadonly, type Ref } from "vue";
+import type { ComponentKindName, Signal } from "@circuit-platform/protocol";
+import type { EditorComponentId, EditorConnectionId, EditorSelection, EditorSnapshot, Point } from "../editor";
 import type { InputKey, WorkspaceSnapshot } from "../workspace";
+import {
+  createComponentDefinitionRegistry,
+  createCanvasSceneProjector,
+  createFrameCoalescer,
+  createNodeDragController,
+  createRouteEditController,
+  createViewportState,
+  emptyCanvasScene,
+  fitViewportToBounds,
+  resizeViewport,
+  setViewportZoomAt,
+  type InteractionState,
+  type ViewportState,
+} from "../canvas";
+import { createInspectorModel, type InspectorModel } from "../editor/inspector.ts";
+import {
+  readRecentComponentKinds,
+  writeRecentComponentKind,
+} from "../editor/component-menu";
+import { positionFromPlacementCenter } from "../editor/placement.ts";
+import {
+  connectionDraftRoute,
+  createConnectionDraft,
+  reduceConnectionDraft,
+  type ConnectionDraftPort,
+  type ConnectionDraftState,
+} from "../editor/connection-draft.ts";
+import { createSimulationSnapshot } from "../editor/simulation.ts";
 
-export type NodeKey = "inputA" | "inputB" | "andGate" | "output";
 export type RailPage = "components" | "inputs" | "layers" | "settings";
 export type BottomTab = "inspector" | "outputs" | "waveform";
 export type WaveformKey = "a" | "b" | "output";
-export type WireKey = "wireA" | "wireB" | "wireOutput";
-
-export interface WireDanglingState {
-  source: boolean;
-  target: boolean;
-}
 
 export interface WaveformRow {
   label: string;
@@ -25,20 +46,6 @@ const waveformRows: readonly WaveformRow[] = [
   { label: "输出", key: "output" },
 ];
 
-const editorIdByNode: Record<NodeKey, EditorComponentId> = {
-  inputA: "input-a",
-  inputB: "input-b",
-  andGate: "and-gate",
-  output: "output",
-};
-
-const nodeByEditorId: Record<EditorComponentId, NodeKey | undefined> = {
-  "input-a": "inputA",
-  "input-b": "inputB",
-  "and-gate": "andGate",
-  output: "output",
-};
-
 /**
  * 管理只属于编辑器界面的选择、布局与缩放状态，并从工作区快照派生展示数据。
  * @param workspaceState 只读的工作区行为快照。
@@ -50,112 +57,247 @@ export function useEditorState(
   workspaceState: DeepReadonly<Ref<WorkspaceSnapshot>>,
   editorState: DeepReadonly<Ref<EditorSnapshot | null>>,
   selectEditor: (selection: EditorSelection) => Promise<void>,
+  moveComponent: (componentId: EditorComponentId, position: Point) => Promise<void> = async () => undefined,
+  updatePlacement?: (center: Point, altKey?: boolean) => Promise<void>,
+  editRoute: (connectionId: EditorConnectionId, route: readonly Point[]) => Promise<void> = async () => undefined,
+  createConnection: (left: ConnectionDraftPort, right: ConnectionDraftPort, route?: readonly Point[], connectionId?: string) => Promise<{ ok: boolean; error?: string }> = async () => ({ ok: false }),
 ) {
   const showDetails = ref(false);
   const showSidebar = ref(true);
   const activeRailPage = ref<RailPage>("components");
   const bottomTab = ref<BottomTab>("outputs");
-  const zoom = ref(100);
-
-  const componentVisibility = computed<Record<NodeKey, boolean>>(() => ({
-    inputA: editorState.value?.document.components.some((component) => component.id === "input-a") ?? false,
-    inputB: editorState.value?.document.components.some((component) => component.id === "input-b") ?? false,
-    andGate: editorState.value?.document.components.some((component) => component.id === "and-gate") ?? false,
-    output: editorState.value?.document.components.some((component) => component.id === "output") ?? false,
-  }));
-  const wireVisibility = computed<Record<WireKey, boolean>>(() => ({
-    wireA: editorState.value?.document.connections.some((connection) => connection.id === "wire-a") ?? false,
-    wireB: editorState.value?.document.connections.some((connection) => connection.id === "wire-b") ?? false,
-    wireOutput: editorState.value?.document.connections.some((connection) => connection.id === "wire-output") ?? false,
-  }));
-  const wireDangling = computed<Record<WireKey, WireDanglingState>>(() => {
-    const connectionState = (id: string): WireDanglingState => {
-      const connection = editorState.value?.document.connections.find((item) => item.id === id);
-      return {
-        source: connection?.danglingEndpoints.includes("source") ?? false,
-        target: connection?.danglingEndpoints.includes("target") ?? false,
+  // 视口是临时交互状态，独立于 EditorDocument，因此不会进入撤销或项目持久化。
+  const viewportState = ref(createViewportState());
+  const hasFittedInitialScene = ref(false);
+  const zoom = computed({
+    get: () => Math.round(viewportState.value.zoom * 100),
+    set: (value: number) => {
+      const center = {
+        x: viewportState.value.visibleRect.width / 2,
+        y: viewportState.value.visibleRect.height / 2,
       };
-    };
+      viewportState.value = setViewportZoomAt(viewportState.value, value / 100, center);
+    },
+  });
+  const registry = createComponentDefinitionRegistry();
+  const sceneProjector = createCanvasSceneProjector(registry);
+  let recentStorage: Storage | null = null;
+  try {
+    recentStorage = typeof window === "undefined" ? null : window.localStorage;
+  } catch {
+    // 浏览器禁用持久化时，最近使用仍保存在当前内存会话中。
+  }
+  const recentComponentKinds = ref(readRecentComponentKinds(recentStorage, registry.list()));
+  const draggingComponentId = ref<EditorComponentId | null>(null);
+  const dragPreview = ref<{ componentId: EditorComponentId; position: Point } | null>(null);
+  const dragController = createNodeDragController({
+    onPreview(preview) {
+      dragPreview.value = { componentId: preview.nodeId, position: { ...preview.position } };
+    },
+    onCommit(preview) {
+      void moveComponent(preview.nodeId, preview.position).finally(() => {
+        draggingComponentId.value = null;
+        dragPreview.value = null;
+      });
+    },
+    onCancel() {
+      draggingComponentId.value = null;
+      dragPreview.value = null;
+    },
+  });
+  const routeEditPreview = ref<{ connectionId: string; route: readonly Point[] } | null>(null);
+  const connectionDraft = ref<ConnectionDraftState>(createConnectionDraft());
+  const connectionMoveCoalescer = createFrameCoalescer<{ point: Point; altKey: boolean }>(({ point, altKey }) => {
+    connectionDraft.value = reduceConnectionDraft(connectionDraft.value, { type: "move", point, altKey });
+  });
+  // 键盘焦点是临时的 DOM 导航状态，不能从 EditorSnapshot 的选择状态推导。
+  const focusedId = ref<string | null>(null);
+  const routeEditController = createRouteEditController({
+    onPreview(preview) {
+      routeEditPreview.value = preview;
+    },
+    onCommit(preview) {
+      void editRoute(preview.connectionId, preview.route).finally(() => {
+        routeEditPreview.value = null;
+      });
+    },
+    onCancel() {
+      routeEditPreview.value = null;
+    },
+  });
+  const previewPositions = computed<Readonly<Record<string, Point>>>(() => {
+    const preview = dragPreview.value;
+    return preview ? { [preview.componentId]: { ...preview.position } } : {};
+  });
+  const previewRoutes = computed<Readonly<Record<string, readonly Point[]>> | undefined>(() => {
+    const preview = routeEditPreview.value;
+    return preview ? { [preview.connectionId]: preview.route } : undefined;
+  });
+
+  const canvasScene = computed(() => {
+    const snapshot = editorState.value;
+    if (!snapshot) return emptyCanvasScene();
+    const simulation = createSimulationSnapshot(snapshot, registry, { inputA: workspaceState.value.inputA, inputB: workspaceState.value.inputB, output: workspaceState.value.outputValue });
+    return sceneProjector.project(snapshot, simulation, previewPositions.value, previewRoutes.value);
+  });
+  const inspector = computed<InspectorModel>(() => createInspectorModel(
+    canvasScene.value,
+    editorState.value?.selection ?? null,
+    registry,
+  ));
+  const viewport = computed<ViewportState>(() => viewportState.value);
+  const interaction = computed<InteractionState>(() => {
+    if (workspaceState.value.engineState !== "ready") {
+      return { focusedId: focusedId.value, draggingComponentId: null, dragPreview: null, connectionDraft: null, routeEditPreview: null, emptyState: { title: "等待仿真引擎", message: workspaceState.value.message } };
+    }
+    if (!workspaceState.value.hasLab) {
+      return { focusedId: focusedId.value, draggingComponentId: null, dragPreview: null, connectionDraft: null, routeEditPreview: null, emptyState: { title: "正在准备示例电路", message: workspaceState.value.message } };
+    }
+    if (!editorState.value) {
+      return { focusedId: focusedId.value, draggingComponentId: null, dragPreview: null, connectionDraft: null, routeEditPreview: null, emptyState: { title: "还没有电路", message: "从左侧选择一个元件，或加载一份示例电路开始。" } };
+    }
+    if (editorState.value.document.components.length === 0 && !editorState.value.pendingPlacement) {
+      return { focusedId: focusedId.value, draggingComponentId: null, dragPreview: null, connectionDraft: null, emptyState: { title: "还没有电路", message: "从左侧选择一个元件，或加载一份示例电路开始。" } };
+    }
+    const pending = editorState.value.pendingPlacement;
+    const definition = pending ? registry.get(pending.kind) : undefined;
     return {
-      wireA: connectionState("wire-a"),
-      wireB: connectionState("wire-b"),
-      wireOutput: connectionState("wire-output"),
+      focusedId: focusedId.value,
+      draggingComponentId: draggingComponentId.value,
+      dragPreview: dragPreview.value,
+      connectionDraft: connectionDraft.value.origin ? connectionDraftRoute(connectionDraft.value) : null,
+      connectionDraftError: connectionDraft.value.error?.message ?? null,
+      routeEditPreview: routeEditPreview.value,
+      pendingPlacement: pending && pending.center && definition
+        ? { kind: pending.kind, position: positionFromPlacementCenter(pending.center, definition.size, pending.altKey), size: definition.size, error: editorState.value.error?.message ?? null }
+        : null,
     };
   });
-  const selectedNode = computed<NodeKey | null>(() => {
+
+  /** 从任意方向的端口开始临时连接；提交前不会改动 EditorDocument。 */
+  function startConnection(port: ConnectionDraftPort): void {
+    if (editorState.value?.pendingPlacement || editorState.value?.operation !== "idle") return;
+    connectionMoveCoalescer.cancel();
+    const connectionId = editorState.value.document.connections.find((connection) => {
+      const endpointMatches = (endpoint: { componentId: string; port: string }): boolean => endpoint.componentId === port.componentId && endpoint.port === port.port;
+      return connection.lifecycle === "visible" && (
+        (port.direction === "input" && endpointMatches(connection.target)) ||
+        connection.danglingEndpoints.some((side) => endpointMatches(side === "source" ? connection.source : connection.target))
+      );
+    })?.id;
+    connectionDraft.value = reduceConnectionDraft(connectionDraft.value, { type: "start", port, connectionId });
+  }
+
+  /** 更新草稿指针预览；不创建快照或历史记录。 */
+  function moveConnection(point: Point, altKey = false): void {
+    connectionMoveCoalescer.schedule({ point: { ...point }, altKey });
+  }
+
+  /** 点击或拖拽释放到空白处时保留一个首个 Waypoint，继续点击式布线。 */
+  function placeConnectionWaypoint(point: Point, altKey = false): void {
+    connectionMoveCoalescer.flush();
+    connectionDraft.value = reduceConnectionDraft(connectionDraft.value, { type: "place-waypoint", point, altKey });
+  }
+
+  /** 释放到端口时提交一个结构事务；失败保留草稿和用户 Route。 */
+  async function finishConnection(port: ConnectionDraftPort): Promise<void> {
+    connectionMoveCoalescer.flush();
+    const draft = connectionDraft.value;
+    if (!draft.origin) return;
+    const route = connectionDraftRoute(draft, port);
+    // 输出端拖到已占用输入时也自动进入重接模式；输入端起笔时 connectionId 已在 startConnection 标记。
+    const targetConnectionId = editorState.value?.document.connections.find((connection) =>
+      connection.lifecycle === "visible" && connection.target.componentId === (draft.origin?.direction === "input" ? draft.origin.componentId : port.componentId) &&
+      connection.target.port === (draft.origin?.direction === "input" ? draft.origin.port : port.port),
+    )?.id;
+    const result = await createConnection(draft.origin, port, route, draft.connectionId ?? targetConnectionId);
+    if (result.ok) {
+      connectionDraft.value = createConnectionDraft();
+    } else {
+      connectionDraft.value = reduceConnectionDraft(connectionDraft.value, {
+        type: "fail",
+        error: { code: "engine-failed", message: result.error ?? "连接提交失败。" },
+      });
+    }
+  }
+
+  /** Space 在布线期间只切换当前段轴向；Esc 由工作区命令清除草稿。 */
+  function toggleConnectionAxis(): void {
+    connectionMoveCoalescer.flush();
+    connectionDraft.value = reduceConnectionDraft(connectionDraft.value, { type: "toggle-axis" });
+  }
+
+  /** 键盘 Backspace 退回最近一个临时折点；不触碰历史记录或持久文档。 */
+  function removeConnectionWaypoint(): void {
+    connectionMoveCoalescer.flush();
+    connectionDraft.value = reduceConnectionDraft(connectionDraft.value, { type: "remove-waypoint" });
+  }
+
+  function cancelConnection(): void {
+    connectionMoveCoalescer.cancel();
+    connectionDraft.value = reduceConnectionDraft(connectionDraft.value, { type: "cancel" });
+  }
+
+  /** 记录画布当前键盘焦点；焦点与单对象选择保持独立。 */
+  function focusCanvasObject(id: string | null): void {
+    focusedId.value = id;
+  }
+
+  const sidebarComponents = computed(() => editorState.value?.document.components.map((component) => ({
+    id: component.id,
+    kind: component.kind,
+    displayName: component.displayName,
+    selected: editorState.value?.selection?.kind === "component" && editorState.value.selection.id === component.id,
+  })) ?? []);
+  const selectedComponentId = computed<EditorComponentId | null>(() => {
     const selection = editorState.value?.selection;
-    return selection?.kind === "component" ? nodeByEditorId[selection.id] ?? null : null;
+    return selection?.kind === "component" ? selection.id : null;
   });
   const selectedConnection = computed<EditorConnectionId | null>(() => {
     const selection = editorState.value?.selection;
     return selection?.kind === "connection" ? selection.id : null;
   });
-  const inputControls = computed(() => [
-    {
-      key: "a" as InputKey,
-      label: "输入 A",
-      value: workspaceState.value.inputA,
-      node: "inputA" as NodeKey,
-    },
-    {
-      key: "b" as InputKey,
-      label: "输入 B",
-      value: workspaceState.value.inputB,
-      node: "inputB" as NodeKey,
-    },
-  ].filter((input) => componentVisibility.value[input.node]));
-  const outputs = computed(() => [
-    {
-      key: "output",
-      label: "输出",
-      value: workspaceState.value.outputValue,
-      description: workspaceState.value.outputDescription,
-    },
-  ].filter(() => componentVisibility.value.output));
+  const inputControls = computed(() => canvasScene.value.nodes.filter((node) => node.kind === "input").slice(0, 2).map((node, index) => ({
+    key: (index === 0 ? "a" : "b") as InputKey,
+    label: node.displayName,
+    value: (index === 0 ? workspaceState.value.inputA : workspaceState.value.inputB) as 0 | 1,
+    componentId: node.id,
+  })));
+  const outputs = computed(() => canvasScene.value.nodes.filter((node) => node.kind === "output").map((node) => ({
+    key: node.id,
+    label: node.displayName,
+    value: node.ports.find((port) => port.direction === "input")?.signal ?? workspaceState.value.outputValue,
+    description: node.description,
+  })));
   const engineStateLabel = computed(() => {
     if (workspaceState.value.engineState === "ready") return "引擎在线";
     if (workspaceState.value.engineState === "unavailable") return "引擎不可用";
     if (workspaceState.value.engineState === "error") return "连接失败";
     return "连接中";
   });
-  const selectedNodeName = computed(() => {
-    if (selectedConnection.value === "wire-a") return "输入 A → AND";
-    if (selectedConnection.value === "wire-b") return "输入 B → AND";
-    if (selectedConnection.value === "wire-output") return "AND → 输出";
-    if (selectedNode.value === null) return "未选择";
-    if (selectedNode.value === "inputA") return "输入 A";
-    if (selectedNode.value === "inputB") return "输入 B";
-    if (selectedNode.value === "andGate") return "AND 门";
-    return "输出";
-  });
-  const selectedNodeValue = computed<Signal>(() => {
-    if (selectedConnection.value === "wire-a") return workspaceState.value.inputA;
-    if (selectedConnection.value === "wire-b") return workspaceState.value.inputB;
-    if (selectedConnection.value === "wire-output") return workspaceState.value.outputValue;
-    if (selectedNode.value === null) return "X";
-    if (selectedNode.value === "inputA") return workspaceState.value.inputA;
-    if (selectedNode.value === "inputB") return workspaceState.value.inputB;
-    return workspaceState.value.outputValue;
-  });
-  const selectedNodeDescription = computed(() => {
-    if (selectedConnection.value) return "选择的视觉连线；按 Delete 或 Backspace 可单独删除。";
-    if (selectedNode.value === null) return "在画布或层级面板中选择一个元件。";
-    if (selectedNode.value === "inputA" || selectedNode.value === "inputB") {
-      return "点击开关或画布节点，改变这个输入值。";
-    }
-    if (selectedNode.value === "andGate") return "两个输入都为 1 时，输出才为 1。";
-    return workspaceState.value.outputDescription;
-  });
-  const selectedNodeId = computed(() => selectedConnection.value ?? (selectedNode.value ? editorIdByNode[selectedNode.value] : null));
+  const selectedComponent = computed(() => canvasScene.value.nodes.find((node) => node.id === selectedComponentId.value));
+  const selectedComponentName = computed(() => selectedConnection.value ? `Wire ${selectedConnection.value}` : selectedComponent.value?.displayName ?? "未选择");
+  const selectedComponentValue = computed<Signal>(() => selectedConnection.value ? canvasScene.value.wires.find((wire) => wire.id === selectedConnection.value)?.signal ?? "X" : selectedComponent.value?.ports.find((port) => port.direction === "output")?.signal ?? selectedComponent.value?.ports[0]?.signal ?? "X");
+  const selectedComponentDescription = computed(() => selectedConnection.value ? "选择的视觉连线；按 Delete 或 Backspace 可单独删除。" : selectedComponent.value?.description ?? "在画布或侧栏中选择一个 Component。");
+  const selectedObjectId = computed(() => selectedConnection.value ?? selectedComponentId.value);
   const zoomLabel = computed(() => `${zoom.value}%`);
 
-  function selectNode(node: NodeKey): void {
-    if (!componentVisibility.value[node]) return;
-    void selectEditor({ kind: "component", id: editorIdByNode[node] });
+  function selectComponent(componentId: EditorComponentId): void {
+    if (!editorState.value?.document.components.some((component) => component.id === componentId)) return;
+    void selectEditor({ kind: "component", id: componentId });
   }
 
   function selectConnection(connectionId: EditorConnectionId): void {
     void selectEditor({ kind: "connection", id: connectionId });
+  }
+
+  function placementMoved(center: Point, altKey = false): void {
+    void updatePlacement?.(center, altKey);
+  }
+
+  /** 记录已成功添加的类型；失败的引擎命令不会经过此入口。 */
+  function rememberComponentKind(kind: ComponentKindName): void {
+    recentComponentKinds.value = writeRecentComponentKind(recentStorage, recentComponentKinds.value, kind);
   }
 
   function selectRailPage(page: RailPage): void {
@@ -164,15 +306,76 @@ export function useEditorState(
   }
 
   function adjustZoom(delta: number): void {
-    zoom.value = Math.min(140, Math.max(60, zoom.value + delta));
+    zoom.value = zoom.value + delta;
   }
 
+  /** 让整个场景在当前画布中居中显示；只改变视口，不创建编辑器历史记录。 */
+  function fitViewport(): void {
+    viewportState.value = fitViewportToBounds(viewportState.value, canvasScene.value.bounds);
+  }
+
+  /** 在 DOM 尺寸变化时更新视口，保持原视口中心的世界坐标不变。 */
+  function resizeCanvas(width: number, height: number): void {
+    viewportState.value = resizeViewport(viewportState.value, { width, height });
+  }
+
+  /** 开始 Component 临时拖动；只更新 InteractionState，不创建编辑器快照。 */
+  function startNodeDrag(nodeId: EditorComponentId, pointerWorld: Point): void {
+    const node = canvasScene.value.nodes.find((candidate) => candidate.id === nodeId);
+    if (!node) return;
+    draggingComponentId.value = nodeId;
+    dragPreview.value = { componentId: nodeId, position: { ...node.position } };
+    dragController.start(nodeId, node.position, pointerWorld);
+  }
+
+  /** 合并 pointer move 到下一帧，并按世界坐标网格预览 Component 与 Wire。 */
+  function moveNodeDrag(pointerWorld: Point, altKey = false): void {
+    dragController.move(pointerWorld, altKey);
+  }
+
+  /** 结束节点拖动；实际位移只提交一个布局历史命令。 */
+  function endNodeDrag(): void {
+    dragController.end();
+  }
+
+  /** 取消节点拖动；不提交历史。 */
+  function cancelNodeDrag(): void {
+    dragController.cancel();
+  }
+
+  /** 开始一个 Wire 折点/线段的临时拖动。 */
+  function startRouteEdit(connectionId: string, route: readonly Point[], target: Parameters<typeof routeEditController.start>[2], pointerWorld: Point): void {
+    routeEditController.start(connectionId, route, target, pointerWorld);
+  }
+
+  /** 合并 Wire pointer move，并在释放时提交一次 Route 历史命令。 */
+  function moveRouteEdit(pointerWorld: Point, altKey = false): void {
+    routeEditController.move(pointerWorld, altKey);
+  }
+
+  function endRouteEdit(): void {
+    routeEditController.end();
+  }
+
+  function cancelRouteEdit(): void {
+    routeEditController.cancel();
+  }
+
+  /** 应用画布交互层计算出的新视口；不会触碰编辑器文档或历史栈。 */
+  function setViewport(next: ViewportState): void {
+    viewportState.value = next;
+  }
+
+  watch(canvasScene, (scene) => {
+    if (hasFittedInitialScene.value || scene.nodes.length === 0) return;
+    hasFittedInitialScene.value = true;
+    viewportState.value = fitViewportToBounds(viewportState.value, scene.bounds);
+  }, { immediate: true });
+
   return {
-    selectedNode,
     selectedConnection,
-    componentVisibility,
-    wireVisibility,
-    wireDangling,
+    sidebarComponents,
+    selectedComponentId,
     showDetails,
     showSidebar,
     activeRailPage,
@@ -182,14 +385,42 @@ export function useEditorState(
     inputControls,
     outputs,
     engineStateLabel,
-    selectedNodeName,
-    selectedNodeValue,
-    selectedNodeDescription,
-    selectedNodeId,
+    selectedComponentName,
+    selectedComponentValue,
+    selectedComponentDescription,
+    selectedObjectId,
     zoomLabel,
-    selectNode,
+    canvasScene,
+    inspector,
+    viewport,
+    interaction,
+    componentDefinitions: registry.list(),
+    recentComponentKinds,
+    rememberComponentKind,
+    selectComponent,
     selectConnection,
     selectRailPage,
     adjustZoom,
+    fitViewport,
+    resizeCanvas,
+    setViewport,
+    startNodeDrag,
+    moveNodeDrag,
+    endNodeDrag,
+    cancelNodeDrag,
+    startRouteEdit,
+    moveRouteEdit,
+    endRouteEdit,
+    cancelRouteEdit,
+    placementMoved,
+    connectionDraft,
+    startConnection,
+    moveConnection,
+    placeConnectionWaypoint,
+    finishConnection,
+    toggleConnectionAxis,
+    removeConnectionWaypoint,
+    cancelConnection,
+    focusCanvasObject,
   };
 }
