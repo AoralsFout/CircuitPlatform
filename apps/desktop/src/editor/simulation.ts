@@ -6,6 +6,7 @@ export interface SimulationDisplayInputs {
   inputA: 0 | 1;
   inputB: 0 | 1;
   output: Signal;
+  inputValues?: Readonly<Record<string, 0 | 1>>;
 }
 
 /**
@@ -29,7 +30,7 @@ export function createSimulationSnapshot(
     for (const port of definition.ports) {
       const key = `${component.id}:${port.id}`;
       if (component.kind === "input" && port.direction === "output") {
-        signals[key] = inputIndex === 0 ? values.inputA : inputIndex === 1 ? values.inputB : 0;
+        signals[key] = values.inputValues?.[component.id] ?? (inputIndex === 0 ? values.inputA : inputIndex === 1 ? values.inputB : 0);
       } else if (component.kind === "output" && port.direction === "input") {
         signals[key] = values.output;
       } else {

@@ -206,10 +206,11 @@ export function applyWheelViewport(
     const factor = Math.exp(-delta.y * zoomSensitivity);
     return zoomViewportAt(state, factor, pointer);
   }
+  // 浏览器的正 deltaY 表示内容向下滚；画布内容需要向上移才能保持滚动直觉。
   if (input.shiftKey) {
-    return panViewport(state, { x: delta.y || delta.x, y: 0 });
+    return panViewport(state, { x: -(delta.y || delta.x), y: 0 });
   }
-  return panViewport(state, { x: 0, y: delta.y || delta.x });
+  return panViewport(state, { x: 0, y: -(delta.y || delta.x) });
 }
 
 /** `applyWheelViewport` 的交互层别名。 */

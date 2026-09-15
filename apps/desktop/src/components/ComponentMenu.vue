@@ -104,7 +104,7 @@ focusSearch();
 </script>
 
 <template>
-  <section class="component-menu" role="menu" aria-label="添加元件" @keydown="onKeydown">
+  <section class="component-menu" role="menu" aria-label="添加元件" @keydown="onKeydown" @wheel.stop>
     <div class="component-menu__heading">
       <div><span class="eyebrow">ADD / COMPONENT</span><strong>添加元件</strong></div>
       <button type="button" class="component-menu__close" aria-label="关闭元件菜单" @click="emit('close')">×</button>

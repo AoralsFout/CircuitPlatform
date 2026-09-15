@@ -36,3 +36,13 @@ test("canvas exposes non-color state hooks for ports and wires", async () => {
   assert.match(canvas, />重试</);
   assert.match(canvas, />取消</);
 });
+
+test("canvas menus consume wheel events and nodes expose only their type label", async () => {
+  const canvas = await readFile(join(desktopRoot, "src", "components", "CircuitCanvas.vue"), "utf8");
+  const menu = await readFile(join(desktopRoot, "src", "components", "ComponentMenu.vue"), "utf8");
+  assert.match(menu, /@wheel\.stop/);
+  assert.match(canvas, /class="object-context-menu"[\s\S]*@wheel\.stop/);
+  assert.match(canvas, /<strong>\{\{ node\.kind\.toUpperCase\(\) \}\}<\/strong>/);
+  assert.doesNotMatch(canvas, /<span class="node-tag">\{\{ node\.kind/);
+  assert.doesNotMatch(canvas, /<span class="node-description">\{\{ node\.description \}\}<\/span>/);
+});

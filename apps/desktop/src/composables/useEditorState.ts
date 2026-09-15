@@ -137,7 +137,7 @@ export function useEditorState(
   const canvasScene = computed(() => {
     const snapshot = editorState.value;
     if (!snapshot) return emptyCanvasScene();
-    const simulation = createSimulationSnapshot(snapshot, registry, { inputA: workspaceState.value.inputA, inputB: workspaceState.value.inputB, output: workspaceState.value.outputValue });
+    const simulation = createSimulationSnapshot(snapshot, registry, { inputA: workspaceState.value.inputA, inputB: workspaceState.value.inputB, inputValues: workspaceState.value.inputValues, output: workspaceState.value.outputValue });
     return sceneProjector.project(snapshot, simulation, previewPositions.value, previewRoutes.value);
   });
   const inspector = computed<InspectorModel>(() => createInspectorModel(
@@ -257,10 +257,11 @@ export function useEditorState(
     const selection = editorState.value?.selection;
     return selection?.kind === "connection" ? selection.id : null;
   });
-  const inputControls = computed(() => canvasScene.value.nodes.filter((node) => node.kind === "input").slice(0, 2).map((node, index) => ({
-    key: (index === 0 ? "a" : "b") as InputKey,
+  const inputControls = computed(() => canvasScene.value.nodes.filter((node) => node.kind === "input").map((node, index) => ({
+    key: node.id as InputKey,
+    index: index + 1,
     label: node.displayName,
-    value: (index === 0 ? workspaceState.value.inputA : workspaceState.value.inputB) as 0 | 1,
+    value: (workspaceState.value.inputValues[node.id] ?? (index === 0 ? workspaceState.value.inputA : index === 1 ? workspaceState.value.inputB : 0)) as 0 | 1,
     componentId: node.id,
   })));
   const outputs = computed(() => canvasScene.value.nodes.filter((node) => node.kind === "output").map((node) => ({

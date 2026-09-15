@@ -6,6 +6,7 @@ import type { InputKey } from "../workspace";
 
 interface InputControl {
   key: InputKey;
+  index: number;
   label: string;
   value: 0 | 1;
   componentId: string | null;
@@ -61,7 +62,7 @@ function startComponentDrag(event: DragEvent, kind: ComponentKindName): void {
       <div class="sidebar-section-title"><span>当前输入</span><span class="component-count">{{ inputControls.length }}</span></div>
       <div class="input-settings-list">
         <button v-for="input in inputControls" :key="input.key" class="input-setting" :class="{ 'input-setting--on': input.value === 1 }" type="button" :disabled="!canRun" @click="emit('toggleInput', input.key)">
-          <span class="input-setting-id">{{ input.key.toUpperCase() }}</span>
+          <span class="input-setting-id">IN {{ input.index }}</span>
           <span class="input-setting-copy"><strong>{{ input.label }}</strong><small>SOURCE / 1 bit</small></span>
           <span class="input-setting-value">{{ input.value }}</span>
         </button>

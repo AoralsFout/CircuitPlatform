@@ -24,8 +24,8 @@ test("world and screen coordinates round trip through one transform", () => {
 test("wheel and pointer gestures pan on the expected axis", () => {
   const viewport = createViewportState({ width: 800, height: 500 });
   assert.deepEqual(panViewport(viewport, { x: 12, y: -8 }).visibleRect, viewport.visibleRect);
-  assert.equal(applyWheelViewport(viewport, { deltaX: 0, deltaY: 50 }, { x: 400, y: 250 }).y, 50);
-  assert.equal(applyWheelViewport(viewport, { deltaX: 0, deltaY: 50, shiftKey: true }, { x: 400, y: 250 }).x, 50);
+  assert.equal(applyWheelViewport(viewport, { deltaX: 0, deltaY: 50 }, { x: 400, y: 250 }).y, -50);
+  assert.equal(applyWheelViewport(viewport, { deltaX: 0, deltaY: 50, shiftKey: true }, { x: 400, y: 250 }).x, -50);
   assert.equal(isViewportPanPointer(1, false), true);
   assert.equal(isViewportPanPointer(0, true), true);
   assert.equal(isViewportPanPointer(0, false), false);

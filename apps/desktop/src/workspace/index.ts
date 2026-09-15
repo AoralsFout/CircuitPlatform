@@ -1,6 +1,7 @@
 import type { ComponentKindName, EngineResponse, Signal } from "@circuit-platform/protocol";
 
-export type InputKey = "a" | "b";
+/** 输入设置项的稳定键；示例电路使用 a/b，通用编辑器使用 Component ID。 */
+export type InputKey = string;
 export type BinarySignal = 0 | 1;
 export type WorkspaceEngineState = "checking" | "ready" | "unavailable" | "error";
 export type SimulationState = "idle" | "running";
@@ -75,6 +76,8 @@ export interface WorkspaceSnapshot {
   simulationState: SimulationState;
   inputA: BinarySignal;
   inputB: BinarySignal;
+  /** 当前所有 Input Component 的值，键为工作区绑定中的编辑器 ID。 */
+  inputValues: Readonly<Record<InputKey, BinarySignal>>;
   outputValue: Signal;
   outputDescription: string;
   hasLab: boolean;
@@ -106,11 +109,22 @@ interface MutableState {
   simulationState: SimulationState;
   inputA: BinarySignal;
   inputB: BinarySignal;
+  inputValues: Record<InputKey, BinarySignal>;
   outputValue: Signal;
   hasLab: boolean;
-  labIds: LabIds | null;
+  runtimeBindings: RuntimeSimulationBindings | null;
   simulationStep: number;
   waveform: WaveformPoint[];
+}
+
+interface RuntimeInputBinding {
+  key: InputKey;
+  componentId: number;
+}
+
+interface RuntimeSimulationBindings {
+  inputs: readonly RuntimeInputBinding[];
+  output: number;
 }
 
 function isErrorResponse(response: EngineResponse): response is Extract<EngineResponse, { type: "error" }> {
@@ -136,7 +150,7 @@ function errorMessage(error: unknown, fallback: string): string {
 
 function outputDescription(value: Signal): string {
   if (value === "X") return "等待稳定求值";
-  return value === 1 ? "两个输入都为 1" : "至少一个输入为 0";
+  return value === 1 ? "所有输入都为 1" : "至少一个输入为 0";
 }
 
 function createInitialState(): MutableState {
@@ -149,9 +163,10 @@ function createInitialState(): MutableState {
     simulationState: "idle",
     inputA: 1,
     inputB: 1,
+    inputValues: {},
     outputValue: "X",
     hasLab: false,
-    labIds: null,
+    runtimeBindings: null,
     simulationStep: 0,
     waveform: [],
   };
@@ -168,16 +183,49 @@ function createWorkspaceSnapshot(state: MutableState): WorkspaceSnapshot {
     inputA: state.inputA,
     inputB: state.inputB,
     outputValue: state.outputValue,
+    inputValues: { ...state.inputValues },
     outputDescription: outputDescription(state.outputValue),
     hasLab: state.hasLab,
     simulationStep: state.simulationStep,
     waveform: state.waveform.map((point) => ({ ...point })),
     canRun:
       state.engineState === "ready" &&
-      state.labIds !== null &&
+      state.runtimeBindings !== null &&
       !state.isBusy &&
       state.simulationState === "idle",
   };
+}
+
+function runtimeBindingsFrom(ids: LabIds | SimulationBindings): RuntimeSimulationBindings | null {
+  if ("inputA" in ids) {
+    return {
+      inputs: [
+        { key: "a", componentId: ids.inputA },
+        { key: "b", componentId: ids.inputB },
+      ],
+      output: ids.output,
+    };
+  }
+
+  const inputs = Object.entries(ids.components)
+    .filter(([id, componentId]) => ids.componentKinds?.[id] === "input" && componentId !== undefined)
+    .map(([key, componentId]) => ({ key, componentId: componentId as number }));
+  const output = Object.entries(ids.components).find(([id, componentId]) => ids.componentKinds?.[id] === "output" && componentId !== undefined)?.[1];
+  const hasAndGate = Object.entries(ids.components).some(([id, componentId]) => ids.componentKinds?.[id] === "and" && componentId !== undefined);
+  if (inputs.length < 2 || output === undefined || !hasAndGate) return null;
+  return { inputs, output };
+}
+
+function valuesForBindings(
+  bindings: RuntimeSimulationBindings,
+  existing: Readonly<Record<InputKey, BinarySignal>>,
+  inputA: BinarySignal,
+  inputB: BinarySignal,
+): Record<InputKey, BinarySignal> {
+  return Object.fromEntries(bindings.inputs.map((binding, index) => [
+    binding.key,
+    existing[binding.key] ?? (index === 0 ? inputA : index === 1 ? inputB : 0),
+  ]));
 }
 
 /**
@@ -234,20 +282,25 @@ export function createWorkspace(adapter: EngineAdapter): Workspace {
   }
 
   async function runSimulationInternal(
-    ids: LabIds | null,
-    nextInputA = state.inputA,
-    nextInputB = state.inputB,
+    bindings: RuntimeSimulationBindings | null,
+    nextInputValues: Readonly<Record<InputKey, BinarySignal>> = state.inputValues,
   ): Promise<boolean> {
-    if (!ids) return false;
+    if (!bindings) return false;
     state.simulationState = "running";
     state.operationError = null;
     try {
-      expectResponse(await adapter.setInput(ids.inputA, nextInputA), "input_set");
-      expectResponse(await adapter.setInput(ids.inputB, nextInputB), "input_set");
+      const committedValues = bindings.inputs.map((binding) => ({
+        binding,
+        value: nextInputValues[binding.key] ?? 0,
+      }));
+      for (const { binding, value } of committedValues) {
+        expectResponse(await adapter.setInput(binding.componentId, value), "input_set");
+      }
       expectResponse(await adapter.settle(), "settled");
-      const result = expectResponse(await adapter.getSignal(ids.output, "in"), "signal_result");
-      state.inputA = nextInputA;
-      state.inputB = nextInputB;
+      const result = expectResponse(await adapter.getSignal(bindings.output, "in"), "signal_result");
+      state.inputValues = Object.fromEntries(committedValues.map(({ binding, value }) => [binding.key, value]));
+      state.inputA = committedValues[0]?.value ?? state.inputA;
+      state.inputB = committedValues[1]?.value ?? state.inputB;
       state.outputValue = result.value;
       state.simulationStep += 1;
       state.waveform.push({
@@ -296,10 +349,11 @@ export function createWorkspace(adapter: EngineAdapter): Workspace {
       const wireOutput = await addConnection(ids.andGate, "out", ids.output, "in");
       createdConnectionIds.push(wireOutput);
       const connections = { wireA, wireB, wireOutput };
-      state.labIds = ids;
+      state.runtimeBindings = runtimeBindingsFrom(ids);
+      state.inputValues = { a: state.inputA, b: state.inputB };
       state.hasLab = true;
       state.message = "示例已创建，试着切换输入 A 或输入 B。";
-      await runSimulationInternal(ids);
+      await runSimulationInternal(state.runtimeBindings);
       state.isBusy = false;
       const editor = { components: { "input-a": ids.inputA, "input-b": ids.inputB, "and-gate": ids.andGate, output: ids.output }, componentKinds: { "input-a": "input", "input-b": "input", "and-gate": "and", output: "output" } } satisfies SimulationBindings;
       const bindings = { components: { ...ids }, connections } as DemoRuntimeBindings;
@@ -324,37 +378,33 @@ export function createWorkspace(adapter: EngineAdapter): Workspace {
   }
 
   function rebindSimulation(ids: LabIds | SimulationBindings | null): WorkspaceSnapshot {
-    if (!ids) {
-      state.labIds = null;
-    } else if ("inputA" in ids) {
-      state.labIds = { ...ids };
-    } else {
-      const inputs = Object.entries(ids.components).filter(([id]) => ids.componentKinds?.[id] === "input").map(([, value]) => value).filter((value): value is number => value !== undefined);
-      const output = Object.entries(ids.components).find(([id]) => ids.componentKinds?.[id] === "output")?.[1];
-      const andGate = Object.entries(ids.components).find(([id]) => ids.componentKinds?.[id] === "and")?.[1];
-      state.labIds = inputs.length >= 2 && output !== undefined && andGate !== undefined ? { inputA: inputs[0]!, inputB: inputs[1]!, andGate, output } : null;
+    state.runtimeBindings = ids ? runtimeBindingsFrom(ids) : null;
+    if (state.runtimeBindings) {
+      state.inputValues = valuesForBindings(state.runtimeBindings, state.inputValues, state.inputA, state.inputB);
+      state.inputA = state.runtimeBindings.inputs[0] ? state.inputValues[state.runtimeBindings.inputs[0].key] ?? state.inputA : state.inputA;
+      state.inputB = state.runtimeBindings.inputs[1] ? state.inputValues[state.runtimeBindings.inputs[1].key] ?? state.inputB : state.inputB;
     }
     return createWorkspaceSnapshot(state);
   }
 
   async function runSimulation(): Promise<WorkspaceSnapshot> {
-    if (!state.labIds || state.isBusy || state.simulationState === "running") {
+    if (!state.runtimeBindings || state.isBusy || state.simulationState === "running") {
       return createWorkspaceSnapshot(state);
     }
     state.isBusy = true;
-    await runSimulationInternal(state.labIds);
+    await runSimulationInternal(state.runtimeBindings);
     state.isBusy = false;
     return createWorkspaceSnapshot(state);
   }
 
   async function toggleInput(key: InputKey): Promise<WorkspaceSnapshot> {
-    if (!state.labIds || state.isBusy || state.simulationState === "running") {
+    if (!state.runtimeBindings || state.isBusy || state.simulationState === "running") {
       return createWorkspaceSnapshot(state);
     }
-    const nextInputA = key === "a" ? (state.inputA === 1 ? 0 : 1) : state.inputA;
-    const nextInputB = key === "b" ? (state.inputB === 1 ? 0 : 1) : state.inputB;
+    if (!state.runtimeBindings.inputs.some((binding) => binding.key === key)) return createWorkspaceSnapshot(state);
+    const nextInputValues: Record<InputKey, BinarySignal> = { ...state.inputValues, [key]: (state.inputValues[key] === 1 ? 0 : 1) as BinarySignal };
     state.isBusy = true;
-    await runSimulationInternal(state.labIds, nextInputA, nextInputB);
+    await runSimulationInternal(state.runtimeBindings, nextInputValues);
     state.isBusy = false;
     return createWorkspaceSnapshot(state);
   }

@@ -169,6 +169,28 @@ test("keeps the committed input when the next simulation is rejected", async () 
   assert.equal(state.canRun, true);
 });
 
+test("recognizes every input component in generic editor bindings", async () => {
+  const engine = new FakeEngine();
+  const workspace = createWorkspace(engine);
+  await workspace.checkEngine();
+
+  workspace.rebindSimulation({
+    components: { "input-a": 1, "input-b": 2, "input-c": 3, "and-gate": 4, output: 5 },
+    componentKinds: { "input-a": "input", "input-b": "input", "input-c": "input", "and-gate": "and", output: "output" },
+  });
+
+  assert.equal(workspace.snapshot().canRun, true);
+  assert.equal(workspace.snapshot().inputValues["input-c"], 0);
+  const state = await workspace.toggleInput("input-c");
+
+  assert.equal(state.inputValues["input-c"], 1);
+  assert.deepEqual(engine.calls.filter((call) => call.type === "setInput").slice(-3), [
+    { type: "setInput", componentId: 1, value: 1 },
+    { type: "setInput", componentId: 2, value: 1 },
+    { type: "setInput", componentId: 3, value: 1 },
+  ]);
+});
+
 test("rebinds simulation to the new engine ID after undo", async () => {
   const engine = new FakeEngine();
   engine.nextComponentId = 41;
