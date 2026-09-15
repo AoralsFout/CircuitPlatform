@@ -36,6 +36,13 @@ export interface LabIds {
   output: number;
 }
 
+/** 编辑器向仿真工作区提供的通用运行时绑定，不依赖示例 Component ID。 */
+export interface SimulationBindings {
+  components: Readonly<Partial<Record<string, number>>>;
+  componentKinds?: Readonly<Partial<Record<string, ComponentKindName>>>;
+  connections?: Readonly<Partial<Record<string, number>>>;
+}
+
 export interface DemoRuntimeBindings {
   components: LabIds;
   connections: {
@@ -43,6 +50,8 @@ export interface DemoRuntimeBindings {
     wireB: number;
     wireOutput: number;
   };
+  /** 默认文档对应的通用编辑器绑定；旧的 LabIds 仅是启动仿真的适配结果。 */
+  editor: SimulationBindings;
 }
 
 export interface DemoLoadResult {
@@ -82,7 +91,7 @@ export interface Workspace {
   checkEngine(): Promise<WorkspaceSnapshot>;
   loadDemoCircuit(): Promise<DemoLoadResult>;
   /** 由编辑器会话在结构提交后更新仿真所使用的临时引擎身份。 */
-  rebindSimulation(ids: LabIds | null): WorkspaceSnapshot;
+  rebindSimulation(ids: LabIds | SimulationBindings | null): WorkspaceSnapshot;
   runSimulation(): Promise<WorkspaceSnapshot>;
   toggleInput(key: InputKey): Promise<WorkspaceSnapshot>;
   snapshot(): WorkspaceSnapshot;
@@ -292,9 +301,12 @@ export function createWorkspace(adapter: EngineAdapter): Workspace {
       state.message = "示例已创建，试着切换输入 A 或输入 B。";
       await runSimulationInternal(ids);
       state.isBusy = false;
+      const editor = { components: { "input-a": ids.inputA, "input-b": ids.inputB, "and-gate": ids.andGate, output: ids.output }, componentKinds: { "input-a": "input", "input-b": "input", "and-gate": "and", output: "output" } } satisfies SimulationBindings;
+      const bindings = { components: { ...ids }, connections } as DemoRuntimeBindings;
+      Object.defineProperty(bindings, "editor", { value: editor, enumerable: false });
       return {
         snapshot: createWorkspaceSnapshot(state),
-        bindings: { components: { ...ids }, connections },
+        bindings,
       };
     } catch (error) {
       state.message = errorMessage(error, "创建示例电路失败。");
@@ -311,8 +323,17 @@ export function createWorkspace(adapter: EngineAdapter): Workspace {
     return { snapshot: createWorkspaceSnapshot(state), bindings: null };
   }
 
-  function rebindSimulation(ids: LabIds | null): WorkspaceSnapshot {
-    state.labIds = ids ? { ...ids } : null;
+  function rebindSimulation(ids: LabIds | SimulationBindings | null): WorkspaceSnapshot {
+    if (!ids) {
+      state.labIds = null;
+    } else if ("inputA" in ids) {
+      state.labIds = { ...ids };
+    } else {
+      const inputs = Object.entries(ids.components).filter(([id]) => ids.componentKinds?.[id] === "input").map(([, value]) => value).filter((value): value is number => value !== undefined);
+      const output = Object.entries(ids.components).find(([id]) => ids.componentKinds?.[id] === "output")?.[1];
+      const andGate = Object.entries(ids.components).find(([id]) => ids.componentKinds?.[id] === "and")?.[1];
+      state.labIds = inputs.length >= 2 && output !== undefined && andGate !== undefined ? { inputA: inputs[0]!, inputB: inputs[1]!, andGate, output } : null;
+    }
     return createWorkspaceSnapshot(state);
   }
 

@@ -1,6 +1,6 @@
 # 视觉状态截图回归
 
-Issue #15 的截图夹具位于 `apps/desktop/visual-regression.html`，它复用桌面应用的语义样式，并用固定几何渲染以下状态：默认、空画布、选中节点、选中 Wire、ConnectionDraft、Dangling、pending 和 error。
+Issue #15 的页面位于 `apps/desktop/visual-regression.html`，直接挂载正式 Vue `App` 与 `CircuitCanvas`，只用内存 Engine adapter 替代 Electron IPC。状态通过真实 DOM 交互产生，不包含手写静态节点、SVG path 或百分比定位：默认、空画布、选中 Component、选中 Wire、ConnectionDraft、Dangling、pending 和 error。
 
 ## 运行
 
@@ -15,7 +15,7 @@ pnpm --filter @circuit-platform/desktop visual:test
 可用参数：
 
 ```bash
-pnpm --filter @circuit-platform/desktop visual:test -- --state=default,selected-node --theme=light
+pnpm --filter @circuit-platform/desktop visual:test -- --state=default,selected-component --theme=light
 pnpm --filter @circuit-platform/desktop visual:test -- --reduced-motion
 ```
 

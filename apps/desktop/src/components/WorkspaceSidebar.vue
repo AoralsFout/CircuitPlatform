@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { NodeKey, RailPage } from "../composables/useEditorState";
+import type { RailPage } from "../composables/useEditorState";
 import type { ComponentDefinition } from "../canvas";
 import type { ComponentKindName } from "@circuit-platform/protocol";
 import type { InputKey } from "../workspace";
@@ -8,21 +8,29 @@ interface InputControl {
   key: InputKey;
   label: string;
   value: 0 | 1;
+  componentId: string | null;
+}
+
+interface SidebarComponent {
+  id: string;
+  kind: ComponentKindName;
+  displayName: string;
+  selected: boolean;
 }
 
 defineProps<{
   activeRailPage: RailPage;
   inputControls: readonly InputControl[];
   canRun: boolean;
-  selectedNode: NodeKey | null;
-  componentVisibility: Record<NodeKey, boolean>;
+  selectedComponentId: string | null;
+  components: readonly SidebarComponent[];
   componentCount: number;
   componentDefinitions: readonly ComponentDefinition[];
 }>();
 
 const emit = defineEmits<{
   close: [];
-  selectNode: [node: NodeKey];
+  selectComponent: [componentId: string];
   toggleInput: [key: InputKey];
   placeComponent: [kind: ComponentKindName, continuous: boolean];
 }>();
@@ -64,10 +72,7 @@ function startComponentDrag(event: DragEvent, kind: ComponentKindName): void {
     <template v-else>
       <div class="sidebar-section-title"><span>当前电路</span><span class="component-count">{{ componentCount }}</span></div>
       <div class="layer-list">
-        <button v-if="componentVisibility.output" type="button" :class="{ 'layer-item--active': selectedNode === 'output' }" @click="emit('selectNode', 'output')"><span class="layer-dot layer-dot--output"></span>输出 <small>OUTPUT</small></button>
-        <button v-if="componentVisibility.andGate" type="button" :class="{ 'layer-item--active': selectedNode === 'andGate' }" @click="emit('selectNode', 'andGate')"><span class="layer-dot layer-dot--gate"></span>AND 门 <small>AND</small></button>
-        <button v-if="componentVisibility.inputB" type="button" :class="{ 'layer-item--active': selectedNode === 'inputB' }" @click="emit('selectNode', 'inputB')"><span class="layer-dot"></span>输入 B <small>INPUT</small></button>
-        <button v-if="componentVisibility.inputA" type="button" :class="{ 'layer-item--active': selectedNode === 'inputA' }" @click="emit('selectNode', 'inputA')"><span class="layer-dot"></span>输入 A <small>INPUT</small></button>
+        <button v-for="component in components" :key="component.id" type="button" :class="{ 'layer-item--active': component.id === selectedComponentId }" @click="emit('selectComponent', component.id)"><span class="layer-dot" :class="{ 'layer-dot--output': component.kind === 'output', 'layer-dot--gate': component.kind !== 'input' && component.kind !== 'output' }"></span>{{ component.displayName }} <small>{{ component.kind.toUpperCase() }}</small></button>
       </div>
     </template>
   </aside>

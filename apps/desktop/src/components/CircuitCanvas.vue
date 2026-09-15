@@ -18,6 +18,7 @@ import {
 import type { ComponentDefinition } from "../canvas";
 import type { ComponentKindName } from "@circuit-platform/protocol";
 import type { ConnectionDraftPort } from "../editor/connection-draft.ts";
+import type { Point } from "../editor";
 import { resolveCanvasKeyboardAction, isEditableKeyboardTarget } from "../editor/keyboard.ts";
 import {
   positionComponentMenu,
@@ -25,22 +26,26 @@ import {
 import { contextActionsFor, type ContextAction, type ContextActionId } from "../editor/context-menu";
 import type { CanvasHitTarget } from "../canvas/hit-testing";
 
+export interface CanvasController {
+  componentDefinitions: readonly ComponentDefinition[];
+  recentComponentKinds: readonly ComponentKindName[];
+  addComponent: (kind: ComponentKindName, center: Point, altKey: boolean, continuous?: boolean) => Promise<boolean>;
+  rememberComponentKind: (kind: ComponentKindName) => void;
+  duplicateComponent: (componentId: string) => Promise<boolean>;
+  deleteComponent: (componentId: string) => Promise<void>;
+  resetRoute: (connectionId: string) => Promise<void>;
+  deleteConnection: (connectionId: string) => Promise<void>;
+}
+
 const props = defineProps<{
   scene: CanvasScene;
   viewport: ViewportState;
   interaction: InteractionState;
-  componentDefinitions?: readonly ComponentDefinition[];
-  recentComponentKinds?: readonly ComponentKindName[];
-  addComponent?: (kind: ComponentKindName, center: { x: number; y: number }, altKey: boolean, continuous?: boolean) => Promise<boolean>;
-  rememberComponentKind?: (kind: ComponentKindName) => void;
-  duplicateComponent?: (componentId: string) => Promise<boolean>;
-  deleteComponent?: (componentId: string) => Promise<void>;
-  resetRoute?: (connectionId: string) => Promise<void>;
-  deleteConnection?: (connectionId: string) => Promise<void>;
+  controller: CanvasController;
 }>();
 
 const emit = defineEmits<{
-  selectNode: [nodeId: string];
+  selectComponent: [componentId: string];
   selectConnection: [connectionId: string];
   viewportChange: [viewport: ViewportState];
   resize: [width: number, height: number];
@@ -52,11 +57,13 @@ const emit = defineEmits<{
   routeEditMove: [payload: { pointerWorld: { x: number; y: number }; altKey: boolean }];
   routeEditEnd: [];
   routeEditCancel: [];
-  placementMove: [center: { x: number; y: number }, altKey: boolean];
-  placeComponent: [center: { x: number; y: number }, altKey: boolean];
+  placementMove: [center: Point, altKey: boolean];
+  placeComponent: [center: Point, altKey: boolean];
+  retryPlacement: [];
+  cancelPlacement: [];
   connectionStart: [port: ConnectionDraftPort];
-  connectionMove: [payload: { point: { x: number; y: number }; altKey: boolean }];
-  connectionWaypoint: [payload: { point: { x: number; y: number }; altKey: boolean }];
+  connectionMove: [payload: { point: Point; altKey: boolean }];
+  connectionWaypoint: [payload: { point: Point; altKey: boolean }];
   connectionEnd: [port: ConnectionDraftPort];
   connectionAxisToggle: [];
   connectionWaypointRemove: [];
@@ -90,6 +97,15 @@ const objectMenu = ref<{
 } | null>(null);
 let routeEditPointer: { pointerId: number; connectionId: string; route: readonly { x: number; y: number }[]; target: { kind: "waypoint" | "segment"; index: number } } | null = null;
 let connectionPointer: { pointerId: number; ended: boolean } | null = null;
+let lastPointerAnchor: { x: number; y: number } | null = null;
+
+function keyboardMenuAnchor(target: EventTarget | null): { x: number; y: number } {
+  const element = target instanceof Element ? target : null;
+  const rect = element?.getBoundingClientRect();
+  const canvasRect = canvasElement.value?.getBoundingClientRect();
+  if (rect && canvasRect) return { x: rect.left - canvasRect.left + rect.width / 2, y: rect.top - canvasRect.top + rect.height / 2 };
+  return lastPointerAnchor ?? { x: (canvasElement.value?.clientWidth ?? 0) / 2, y: (canvasElement.value?.clientHeight ?? 0) / 2 };
+}
 
 function signalClass(value: 0 | 1 | "X"): string {
   if (value === 1) return "signal-state--high";
@@ -240,21 +256,21 @@ async function selectObjectAction(action: ContextActionId): Promise<void> {
   const target = menu.target;
   closeObjectMenu();
   if (target.kind === "component") {
-    if (action === "copy-component") await props.duplicateComponent?.(target.nodeId);
-    else if (action === "delete-component") await props.deleteComponent?.(target.nodeId);
+    if (action === "copy-component") await props.controller.duplicateComponent(target.nodeId);
+    else if (action === "delete-component") await props.controller.deleteComponent(target.nodeId);
     return;
   }
   if (action === "edit-route") {
     emit("selectConnection", target.connectionId);
   } else if (action === "reset-route") {
-    await props.resetRoute?.(target.connectionId);
+    await props.controller.resetRoute(target.connectionId);
   } else if (action === "delete-connection") {
-    await props.deleteConnection?.(target.connectionId);
+    await props.controller.deleteConnection(target.connectionId);
   }
 }
 
 function openComponentMenu(anchor: { x: number; y: number }, altKey = false): void {
-  if (props.interaction.connectionDraft || props.interaction.pendingPlacement || !props.componentDefinitions) return;
+  if (props.interaction.connectionDraft || props.interaction.pendingPlacement) return;
   componentMenu.value = {
     position: positionComponentMenu(anchor, { width: canvasElement.value?.clientWidth ?? 0, height: canvasElement.value?.clientHeight ?? 0 }),
     worldPoint: screenToWorld(anchor, props.viewport),
@@ -270,15 +286,15 @@ async function selectComponentFromMenu(kind: ComponentKindName): Promise<void> {
     closeComponentMenu();
     return;
   }
-  const succeeded = await props.addComponent?.(kind, menu.worldPoint, menu.altKey);
-  if (succeeded) props.rememberComponentKind?.(kind);
+  const succeeded = await props.controller.addComponent(kind, menu.worldPoint, menu.altKey);
+  if (succeeded) props.controller.rememberComponentKind(kind);
   closeComponentMenu();
 }
 
 function dragKind(event: DragEvent): ComponentKindName | null {
   const raw = event.dataTransfer?.getData("application/x-circuit-component") || event.dataTransfer?.getData("text/plain");
   if (!raw) return null;
-  return props.componentDefinitions?.find((definition) => definition.kind === raw && definition.available)?.kind ?? null;
+  return props.controller.componentDefinitions.find((definition) => definition.kind === raw && definition.available)?.kind ?? null;
 }
 
 function onDragOver(event: DragEvent): void {
@@ -296,8 +312,8 @@ async function onDrop(event: DragEvent): Promise<void> {
   if (!kind) return;
   event.preventDefault();
   const center = screenToWorld(pointerInCanvas(event), props.viewport);
-  const succeeded = await props.addComponent?.(kind, center, event.altKey, event.shiftKey);
-  if (succeeded) props.rememberComponentKind?.(kind);
+  const succeeded = await props.controller.addComponent(kind, center, event.altKey, event.shiftKey);
+  if (succeeded) props.controller.rememberComponentKind(kind);
 }
 
 function onContextMenu(event: MouseEvent): void {
@@ -314,7 +330,7 @@ function onContextMenu(event: MouseEvent): void {
     ? { kind: "wire", connectionId: hit.connectionId } as const
     : hit;
   if (objectHit.kind === "component" || objectHit.kind === "wire") {
-    if (objectHit.kind === "component") emit("selectNode", objectHit.nodeId);
+    if (objectHit.kind === "component") emit("selectComponent", objectHit.nodeId);
     else emit("selectConnection", objectHit.connectionId);
     objectMenu.value = {
       position: point,
@@ -326,7 +342,7 @@ function onContextMenu(event: MouseEvent): void {
     return;
   }
   if (hit.kind === "port") {
-    emit("selectNode", hit.nodeId);
+    emit("selectComponent", hit.nodeId);
     canvasElement.value?.focus();
     return;
   }
@@ -375,6 +391,7 @@ function onWheel(event: WheelEvent): void {
 }
 
 function onPointerDown(event: PointerEvent): void {
+  lastPointerAnchor = pointerInCanvas(event);
   if (props.interaction.connectionDraft && event.button === 0 && !spacePressed) {
     emit("connectionWaypoint", { point: pointerInWorld(event), altKey: event.altKey });
     event.preventDefault();
@@ -404,6 +421,7 @@ function onPointerDown(event: PointerEvent): void {
 }
 
 function onPointerMove(event: PointerEvent): void {
+  lastPointerAnchor = pointerInCanvas(event);
   if (connectionPointer?.pointerId === event.pointerId) {
     emit("connectionMove", { point: pointerInWorld(event), altKey: event.altKey });
     event.preventDefault();
@@ -472,7 +490,7 @@ function onNodeClick(nodeId: string): void {
     suppressNodeClick = false;
     return;
   }
-  emit("selectNode", nodeId);
+  emit("selectComponent", nodeId);
 }
 
 function focusPortTarget(target: HTMLElement): ConnectionDraftPort | null {
@@ -511,7 +529,7 @@ function onCanvasKeyboard(event: KeyboardEvent): void {
   const port = target?.matches("[data-port-id]") && target instanceof HTMLElement ? focusPortTarget(target) : null;
   if (action.type === "open-menu") {
     if (!props.interaction.connectionDraft) {
-      openComponentMenu({ x: (canvasElement.value?.clientWidth ?? 0) / 2, y: (canvasElement.value?.clientHeight ?? 0) / 2 });
+      openComponentMenu(keyboardMenuAnchor(event.target), event.altKey);
     }
   } else if (action.type === "pan") {
     emit("viewportChange", panViewport(props.viewport, { x: action.dx * 48, y: action.dy * 48 }));
@@ -537,12 +555,12 @@ function onCanvasKeyboard(event: KeyboardEvent): void {
     else focusByDirection(event.key === "ArrowLeft" ? -1 : event.key === "ArrowRight" ? 1 : 0, event.key === "ArrowUp" ? -1 : event.key === "ArrowDown" ? 1 : 0);
   } else if (action.type === "select-focus") {
     if (port && !props.interaction.connectionDraft) emit("connectionStart", port);
-    else if (focusDataset?.focusKind === "component") emit("selectNode", focusDataset.focusId ?? "");
+    else if (focusDataset?.focusKind === "component") emit("selectComponent", focusDataset.focusId ?? "");
     else if (focusDataset?.focusKind === "connection") emit("selectConnection", focusDataset.focusId ?? "");
   } else if (action.type === "cancel") {
     if (props.interaction.connectionDraft) emit("connectionCancel");
     else if (props.interaction.routeEditPreview) emit("routeEditCancel");
-    else if (props.interaction.draggingNodeId) emit("nodeDragCancel");
+    else if (props.interaction.draggingComponentId) emit("nodeDragCancel");
     else return;
   }
   event.preventDefault();
@@ -675,23 +693,25 @@ onBeforeUnmount(() => {
           </template>
           <path v-if="interaction.connectionDraft" class="signal-wire signal-wire--draft" :d="pathFor(interaction.connectionDraft)" />
         </svg>
-        <article v-for="node in scene.nodes" :key="node.id" class="circuit-node" :class="{ 'circuit-node--selected': node.selected, 'circuit-node--focused': interaction.focusedId === node.id, 'circuit-node--dragging': interaction.draggingNodeId === node.id }" :style="nodeStyle(node)" role="button" tabindex="0" data-canvas-focus data-focus-kind="component" :data-focus-id="node.id" :data-selected="node.selected ? 'true' : 'false'" :aria-label="`选择${node.displayName}`" @focus="emit('focusChange', node.id)" @pointerdown.stop="onNodePointerDown($event, node)" @click="onNodeClick(node.id)">
+        <article v-for="node in scene.nodes" :key="node.id" class="circuit-node" :class="{ 'circuit-node--selected': node.selected, 'circuit-node--focused': interaction.focusedId === node.id, 'circuit-node--dragging': interaction.draggingComponentId === node.id }" :style="nodeStyle(node)" role="button" tabindex="0" data-canvas-focus data-focus-kind="component" :data-focus-id="node.id" :data-selected="node.selected ? 'true' : 'false'" :aria-label="`选择${node.displayName}`" @focus="emit('focusChange', node.id)" @pointerdown.stop="onNodePointerDown($event, node)" @click="onNodeClick(node.id)">
           <span class="node-tag">{{ node.kind.toUpperCase() }} / {{ node.ports.length }}</span>
           <strong>{{ node.symbol }} <span class="node-display-name">{{ node.displayName }}</span></strong>
           <span class="node-description">{{ node.description }}</span>
           <span v-for="port in node.ports" :key="port.id" class="node-port" :class="[port.direction === 'input' ? 'node-port--left' : 'node-port--right', signalClass(port.signal), { 'node-port--dangling': port.dangling }]" :style="{ top: `${port.offset.y}px` }" :data-port-id="port.id" :data-node-id="node.id" :data-signal="port.signal" :data-dangling="port.dangling ? 'true' : 'false'" :data-focus-id="`port:${node.id}:${port.id}`" data-focus-kind="port" data-canvas-focus role="button" tabindex="0" :aria-label="`${port.direction === 'input' ? '输入' : '输出'}端口 ${port.name}，信号 ${port.signal}${port.dangling ? '，悬空' : ''}`" @focus="emit('focusChange', `port:${node.id}:${port.id}`)" @pointerdown.stop="onPortPointerDown($event, node, port)" @pointerup.stop="onPortPointerUp($event, node, port)" @click.stop="onPortClick($event, node, port)">{{ port.name }} · {{ port.signal }}<template v-if="port.dangling"> · 悬空</template></span>
         </article>
-        <article v-if="interaction.pendingPlacement" class="circuit-node circuit-node--pending" :style="{ left: `${interaction.pendingPlacement.position.x}px`, top: `${interaction.pendingPlacement.position.y}px`, width: `${interaction.pendingPlacement.size.width}px`, height: `${interaction.pendingPlacement.size.height}px` }" role="status" :aria-label="`正在放置 ${interaction.pendingPlacement.kind} 元件`">
-          <span class="node-tag">待放置</span><strong>{{ interaction.pendingPlacement.kind.toUpperCase() }}</strong><span class="node-description">单击画布放置 · Esc 取消</span>
+        <article v-if="interaction.pendingPlacement" class="circuit-node circuit-node--pending" :class="{ 'circuit-node--error': interaction.pendingPlacement.error }" :style="{ left: `${interaction.pendingPlacement.position.x}px`, top: `${interaction.pendingPlacement.position.y}px`, width: `${interaction.pendingPlacement.size.width}px`, height: `${interaction.pendingPlacement.size.height}px` }" role="status" :aria-label="`${interaction.pendingPlacement.error ? '放置失败' : '正在放置'} ${interaction.pendingPlacement.kind} 元件`">
+          <span class="node-tag">{{ interaction.pendingPlacement.error ? '放置失败' : '待放置' }}</span><strong>{{ interaction.pendingPlacement.kind.toUpperCase() }}</strong>
+          <span class="node-description">{{ interaction.pendingPlacement.error ?? '单击画布放置' }}</span>
+          <span v-if="interaction.pendingPlacement.error" class="pending-placement-actions"><button type="button" @click.stop="emit('retryPlacement')">重试</button><button type="button" @click.stop="emit('cancelPlacement')">取消</button></span><span v-else class="node-description">Esc 取消</span>
         </article>
       </div>
       <div v-if="interaction.emptyState" class="canvas-empty-state"><span class="empty-orbit">＋</span><strong>{{ interaction.emptyState.title }}</strong><p>{{ interaction.emptyState.message }}</p></div>
       <div v-if="interaction.connectionDraftError" class="canvas-draft-error" role="alert">{{ interaction.connectionDraftError }}<span> · Esc 取消，或选择其他端口重试</span></div>
       <ComponentMenu
-        v-if="componentMenu && componentDefinitions"
+        v-if="componentMenu"
         :style="{ left: `${componentMenu.position.x}px`, top: `${componentMenu.position.y}px` }"
-        :definitions="componentDefinitions"
-        :recent-kinds="recentComponentKinds ?? []"
+        :definitions="controller.componentDefinitions"
+        :recent-kinds="controller.recentComponentKinds"
         @select="selectComponentFromMenu"
         @close="closeComponentMenu"
       />

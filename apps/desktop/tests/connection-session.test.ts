@@ -106,7 +106,7 @@ test("repairs a dangling endpoint by adding the replacement before deleting the 
     },
     bindings: { components: { "source-2": 2, target: 3 }, connections: { wire: 77 } },
   }, engine);
-  const repaired = await session.dispatch({ type: "repair-connection", connectionId: "wire", left: port("deleted-source", "output", { x: 0, y: 42 }), right: port("source-2", "output", { x: 148, y: 202 }) });
+  const repaired = await session.dispatch({ type: "reconnect-connection", connectionId: "wire", left: port("deleted-source", "output", { x: 0, y: 42 }), right: port("source-2", "output", { x: 148, y: 202 }) });
   assert.equal(repaired.ok, true);
   assert.deepEqual(repaired.snapshot.document.connections[0].danglingEndpoints, []);
   assert.equal(repaired.snapshot.document.connections[0].source.componentId, "source-2");

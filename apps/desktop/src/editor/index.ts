@@ -105,6 +105,8 @@ export interface EditorInitialState {
 export interface EditorBindings {
   components: Readonly<Partial<Record<EditorComponentId, EngineComponentId>>>;
   connections: Readonly<Partial<Record<EditorConnectionId, EngineConnectionId>>>;
+  /** 用于通用仿真投影的类型元数据；不包含任何固定示例身份。 */
+  componentKinds?: Readonly<Partial<Record<EditorComponentId, ComponentKindName>>>;
 }
 
 export interface EngineError {
@@ -148,29 +150,19 @@ export type EditorSelection =
 export type EditorCommand =
   | { type: "select"; selection: EditorSelection }
   | { type: "move-component"; componentId: EditorComponentId; position: Point }
-  | { type: "move-node"; nodeId: EditorComponentId; position: Point }
-  | { type: "move-node"; componentId: EditorComponentId; position: Point }
   | { type: "edit-route"; connectionId: EditorConnectionId; route: readonly Point[]; altKey?: boolean }
-  | { type: "move-route"; connectionId: EditorConnectionId; route: readonly Point[]; altKey?: boolean }
   | { type: "move-route-waypoint"; connectionId: EditorConnectionId; pointIndex: number; delta: Point; altKey?: boolean }
   | { type: "move-route-segment"; connectionId: EditorConnectionId; segmentIndex: number; offset: Point; altKey?: boolean }
   | { type: "delete-waypoint"; connectionId: EditorConnectionId; pointIndex: number }
   | { type: "reset-route"; connectionId: EditorConnectionId }
   | { type: "create-connection"; left: ConnectionDraftPort; right: ConnectionDraftPort; route?: readonly Point[]; waypoints?: readonly Point[] }
-  | { type: "add-connection"; left: ConnectionDraftPort; right: ConnectionDraftPort; route?: readonly Point[]; waypoints?: readonly Point[] }
   /** 用同一个稳定 Editor Connection ID 替换连接端点，提交过程由会话补偿管理。 */
   | { type: "reconnect-connection"; connectionId: EditorConnectionId; left: ConnectionDraftPort; right: ConnectionDraftPort; route?: readonly Point[]; waypoints?: readonly Point[] }
-  /** `repair-connection` 是重接命令的语义别名，供悬空端点交互使用。 */
-  | { type: "repair-connection"; connectionId: EditorConnectionId; left: ConnectionDraftPort; right: ConnectionDraftPort; route?: readonly Point[]; waypoints?: readonly Point[] }
   | { type: "begin-placement"; kind: ComponentKindName; center?: Point; altKey?: boolean; continuous?: boolean }
-  | { type: "start-placement"; kind: ComponentKindName; center?: Point; altKey?: boolean; continuous?: boolean }
   | { type: "update-placement"; center: Point; altKey?: boolean }
   | { type: "place-component"; kind?: ComponentKindName; center: Point; altKey?: boolean; continuous?: boolean }
-  | { type: "commit-placement"; kind?: ComponentKindName; center: Point; altKey?: boolean; continuous?: boolean }
   | { type: "add-component"; kind: ComponentKindName; position: Point; altKey?: boolean; continuous?: boolean }
   | { type: "duplicate-component"; componentId: EditorComponentId }
-  | { type: "copy-component"; componentId: EditorComponentId }
-  | { type: "duplicate-selected" }
   | { type: "delete-selected" }
   | { type: "delete-component"; componentId: EditorComponentId }
   | { type: "delete-connection"; connectionId: EditorConnectionId }
@@ -435,10 +427,12 @@ function toMutableDocument(document: EditorDocument): MutableDocument {
 function cloneBindings(bindings: EditorBindings): {
   components: Partial<Record<EditorComponentId, EngineComponentId>>;
   connections: Partial<Record<EditorConnectionId, EngineConnectionId>>;
+  componentKinds?: Partial<Record<EditorComponentId, ComponentKindName>>;
 } {
   return {
     components: { ...bindings.components },
     connections: { ...bindings.connections },
+    componentKinds: bindings.componentKinds ? { ...bindings.componentKinds } : undefined,
   };
 }
 
@@ -635,7 +629,7 @@ export function createEditorSession(
   }
 
   function publishBindings(): void {
-    options.onBindingsChanged?.({
+    const nextBindings: EditorBindings = {
       components: Object.fromEntries(
         [...document.components.values()]
           .filter((component) => component.lifecycle === "active")
@@ -652,7 +646,12 @@ export function createEditorSession(
             return engineId === undefined ? [] : [[connection.id, engineId]];
           }),
       ),
+    };
+    Object.defineProperty(nextBindings, "componentKinds", {
+      value: Object.fromEntries([...document.components.values()].map((component) => [component.id, component.kind])),
+      enumerable: false,
     });
+    options.onBindingsChanged?.(nextBindings);
   }
 
   function currentSnapshot(): EditorSnapshot {
@@ -724,7 +723,7 @@ export function createEditorSession(
 
   /** 仅阻止会改变 C++ Circuit 的命令，离线时仍可编辑本地几何和视口。 */
   function changesCircuit(command: EditorCommand): boolean {
-    if (["add-component", "place-component", "commit-placement", "duplicate-component", "copy-component", "duplicate-selected", "delete-component", "delete-connection", "create-connection", "add-connection", "reconnect-connection", "repair-connection", "confirm-clear", "retry-placement", "retry-current-operation"].includes(command.type)) return true;
+    if (["add-component", "place-component", "duplicate-component", "delete-component", "delete-connection", "create-connection", "reconnect-connection", "confirm-clear", "retry-placement", "retry-current-operation"].includes(command.type)) return true;
     if (command.type === "delete-selected") return selection !== null;
     if (command.type === "undo" || command.type === "redo") {
       return operation === "recovery-required" || isCircuitHistoryFrame(command.type === "undo" ? undoStack.at(-1) : redoStack.at(-1));
@@ -1871,7 +1870,7 @@ export function createEditorSession(
       return { ok: false, error: confirmationPendingError, snapshot };
     }
 
-    if (command.type === "begin-placement" || command.type === "start-placement") {
+    if (command.type === "begin-placement") {
       if (command.center && !Number.isFinite(command.center.x) || command.center && !Number.isFinite(command.center.y)) {
         return fail({ code: "invalid_placement", message: "元件放置位置无效。", retryable: false });
       }
@@ -1908,17 +1907,13 @@ export function createEditorSession(
       selection = command.selection;
       return { ok: true, snapshot: finishOperation() };
     }
-    if (command.type === "move-component" || command.type === "move-node") {
-      const componentId = command.type === "move-component"
-        ? command.componentId
-        : "nodeId" in command ? command.nodeId : command.componentId;
-      const frame = makeMoveComponentFrame(componentId, command.position);
+    if (command.type === "move-component") {
+      const frame = makeMoveComponentFrame(command.componentId, command.position);
       if (!frame) return fail(noSelectionError);
       return moveComponent(frame);
     }
     if (
       command.type === "edit-route" ||
-      command.type === "move-route" ||
       command.type === "move-route-waypoint" ||
       command.type === "move-route-segment" ||
       command.type === "delete-waypoint" ||
@@ -1928,7 +1923,7 @@ export function createEditorSession(
       if (!connection || connection.lifecycle !== "visible") return fail(noSelectionError);
       const currentRoute = routeForConnection(connection);
       let nextRoute: readonly Point[];
-      if (command.type === "edit-route" || command.type === "move-route") {
+      if (command.type === "edit-route") {
         nextRoute = command.route;
       } else if (command.type === "move-route-waypoint") {
         nextRoute = moveRouteWaypoint(currentRoute, command.pointIndex, command.delta, command.altKey);
@@ -1941,12 +1936,12 @@ export function createEditorSession(
       }
       return editRoute(makeEditRouteFrame(connection, nextRoute));
     }
-    if (command.type === "reconnect-connection" || command.type === "repair-connection") {
+    if (command.type === "reconnect-connection") {
       const frame = reconnectFrame(command.connectionId, command.left, command.right, command.route, command.waypoints);
       if ("code" in frame) return fail(frame);
       return reconnectConnection(frame);
     }
-    if (command.type === "create-connection" || command.type === "add-connection") {
+    if (command.type === "create-connection") {
       const frame = connectionFrame(command.left, command.right, command.route, command.waypoints);
       if ("code" in frame) return fail(frame);
       return createConnection(frame);
@@ -1971,7 +1966,7 @@ export function createEditorSession(
       else selection = null;
       return { ok: true, snapshot: finishOperation() };
     }
-    if (command.type === "place-component" || command.type === "commit-placement" || command.type === "add-component") {
+    if (command.type === "place-component" || command.type === "add-component") {
       const kind = command.type === "add-component" ? command.kind : command.kind ?? pendingPlacement?.kind;
       if (!kind) return fail({ code: "no_pending_placement", message: "当前没有待放置的元件。", retryable: false });
       const altKey = command.altKey ?? pendingPlacement?.altKey ?? false;
@@ -1979,12 +1974,8 @@ export function createEditorSession(
       const result = await addComponentAt(kind, center, altKey, command.continuous);
       return result;
     }
-    if (command.type === "duplicate-component" || command.type === "copy-component" || command.type === "duplicate-selected") {
-      const componentId = command.type === "duplicate-selected"
-        ? selection?.kind === "component" ? selection.id : null
-        : command.componentId;
-      if (!componentId) return fail(noSelectionError);
-      return duplicateComponent(componentId);
+    if (command.type === "duplicate-component") {
+      return duplicateComponent(command.componentId);
     }
     if (command.type === "confirm-clear") {
       if (!confirmation) return fail(confirmationRequiredError);

@@ -10,11 +10,11 @@ import {
   type EditorSnapshot,
 } from "../editor";
 import { createProtocolEnginePort } from "../editor/protocolEnginePort";
+import type { ConnectionDraftPort } from "../editor/connection-draft.ts";
 import {
   createWorkspace,
   type DemoRuntimeBindings,
   type InputKey,
-  type LabIds,
   type WorkspaceSnapshot,
 } from "../workspace";
 import type { ComponentKindName } from "@circuit-platform/protocol";
@@ -29,17 +29,7 @@ interface WorkspaceBinding {
   select(selection: EditorSelection): Promise<void>;
   moveComponent(componentId: EditorComponentId, position: Point): Promise<void>;
   editRoute(connectionId: string, route: readonly Point[]): Promise<void>;
-  createConnection(left: {
-    componentId: string;
-    port: string;
-    direction: "input" | "output";
-    point: Point;
-  }, right: {
-    componentId: string;
-    port: string;
-    direction: "input" | "output";
-    point: Point;
-  }, route?: readonly Point[], connectionId?: string): Promise<{ ok: boolean; error?: string }>;
+  createConnection(left: ConnectionDraftPort, right: ConnectionDraftPort, route?: readonly Point[], connectionId?: string): Promise<{ ok: boolean; error?: string }>;
   /** 使用稳定 Editor Connection ID 修复悬空端点或替换已占用输入。 */
   reconnectConnection(connectionId: string, left: Parameters<WorkspaceBinding["createConnection"]>[0], right: Parameters<WorkspaceBinding["createConnection"]>[1], route?: readonly Point[]): Promise<{ ok: boolean; error?: string }>;
   resetRoute(connectionId: string): Promise<void>;
@@ -60,6 +50,8 @@ interface WorkspaceBinding {
   beginPlacement(kind: ComponentKindName, continuous?: boolean): Promise<void>;
   updatePlacement(center: Point, altKey?: boolean): Promise<void>;
   placeComponent(center: Point, altKey?: boolean): Promise<boolean>;
+  /** 重试失败的待放置请求；保留原类型、位置与稳定身份。 */
+  retryPlacement(): Promise<boolean>;
   /** 使用与画布待放置流程相同的添加命令，在指定 WorldPoint 添加一个元件。 */
   addComponent(kind: ComponentKindName, center: Point, altKey?: boolean, continuous?: boolean): Promise<boolean>;
   /** 复制指定稳定编辑器元件；副本不继承连接、路线、选择或信号。 */
@@ -67,31 +59,7 @@ interface WorkspaceBinding {
 }
 
 function toEditorBindings(bindings: DemoRuntimeBindings): EditorBindings {
-  return {
-    components: {
-      "input-a": bindings.components.inputA,
-      "input-b": bindings.components.inputB,
-      "and-gate": bindings.components.andGate,
-      output: bindings.components.output,
-    },
-    connections: {
-      "wire-a": bindings.connections.wireA,
-      "wire-b": bindings.connections.wireB,
-      "wire-output": bindings.connections.wireOutput,
-    },
-  };
-}
-
-function toSimulationBindings(bindings: EditorBindings): LabIds | null {
-  const inputA = bindings.components["input-a"];
-  const inputB = bindings.components["input-b"];
-  const andGate = bindings.components["and-gate"];
-  const output = bindings.components.output;
-  const hasCompleteWiring = ["wire-a", "wire-b", "wire-output"]
-    .every((id) => bindings.connections[id] !== undefined);
-  return inputA === undefined || inputB === undefined || andGate === undefined || output === undefined || !hasCompleteWiring
-    ? null
-    : { inputA, inputB, andGate, output };
+  return { components: bindings.editor.components, connections: bindings.editor.connections ?? {}, componentKinds: bindings.editor.componentKinds };
 }
 
 /**
@@ -121,7 +89,7 @@ export function useWorkspace(): WorkspaceBinding {
         // EditorSession 只询问一个布尔可用性 seam；引擎状态仍留在 Workspace 快照中。
         isEngineAvailable: () => workspace.snapshot().engineState === "ready",
         onBindingsChanged(nextBindings) {
-          state.value = workspace.rebindSimulation(toSimulationBindings(nextBindings));
+          state.value = workspace.rebindSimulation(nextBindings);
         },
       },
     );
@@ -177,9 +145,10 @@ export function useWorkspace(): WorkspaceBinding {
   /** 复制当前选中元件或显式指定的元件，并复用 EditorSession 的结构事务。 */
   async function duplicateComponent(componentId?: EditorComponentId): Promise<boolean> {
     if (!editor) return false;
-    const command = componentId
-      ? { type: "duplicate-component" as const, componentId }
-      : { type: "duplicate-selected" as const };
+    const selection = editor?.snapshot().selection;
+    const selectedId = componentId ?? (selection?.kind === "component" ? selection.id : undefined);
+    if (!selectedId) return false;
+    const command = { type: "duplicate-component" as const, componentId: selectedId };
     const pending = editor.dispatch(command);
     editorState.value = editor.snapshot();
     const result = await pending;
@@ -199,8 +168,18 @@ export function useWorkspace(): WorkspaceBinding {
     return result.ok;
   }
 
-  /** 提交一次完成的连接意图；失败只返回错误，草稿由画布交互层继续保留。 */
-  /** 创建或安全重接连接；调用者只传稳定编辑器 ID，不接触引擎身份。 */
+  /** 将失败的待放置 ghost 重新提交给同一 canonical add-component 流程。 */
+  async function retryPlacement(): Promise<boolean> {
+    if (!editor) return false;
+    const pending = editor.dispatch({ type: "retry-placement" });
+    editorState.value = editor.snapshot();
+    const result = await pending;
+    editorState.value = result.snapshot;
+    state.value = workspace.snapshot();
+    return result.ok;
+  }
+
+  /** 创建或安全重接连接；失败只返回错误，草稿由画布交互层继续保留。 */
   async function createConnection(left: Parameters<WorkspaceBinding["createConnection"]>[0], right: Parameters<WorkspaceBinding["createConnection"]>[1], route?: readonly Point[], connectionId?: string): Promise<{ ok: boolean; error?: string }> {
     if (!editor) return { ok: false, error: "编辑器尚未准备好。" };
     const pending = editor.dispatch(connectionId
@@ -242,6 +221,7 @@ export function useWorkspace(): WorkspaceBinding {
     beginPlacement: (kind, continuous = false) => dispatch({ type: "begin-placement", kind, continuous }),
     updatePlacement: (center, altKey = false) => dispatch({ type: "update-placement", center, altKey }),
     placeComponent,
+    retryPlacement,
     addComponent,
     duplicateComponent,
   };

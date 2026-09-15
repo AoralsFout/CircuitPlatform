@@ -1,82 +1,76 @@
 <!doctype html>
-<html lang="zh-CN">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>CircuitPlatform visual regression fixture</title>
-    <link rel="stylesheet" href="/src/styles.css" />
-    <style>
-      /* Fixture-specific geometry is deliberately fixed so screenshots only change with UI code. */
-      .fixture-canvas .canvas-viewport { transform: none !important; }
-      .fixture-canvas .circuit-node { width: 148px; height: 84px; }
-      .fixture-canvas .fixture-node-a { left: 10%; top: 18%; }
-      .fixture-canvas .fixture-node-b { left: 10%; top: 64%; }
-      .fixture-canvas .fixture-node-gate { left: 43%; top: 39%; width: 150px; }
-      .fixture-canvas .fixture-node-output { right: 10%; top: 40%; width: 156px; }
-      .fixture-canvas .signal-map { overflow: visible; }
-      .fixture-canvas .fixture-status { position: absolute; right: 14px; top: 12px; z-index: 3; border: 1px solid var(--color-border); padding: 5px 8px; color: var(--color-text-muted); background: color-mix(in srgb, var(--color-panel) 90%, transparent); font-family: var(--font-data); font-size: 9px; }
-      .fixture-canvas .fixture-status strong { color: var(--color-text); }
-      .fixture-canvas .fixture-state-note { position: absolute; left: 14px; bottom: 12px; z-index: 3; color: var(--color-text-faint); font-size: 9px; }
-      .fixture-canvas .circuit-node--focused { outline: 2px dashed var(--color-focus); }
-      [data-motion="reduced"] *, [data-motion="reduced"] *::before, [data-motion="reduced"] *::after { animation: none !important; transition: none !important; }
-      [data-motion="reduced"] .signal-wire--live { filter: none; }
-      @media (max-width: 760px) {
-        .fixture-canvas .fixture-node-a { left: 7%; }
-        .fixture-canvas .fixture-node-b { left: 7%; }
-        .fixture-canvas .fixture-node-gate { left: 39%; }
-        .fixture-canvas .fixture-node-output { right: 5%; }
-      }
-    </style>
-  </head>
-  <body>
-    <div id="app"></div>
+<html lang="zh-CN" data-motion="reduced">
+  <head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><title>CircuitPlatform visual regression</title></head>
+  <body><div id="app"></div>
     <script type="module">
+      // 截图使用真实 Vue 应用和 CircuitCanvas；此 adapter 只替代 Electron 引擎边界。
       const params = new URLSearchParams(location.search);
-      const theme = params.get("theme") === "light" ? "light" : "dark";
       const state = params.get("state") || "default";
+      const theme = params.get("theme") === "light" ? "light" : "dark";
       const reducedMotion = params.get("motion") === "reduced";
       document.documentElement.dataset.theme = theme;
       document.documentElement.dataset.motion = reducedMotion ? "reduced" : "normal";
-
-      const states = {
-        default: { label: "默认场景", note: "Component / Port / Wire · 0 / 1 / X" },
-        empty: { label: "空画布", note: "没有电路时仍保留明确下一步" },
-        "selected-node": { label: "选中节点 + 键盘焦点", note: "蓝色选择边框与虚线焦点外轮廓并存" },
-        "selected-wire": { label: "选中 Wire", note: "选中外轮廓与焦点虚线并存" },
-        draft: { label: "ConnectionDraft", note: "临时连线使用焦点色虚线" },
-        dangling: { label: "Dangling", note: "悬空端点使用警告色与文本" },
-        pending: { label: "Pending", note: "待放置元件不进入正式文档" },
-        error: { label: "Error", note: "错误状态持久显示并提供恢复提示" },
-      }[state] || { label: state, note: "未知回归状态" };
-
-      const node = (classes, tag, name, description, ports, extra = "") => `
-        <article class="circuit-node ${classes} ${extra}" role="button" tabindex="0">
-          <span class="node-tag">${tag}</span><strong>${name}</strong><span class="node-description">${description}</span>
-          ${ports.map((port) => `<span class="node-port node-port--${port.side} signal-state--${port.signal === "X" ? "unknown" : port.signal === "1" ? "high" : "low"} ${port.dangling ? "node-port--dangling" : ""}" style="top:${port.top}px">${port.name} · ${port.signal}${port.dangling ? " · 悬空" : ""}</span>`).join("")}
-        </article>`;
-
-      const selectedNode = state === "selected-node" ? "circuit-node--selected circuit-node--focused" : "";
-      const wires = state === "draft"
-        ? `<path class="signal-wire signal-wire--draft" d="M 255 202 L 375 202 L 375 242 L 522 242" />`
-        : `<path class="signal-wire signal-wire--low" d="M 255 202 L 375 202 L 375 242 L 522 242" />
-           <path class="signal-wire signal-wire--live" d="M 255 410 L 408 410 L 408 284 L 522 284" />
-           <path class="signal-wire signal-wire--unknown ${state === "selected-wire" ? "signal-wire--selected" : ""}" d="M 672 263 L 735 263 L 735 225 L 810 225" />`;
-      const hit = state === "selected-wire" ? `<path class="signal-wire-hit signal-wire-hit--focused" d="M 672 263 L 735 263 L 735 225 L 810 225" />` : "";
-      const dangling = state === "dangling" ? `<circle class="dangling-endpoint" cx="810" cy="225" r="6" />` : "";
-      const selectedWireClass = state === "selected-wire" ? "circuit-node--focused" : "";
-      const empty = state === "empty" ? `<div class="canvas-empty-state"><span class="empty-orbit">＋</span><strong>还没有电路</strong><p>从左侧选择一个元件，或加载一份示例电路开始。</p></div>` : "";
-      const pending = state === "pending" ? `<article class="circuit-node circuit-node--pending" style="left:38%;top:39%" role="status"><span class="node-tag">待放置</span><strong>XOR</strong><span class="node-description">单击画布放置 · Esc 取消</span></article>` : "";
-      const error = state === "error" ? `<div class="canvas-draft-error" role="alert">目标端口不兼容 · Esc 取消，或选择其他端口重试</div>` : "";
-
-      document.querySelector("#app").innerHTML = `
-        <main class="app-shell">
-          <header class="topbar"><div class="brand-lockup"><span class="brand-mark"><i></i><i></i><i></i></span><span class="brand-name">CircuitPlatform</span><span class="topbar-divider"></span><span class="project-name">视觉回归夹具</span></div><div class="topbar-actions"><span class="engine-chip engine-chip--ready"><i class="pulse-dot"></i>引擎在线</span><button class="topbar-button" type="button">☼</button></div></header>
-          <section class="editor-layout"><nav class="tool-rail"><button class="rail-button rail-button--active" type="button">⌘</button><button class="rail-button" type="button">≡</button></nav><aside class="sidebar"><div class="sidebar-heading"><div><span class="eyebrow">WORKSPACE</span><h1>元件库</h1></div></div><div class="component-list"><div class="component-item component-item--selected"><span class="component-symbol component-symbol--input">→</span><span><strong>输入</strong><small>INPUT</small></span></div><div class="component-item"><span class="component-symbol component-symbol--gate">&amp;</span><span><strong>AND 门</strong><small>LOGIC</small></span></div><div class="component-item"><span class="component-symbol component-symbol--output">◉</span><span><strong>输出</strong><small>OUTPUT</small></span></div></div></aside>
-          <section class="editor-main"><div class="editor-toolbar"><span class="toolbar-breadcrumb"><span class="eyebrow">SCENE / REVIEW</span></span><div class="toolbar-tools"><button class="tool-button" type="button">−</button><span class="zoom-label">100%</span><button class="tool-button" type="button">＋</button><button class="run-button" type="button">▶ 运行一次</button></div></div>
-            <div class="editor-canvas-wrap"><div class="canvas-info"><span class="canvas-mode"><span class="mode-dot"></span>场景模式</span><span>Delete 删除 · Ctrl/Cmd+Z 撤销 · Esc 取消</span></div><div class="circuit-canvas fixture-canvas"><div class="canvas-grid"></div><div class="fixture-status"><strong>${states[state]?.label || state}</strong> · ${theme === "dark" ? "深色" : "浅色"}</div><div class="canvas-viewport"><svg class="signal-map" aria-label="电路连接">${wires}${hit}${dangling}</svg>${state === "empty" ? "" : node("fixture-node-a", "INPUT / 1", "输入 A", "产生数字输入", [{ side: "right", name: "out", signal: "1", top: 30 }])}${state === "empty" ? "" : node("fixture-node-b", "INPUT / 1", "输入 B", "产生数字输入", [{ side: "right", name: "out", signal: "0", top: 30 }])}${state === "empty" ? "" : node(`fixture-node-gate ${selectedNode}`, "AND / 3", "AND 门", "两个输入都为 1 时输出 1", [{ side: "left", name: "in1", signal: "1", top: 30 }, { side: "left", name: "in2", signal: "0", top: 54 }])}${state === "empty" ? "" : node(`fixture-node-output ${selectedWireClass}`, "OUTPUT / 1", "输出", "显示一个输入信号", [{ side: "left", name: "in", signal: state === "dangling" ? "X" : "X", dangling: state === "dangling", top: 30 }])}${pending}</div>${empty}${error}<span class="fixture-state-note">${states.note}</span></div><div class="canvas-legend"><span><i class="legend-line legend-line--live"></i>高电平 <b>1</b></span><span><i class="legend-line"></i>低电平 <b>0</b></span><span><i class="legend-line legend-line--unknown"></i>未知 <b>X</b></span><span><i class="legend-line legend-line--dangling"></i>悬空</span></div></div>
-            <section class="bottom-panel"><p class="bottom-error" ${state === "error" ? "role=alert" : "hidden"}>仿真连接失败：请重试或继续编辑布局。</p><div class="bottom-tabs"><button class="bottom-tab--active" type="button">检查器</button><button type="button">输出 <span class="tab-count">1</span></button><button type="button">波形 <span class="tab-count">3</span></button></div><div class="bottom-content bottom-content--inspector"><div class="bottom-inspector-heading"><div><span class="eyebrow">${state === "selected-wire" ? "WIRE" : "COMPONENT"}</span><strong>${state === "selected-wire" ? "选中 Wire" : state === "empty" ? "未选择对象" : "AND 门"}</strong></div></div><div class="inspector-value"><span>当前信号</span><strong class="signal-state--unknown">X</strong></div><div class="inspector-port-list"><span class="inspector-port-row"><span>输入 · in1</span><strong class="signal-state--high">1</strong><small>已连接</small></span><span class="inspector-port-row"><span>输入 · in2</span><strong class="signal-state--low">0</strong><small>未连接</small></span></div></div></section>
-          </section></section>
-        </main>`;
+      let nextComponentId = 1;
+      let nextConnectionId = 1;
+      let failAdds = false;
+      const response = (value) => Promise.resolve(value);
+      window.circuitPlatform = {
+        checkEngine: () => response({ status: "ok", engine: "Visual test engine" }),
+        addComponent: (kind) => failAdds
+          ? response({ type: "error", requestId: "visual", code: "visual_add_failed", message: "视觉回归模拟：元件提交失败" })
+          : response({ type: "component_added", requestId: "visual", componentId: nextComponentId++ }),
+        addConnection: () => response({ type: "connection_added", requestId: "visual", connectionId: nextConnectionId++ }),
+        removeComponent: (componentId) => response({ type: "component_removed", requestId: "visual", componentId }),
+        removeConnection: (connectionId) => response({ type: "connection_removed", requestId: "visual", connectionId }),
+        setInput: () => response({ type: "input_set", requestId: "visual" }),
+        settle: () => response({ type: "settled", requestId: "visual", status: "ok" }),
+        getSignal: () => response({ type: "signal_result", requestId: "visual", value: "X" }),
+      };
+      await import("/src/main.ts");
+      const waitFor = async (selector) => {
+        for (let attempt = 0; attempt < 1000; attempt += 1) {
+          const element = document.querySelector(selector);
+          if (element) return element;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        return null;
+      };
+      const click = (element) => {
+        if (!element) return;
+        if (typeof element.click === "function") element.click();
+        else element.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+      };
+      const prepare = async () => {
+        await waitFor(".circuit-node");
+        failAdds = state === "error";
+        if (state === "selected-component") click(document.querySelector(".circuit-node"));
+        if (state === "selected-wire") click(document.querySelector(".signal-wire-hit"));
+        if (state === "draft") click(document.querySelector("[data-port-id]"));
+        if (state === "pending" || state === "error") {
+          click([...document.querySelectorAll(".component-item")].find((item) => item.textContent?.includes("XOR")));
+          if (state === "error") {
+            const canvas = await waitFor(".circuit-canvas");
+            const bounds = canvas.getBoundingClientRect();
+            canvas.dispatchEvent(new PointerEvent("pointerdown", {
+              bubbles: true,
+              button: 0,
+              clientX: bounds.left + bounds.width * 0.65,
+              clientY: bounds.top + bounds.height * 0.45,
+            }));
+          }
+        }
+        if (state === "dangling") {
+          click(document.querySelector(".circuit-node"));
+          click(document.querySelector('[aria-label="删除选中对象 (Delete)"]'));
+        }
+        if (state === "empty") {
+          click(document.querySelector('[aria-label="清空画布"]'));
+          await waitFor(".confirmation-dialog");
+          click(document.querySelector(".confirmation-dialog button:last-child"));
+        }
+        await new Promise((resolve) => setTimeout(resolve, 120));
+      };
+      await prepare();
     </script>
   </body>
 </html>

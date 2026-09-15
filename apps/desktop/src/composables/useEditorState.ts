@@ -29,17 +29,11 @@ import {
   type ConnectionDraftPort,
   type ConnectionDraftState,
 } from "../editor/connection-draft.ts";
+import { createSimulationSnapshot } from "../editor/simulation.ts";
 
-export type NodeKey = "inputA" | "inputB" | "andGate" | "output";
 export type RailPage = "components" | "inputs" | "layers" | "settings";
 export type BottomTab = "inspector" | "outputs" | "waveform";
 export type WaveformKey = "a" | "b" | "output";
-export type WireKey = "wireA" | "wireB" | "wireOutput";
-
-export interface WireDanglingState {
-  source: boolean;
-  target: boolean;
-}
 
 export interface WaveformRow {
   label: string;
@@ -51,20 +45,6 @@ const waveformRows: readonly WaveformRow[] = [
   { label: "输入 B", key: "b" },
   { label: "输出", key: "output" },
 ];
-
-const editorIdByNode: Record<NodeKey, EditorComponentId> = {
-  inputA: "input-a",
-  inputB: "input-b",
-  andGate: "and-gate",
-  output: "output",
-};
-
-const nodeByEditorId: Record<EditorComponentId, NodeKey | undefined> = {
-  "input-a": "inputA",
-  "input-b": "inputB",
-  "and-gate": "andGate",
-  output: "output",
-};
 
 /**
  * 管理只属于编辑器界面的选择、布局与缩放状态，并从工作区快照派生展示数据。
@@ -108,20 +88,20 @@ export function useEditorState(
     // 浏览器禁用持久化时，最近使用仍保存在当前内存会话中。
   }
   const recentComponentKinds = ref(readRecentComponentKinds(recentStorage, registry.list()));
-  const draggingNodeId = ref<EditorComponentId | null>(null);
-  const dragPreview = ref<{ nodeId: EditorComponentId; position: Point } | null>(null);
+  const draggingComponentId = ref<EditorComponentId | null>(null);
+  const dragPreview = ref<{ componentId: EditorComponentId; position: Point } | null>(null);
   const dragController = createNodeDragController({
     onPreview(preview) {
-      dragPreview.value = { nodeId: preview.nodeId, position: { ...preview.position } };
+      dragPreview.value = { componentId: preview.nodeId, position: { ...preview.position } };
     },
     onCommit(preview) {
       void moveComponent(preview.nodeId, preview.position).finally(() => {
-        draggingNodeId.value = null;
+        draggingComponentId.value = null;
         dragPreview.value = null;
       });
     },
     onCancel() {
-      draggingNodeId.value = null;
+      draggingComponentId.value = null;
       dragPreview.value = null;
     },
   });
@@ -147,7 +127,7 @@ export function useEditorState(
   });
   const previewPositions = computed<Readonly<Record<string, Point>>>(() => {
     const preview = dragPreview.value;
-    return preview ? { [preview.nodeId]: { ...preview.position } } : {};
+    return preview ? { [preview.componentId]: { ...preview.position } } : {};
   });
   const previewRoutes = computed<Readonly<Record<string, readonly Point[]>> | undefined>(() => {
     const preview = routeEditPreview.value;
@@ -157,28 +137,8 @@ export function useEditorState(
   const canvasScene = computed(() => {
     const snapshot = editorState.value;
     if (!snapshot) return emptyCanvasScene();
-    const inputComponents = snapshot.document.components.filter((component) => component.kind === "input");
-    const signals: Record<string, Signal> = {};
-    inputComponents.forEach((component) => {
-      // 示例输入由工作区控制；通过元件库新建的 Input 从 0 开始，不继承示例状态。
-      signals[`${component.id}:out`] = component.id === "input-a"
-        ? workspaceState.value.inputA
-        : component.id === "input-b"
-          ? workspaceState.value.inputB
-          : 0;
-    });
-    for (const component of snapshot.document.components) {
-      const definition = registry.get(component.kind);
-      if (!definition) continue;
-      for (const port of definition.ports) {
-        if (signals[`${component.id}:${port.id}`] !== undefined) continue;
-        const isDemoComponent = ["input-a", "input-b", "and-gate", "output"].includes(component.id);
-        signals[`${component.id}:${port.id}`] = isDemoComponent && port.direction === "output" && component.kind !== "input"
-          ? workspaceState.value.outputValue
-          : "X";
-      }
-    }
-    return sceneProjector.project(snapshot, { signals }, previewPositions.value, previewRoutes.value);
+    const simulation = createSimulationSnapshot(snapshot, registry, { inputA: workspaceState.value.inputA, inputB: workspaceState.value.inputB, output: workspaceState.value.outputValue });
+    return sceneProjector.project(snapshot, simulation, previewPositions.value, previewRoutes.value);
   });
   const inspector = computed<InspectorModel>(() => createInspectorModel(
     canvasScene.value,
@@ -188,28 +148,28 @@ export function useEditorState(
   const viewport = computed<ViewportState>(() => viewportState.value);
   const interaction = computed<InteractionState>(() => {
     if (workspaceState.value.engineState !== "ready") {
-      return { focusedId: focusedId.value, draggingNodeId: null, dragPreview: null, connectionDraft: null, routeEditPreview: null, emptyState: { title: "等待仿真引擎", message: workspaceState.value.message } };
+      return { focusedId: focusedId.value, draggingComponentId: null, dragPreview: null, connectionDraft: null, routeEditPreview: null, emptyState: { title: "等待仿真引擎", message: workspaceState.value.message } };
     }
     if (!workspaceState.value.hasLab) {
-      return { focusedId: focusedId.value, draggingNodeId: null, dragPreview: null, connectionDraft: null, routeEditPreview: null, emptyState: { title: "正在准备示例电路", message: workspaceState.value.message } };
+      return { focusedId: focusedId.value, draggingComponentId: null, dragPreview: null, connectionDraft: null, routeEditPreview: null, emptyState: { title: "正在准备示例电路", message: workspaceState.value.message } };
     }
     if (!editorState.value) {
-      return { focusedId: focusedId.value, draggingNodeId: null, dragPreview: null, connectionDraft: null, routeEditPreview: null, emptyState: { title: "还没有电路", message: "从左侧选择一个元件，或加载一份示例电路开始。" } };
+      return { focusedId: focusedId.value, draggingComponentId: null, dragPreview: null, connectionDraft: null, routeEditPreview: null, emptyState: { title: "还没有电路", message: "从左侧选择一个元件，或加载一份示例电路开始。" } };
     }
     if (editorState.value.document.components.length === 0 && !editorState.value.pendingPlacement) {
-      return { focusedId: focusedId.value, draggingNodeId: null, dragPreview: null, connectionDraft: null, emptyState: { title: "还没有电路", message: "从左侧选择一个元件，或加载一份示例电路开始。" } };
+      return { focusedId: focusedId.value, draggingComponentId: null, dragPreview: null, connectionDraft: null, emptyState: { title: "还没有电路", message: "从左侧选择一个元件，或加载一份示例电路开始。" } };
     }
     const pending = editorState.value.pendingPlacement;
     const definition = pending ? registry.get(pending.kind) : undefined;
     return {
       focusedId: focusedId.value,
-      draggingNodeId: draggingNodeId.value,
+      draggingComponentId: draggingComponentId.value,
       dragPreview: dragPreview.value,
       connectionDraft: connectionDraft.value.origin ? connectionDraftRoute(connectionDraft.value) : null,
       connectionDraftError: connectionDraft.value.error?.message ?? null,
       routeEditPreview: routeEditPreview.value,
       pendingPlacement: pending && pending.center && definition
-        ? { kind: pending.kind, position: positionFromPlacementCenter(pending.center, definition.size, pending.altKey), size: definition.size }
+        ? { kind: pending.kind, position: positionFromPlacementCenter(pending.center, definition.size, pending.altKey), size: definition.size, error: editorState.value.error?.message ?? null }
         : null,
     };
   });
@@ -283,101 +243,48 @@ export function useEditorState(
     focusedId.value = id;
   }
 
-  const componentVisibility = computed<Record<NodeKey, boolean>>(() => ({
-    inputA: editorState.value?.document.components.some((component) => component.id === "input-a") ?? false,
-    inputB: editorState.value?.document.components.some((component) => component.id === "input-b") ?? false,
-    andGate: editorState.value?.document.components.some((component) => component.id === "and-gate") ?? false,
-    output: editorState.value?.document.components.some((component) => component.id === "output") ?? false,
-  }));
-  const wireVisibility = computed<Record<WireKey, boolean>>(() => ({
-    wireA: editorState.value?.document.connections.some((connection) => connection.id === "wire-a") ?? false,
-    wireB: editorState.value?.document.connections.some((connection) => connection.id === "wire-b") ?? false,
-    wireOutput: editorState.value?.document.connections.some((connection) => connection.id === "wire-output") ?? false,
-  }));
-  const wireDangling = computed<Record<WireKey, WireDanglingState>>(() => {
-    const connectionState = (id: string): WireDanglingState => {
-      const connection = editorState.value?.document.connections.find((item) => item.id === id);
-      return {
-        source: connection?.danglingEndpoints.includes("source") ?? false,
-        target: connection?.danglingEndpoints.includes("target") ?? false,
-      };
-    };
-    return {
-      wireA: connectionState("wire-a"),
-      wireB: connectionState("wire-b"),
-      wireOutput: connectionState("wire-output"),
-    };
-  });
-  const selectedNode = computed<NodeKey | null>(() => {
+  const sidebarComponents = computed(() => editorState.value?.document.components.map((component) => ({
+    id: component.id,
+    kind: component.kind,
+    displayName: component.displayName,
+    selected: editorState.value?.selection?.kind === "component" && editorState.value.selection.id === component.id,
+  })) ?? []);
+  const selectedComponentId = computed<EditorComponentId | null>(() => {
     const selection = editorState.value?.selection;
-    return selection?.kind === "component" ? nodeByEditorId[selection.id] ?? null : null;
+    return selection?.kind === "component" ? selection.id : null;
   });
   const selectedConnection = computed<EditorConnectionId | null>(() => {
     const selection = editorState.value?.selection;
     return selection?.kind === "connection" ? selection.id : null;
   });
-  const inputControls = computed(() => [
-    {
-      key: "a" as InputKey,
-      label: "输入 A",
-      value: workspaceState.value.inputA,
-      node: "inputA" as NodeKey,
-    },
-    {
-      key: "b" as InputKey,
-      label: "输入 B",
-      value: workspaceState.value.inputB,
-      node: "inputB" as NodeKey,
-    },
-  ].filter((input) => componentVisibility.value[input.node]));
-  const outputs = computed(() => [
-    {
-      key: "output",
-      label: "输出",
-      value: workspaceState.value.outputValue,
-      description: workspaceState.value.outputDescription,
-    },
-  ].filter(() => componentVisibility.value.output));
+  const inputControls = computed(() => canvasScene.value.nodes.filter((node) => node.kind === "input").slice(0, 2).map((node, index) => ({
+    key: (index === 0 ? "a" : "b") as InputKey,
+    label: node.displayName,
+    value: (index === 0 ? workspaceState.value.inputA : workspaceState.value.inputB) as 0 | 1,
+    componentId: node.id,
+  })));
+  const outputs = computed(() => canvasScene.value.nodes.filter((node) => node.kind === "output").map((node) => ({
+    key: node.id,
+    label: node.displayName,
+    value: node.ports.find((port) => port.direction === "input")?.signal ?? workspaceState.value.outputValue,
+    description: node.description,
+  })));
   const engineStateLabel = computed(() => {
     if (workspaceState.value.engineState === "ready") return "引擎在线";
     if (workspaceState.value.engineState === "unavailable") return "引擎不可用";
     if (workspaceState.value.engineState === "error") return "连接失败";
     return "连接中";
   });
-  const selectedNodeName = computed(() => {
-    if (selectedConnection.value === "wire-a") return "输入 A → AND";
-    if (selectedConnection.value === "wire-b") return "输入 B → AND";
-    if (selectedConnection.value === "wire-output") return "AND → 输出";
-    if (selectedNode.value === null) return "未选择";
-    if (selectedNode.value === "inputA") return "输入 A";
-    if (selectedNode.value === "inputB") return "输入 B";
-    if (selectedNode.value === "andGate") return "AND 门";
-    return "输出";
-  });
-  const selectedNodeValue = computed<Signal>(() => {
-    if (selectedConnection.value === "wire-a") return workspaceState.value.inputA;
-    if (selectedConnection.value === "wire-b") return workspaceState.value.inputB;
-    if (selectedConnection.value === "wire-output") return workspaceState.value.outputValue;
-    if (selectedNode.value === null) return "X";
-    if (selectedNode.value === "inputA") return workspaceState.value.inputA;
-    if (selectedNode.value === "inputB") return workspaceState.value.inputB;
-    return workspaceState.value.outputValue;
-  });
-  const selectedNodeDescription = computed(() => {
-    if (selectedConnection.value) return "选择的视觉连线；按 Delete 或 Backspace 可单独删除。";
-    if (selectedNode.value === null) return "在画布或层级面板中选择一个元件。";
-    if (selectedNode.value === "inputA" || selectedNode.value === "inputB") {
-      return "点击开关或画布节点，改变这个输入值。";
-    }
-    if (selectedNode.value === "andGate") return "两个输入都为 1 时，输出才为 1。";
-    return workspaceState.value.outputDescription;
-  });
-  const selectedNodeId = computed(() => selectedConnection.value ?? (selectedNode.value ? editorIdByNode[selectedNode.value] : null));
+  const selectedComponent = computed(() => canvasScene.value.nodes.find((node) => node.id === selectedComponentId.value));
+  const selectedComponentName = computed(() => selectedConnection.value ? `Wire ${selectedConnection.value}` : selectedComponent.value?.displayName ?? "未选择");
+  const selectedComponentValue = computed<Signal>(() => selectedConnection.value ? canvasScene.value.wires.find((wire) => wire.id === selectedConnection.value)?.signal ?? "X" : selectedComponent.value?.ports.find((port) => port.direction === "output")?.signal ?? selectedComponent.value?.ports[0]?.signal ?? "X");
+  const selectedComponentDescription = computed(() => selectedConnection.value ? "选择的视觉连线；按 Delete 或 Backspace 可单独删除。" : selectedComponent.value?.description ?? "在画布或侧栏中选择一个 Component。");
+  const selectedObjectId = computed(() => selectedConnection.value ?? selectedComponentId.value);
   const zoomLabel = computed(() => `${zoom.value}%`);
 
-  function selectNode(node: NodeKey): void {
-    if (!componentVisibility.value[node]) return;
-    void selectEditor({ kind: "component", id: editorIdByNode[node] });
+  function selectComponent(componentId: EditorComponentId): void {
+    if (!editorState.value?.document.components.some((component) => component.id === componentId)) return;
+    void selectEditor({ kind: "component", id: componentId });
   }
 
   function selectConnection(connectionId: EditorConnectionId): void {
@@ -412,16 +319,16 @@ export function useEditorState(
     viewportState.value = resizeViewport(viewportState.value, { width, height });
   }
 
-  /** 开始节点临时拖动；只更新 InteractionState，不创建编辑器快照。 */
+  /** 开始 Component 临时拖动；只更新 InteractionState，不创建编辑器快照。 */
   function startNodeDrag(nodeId: EditorComponentId, pointerWorld: Point): void {
     const node = canvasScene.value.nodes.find((candidate) => candidate.id === nodeId);
     if (!node) return;
-    draggingNodeId.value = nodeId;
-    dragPreview.value = { nodeId, position: { ...node.position } };
+    draggingComponentId.value = nodeId;
+    dragPreview.value = { componentId: nodeId, position: { ...node.position } };
     dragController.start(nodeId, node.position, pointerWorld);
   }
 
-  /** 合并 pointer move 到下一帧，并按世界坐标网格预览节点与 Wire。 */
+  /** 合并 pointer move 到下一帧，并按世界坐标网格预览 Component 与 Wire。 */
   function moveNodeDrag(pointerWorld: Point, altKey = false): void {
     dragController.move(pointerWorld, altKey);
   }
@@ -466,11 +373,9 @@ export function useEditorState(
   }, { immediate: true });
 
   return {
-    selectedNode,
     selectedConnection,
-    componentVisibility,
-    wireVisibility,
-    wireDangling,
+    sidebarComponents,
+    selectedComponentId,
     showDetails,
     showSidebar,
     activeRailPage,
@@ -480,10 +385,10 @@ export function useEditorState(
     inputControls,
     outputs,
     engineStateLabel,
-    selectedNodeName,
-    selectedNodeValue,
-    selectedNodeDescription,
-    selectedNodeId,
+    selectedComponentName,
+    selectedComponentValue,
+    selectedComponentDescription,
+    selectedObjectId,
     zoomLabel,
     canvasScene,
     inspector,
@@ -492,7 +397,7 @@ export function useEditorState(
     componentDefinitions: registry.list(),
     recentComponentKinds,
     rememberComponentKind,
-    selectNode,
+    selectComponent,
     selectConnection,
     selectRailPage,
     adjustZoom,

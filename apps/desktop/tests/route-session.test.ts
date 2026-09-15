@@ -60,10 +60,10 @@ test("deleting a waypoint and resetting a route each create one undoable command
   assert.equal(resetUndo.snapshot.canUndo, false);
 });
 
-test("moving a node changes connected endpoints but keeps internal waypoint world coordinates", async () => {
+test("moving a Component changes connected endpoints but keeps internal waypoint world coordinates", async () => {
   const session = createSession();
   const before = session.snapshot().document.connections[0].route!;
-  const moved = await session.dispatch({ type: "move-node", nodeId: "source", position: { x: 32, y: 16 } });
+  const moved = await session.dispatch({ type: "move-component", componentId: "source", position: { x: 32, y: 16 } });
   assert.equal(moved.ok, true);
   const after = moved.snapshot.document.connections[0].route!;
   assert.deepEqual(after[2], before[2]);

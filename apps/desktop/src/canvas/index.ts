@@ -242,15 +242,15 @@ export function isDenseCanvasScene(scene: CanvasScene): boolean {
 
 export interface InteractionState {
   focusedId: string | null;
-  draggingNodeId: string | null;
+  draggingComponentId: string | null;
   /** 拖动期间的临时世界坐标；只存在于交互层，不写入 EditorSnapshot。 */
-  dragPreview?: { nodeId: string; position: Point } | null;
+  dragPreview?: { componentId: string; position: Point } | null;
   connectionDraft: readonly Point[] | null;
   /** 草稿提交失败时的持久错误提示，Esc 或换目标前不会自动丢失。 */
   connectionDraftError?: string | null;
   /** Wire Route 拖动时的临时预览；释放后才进入 EditorSession 历史。 */
   routeEditPreview?: { connectionId: string; route: readonly Point[] } | null;
-  pendingPlacement?: { kind: ComponentKindName; position: Point; size: { width: number; height: number } } | null;
+  pendingPlacement?: { kind: ComponentKindName; position: Point; size: { width: number; height: number }; error?: string | null } | null;
   emptyState?: { title: string; message: string };
 }
 
@@ -291,15 +291,20 @@ function routeBetween(start: Point, end: Point, waypoints: readonly Point[] = []
 function previewEndpoint(
   endpoint: EditorConnection["source"],
   components: ReadonlyMap<string, EditorComponent>,
+  registry: ComponentDefinitionRegistry,
+  dangling: boolean,
   previewPositions: Readonly<Record<string, Point>> | undefined,
 ): Point {
-  const preview = previewPositions?.[endpoint.componentId];
+  // 持久 endpoint.point 只代表 DanglingConnection 的冻结位置。已连接端点
+  // 必须由当前 Component 位置和 registry Port offset 推导，避免移动元件后
+  // 旧坐标继续成为第二个几何事实源。
+  if (dangling) return { ...endpoint.point };
   const component = components.get(endpoint.componentId);
-  if (!preview || !component) return { ...endpoint.point };
-  return {
-    x: preview.x + endpoint.point.x - component.position.x,
-    y: preview.y + endpoint.point.y - component.position.y,
-  };
+  const definition = component ? registry.get(component.kind) : undefined;
+  const port = definition?.ports.find((candidate) => candidate.id === endpoint.port);
+  if (!component || !port) return { ...endpoint.point };
+  const position = previewPositions?.[component.id] ?? component.position;
+  return { x: position.x + port.offset.x, y: position.y + port.offset.y };
 }
 
 function portPoint(component: EditorComponent, definition: ComponentDefinition, port: PortDefinition): Point {
@@ -352,8 +357,8 @@ export function projectCanvasScene(
   }
   const connectedPoints = new Map<string, Point>();
   for (const connection of editorSnapshot.document.connections) {
-    connectedPoints.set(endpointKey(connection.source.componentId, connection.source.port), previewEndpoint(connection.source, componentsById, previewPositions));
-    connectedPoints.set(endpointKey(connection.target.componentId, connection.target.port), previewEndpoint(connection.target, componentsById, previewPositions));
+    connectedPoints.set(endpointKey(connection.source.componentId, connection.source.port), previewEndpoint(connection.source, componentsById, registry, connection.danglingEndpoints.includes("source"), previewPositions));
+    connectedPoints.set(endpointKey(connection.target.componentId, connection.target.port), previewEndpoint(connection.target, componentsById, registry, connection.danglingEndpoints.includes("target"), previewPositions));
   }
   const nodes = editorSnapshot.document.components.map((component) => {
     const definition = registry.get(component.kind);
@@ -387,8 +392,8 @@ export function projectCanvasScene(
   }).filter((node) => node !== null) as CanvasNode[];
 
   const wires = editorSnapshot.document.connections.map((connection) => {
-    const sourcePoint = previewEndpoint(connection.source, componentsById, previewPositions);
-    const targetPoint = previewEndpoint(connection.target, componentsById, previewPositions);
+    const sourcePoint = previewEndpoint(connection.source, componentsById, registry, connection.danglingEndpoints.includes("source"), previewPositions);
+    const targetPoint = previewEndpoint(connection.target, componentsById, registry, connection.danglingEndpoints.includes("target"), previewPositions);
     const previewRoute = previewRoutes?.[connection.id];
     const waypoints = connection.waypoints
       ? connection.waypoints.map((point) => ({ ...point }))

@@ -33,6 +33,7 @@ const {
   beginPlacement,
   updatePlacement,
   placeComponent: placeComponentCommand,
+  retryPlacement,
   addComponent,
   duplicateComponent,
   editRoute,
@@ -40,11 +41,9 @@ const {
   createConnection,
 } = useWorkspace();
 const {
-  selectedNode,
   selectedConnection,
-  componentVisibility,
-  wireVisibility,
-  wireDangling,
+  sidebarComponents,
+  selectedComponentId,
   showDetails,
   showSidebar,
   activeRailPage,
@@ -54,11 +53,11 @@ const {
   inputControls,
   outputs,
   engineStateLabel,
-  selectedNodeName,
-  selectedNodeValue,
-  selectedNodeDescription,
+  selectedComponentName,
+  selectedComponentValue,
+  selectedComponentDescription,
   inspector,
-  selectedNodeId,
+  selectedObjectId,
   zoomLabel,
   canvasScene,
   viewport,
@@ -66,7 +65,7 @@ const {
   componentDefinitions,
   recentComponentKinds,
   rememberComponentKind,
-  selectNode,
+  selectComponent,
   selectConnection,
   selectRailPage,
   adjustZoom,
@@ -135,7 +134,7 @@ function onEditorKeydown(event: KeyboardEvent): void {
     else if (editorState.value?.operation === "recovery-required") return;
     else if (interaction.value.connectionDraft) cancelConnection();
     else if (interaction.value.routeEditPreview) cancelRouteEdit();
-    else if (interaction.value.draggingNodeId) cancelNodeDrag();
+    else if (interaction.value.draggingComponentId) cancelNodeDrag();
     else if (editorState.value?.pendingPlacement) void cancelCurrentOperation();
     else if (editorState.value?.selection) void cancelCurrentOperation();
     return;
@@ -175,12 +174,12 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
         :active-rail-page="activeRailPage"
         :input-controls="inputControls"
         :can-run="state.canRun"
-        :selected-node="selectedNode"
-        :component-visibility="componentVisibility"
+        :selected-component-id="selectedComponentId"
+        :components="sidebarComponents"
         :component-count="editorState?.document.components.length ?? 0"
         :component-definitions="componentDefinitions"
         @close="showSidebar = false"
-        @select-node="selectNode"
+        @select-component="selectComponent"
         @toggle-input="toggleInput"
         @place-component="beginPlacementFromSidebar"
       />
@@ -209,15 +208,8 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           :scene="canvasScene"
           :viewport="viewport"
           :interaction="interaction"
-          :component-definitions="componentDefinitions"
-          :recent-component-kinds="recentComponentKinds"
-          :add-component="addComponent"
-          :remember-component-kind="rememberComponentKind"
-          :duplicate-component="duplicateComponent"
-          :delete-component="deleteComponent"
-          :reset-route="resetRoute"
-          :delete-connection="deleteConnection"
-          @select-node="select({ kind: 'component', id: $event })"
+          :controller="{ componentDefinitions, recentComponentKinds, addComponent, rememberComponentKind, duplicateComponent, deleteComponent, resetRoute, deleteConnection }"
+          @select-component="select({ kind: 'component', id: $event })"
           @select-connection="select({ kind: 'connection', id: $event })"
           @clear-selection="select(null)"
           @node-drag-start="startNodeDrag($event.nodeId, $event.pointerWorld)"
@@ -239,17 +231,18 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           @viewport-change="setViewport"
           @resize="resizeCanvas"
           @placement-move="placementMoved"
-          @place-component="placeComponent"
+        @place-component="placeComponent"
+          @retry-placement="retryPlacement"
+          @cancel-placement="cancelCurrentOperation"
         />
         <BottomPanel
           :bottom-tab="bottomTab"
           :outputs="outputs"
-          :selected-node="selectedNode"
           :selected-connection="selectedConnection"
-          :selected-node-name="selectedNodeName"
-          :selected-node-value="selectedNodeValue"
-          :selected-node-description="selectedNodeDescription"
-          :selected-node-id="selectedNodeId"
+          :selected-component-name="selectedComponentName"
+          :selected-component-value="selectedComponentValue"
+          :selected-component-description="selectedComponentDescription"
+          :selected-object-id="selectedObjectId"
           :show-details="showDetails"
           :engine-state="state.engineState"
           :engine-name="state.engineName"
@@ -259,7 +252,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           :waveform-rows="waveformRows"
           :simulation-step="state.simulationStep"
           @select-tab="bottomTab = $event"
-          @select-node="selectNode"
+          @select-component="selectComponent"
           @toggle-details="showDetails = !showDetails"
         />
       </section>

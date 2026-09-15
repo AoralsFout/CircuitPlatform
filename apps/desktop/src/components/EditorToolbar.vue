@@ -26,7 +26,7 @@ const emit = defineEmits<{
 
 <template>
   <div class="editor-toolbar">
-    <div class="toolbar-breadcrumb"><span class="breadcrumb-muted">电路</span><span aria-hidden="true">/</span><strong>AND 门示例</strong><span class="toolbar-status"><span class="status-mark" aria-hidden="true">◇</span> 演示模式</span></div>
+    <div class="toolbar-breadcrumb"><span class="breadcrumb-muted">电路</span><span aria-hidden="true">/</span><strong>编辑器场景</strong><span class="toolbar-status"><span class="status-mark" aria-hidden="true">◇</span> 数据驱动</span></div>
     <div class="toolbar-tools">
       <button class="tool-button" type="button" :disabled="!canUndo" title="撤销 (Ctrl/Cmd+Z)" @click="emit('undo')"><span aria-hidden="true">↶</span></button>
       <button class="tool-button" type="button" :disabled="!canRedo" title="重做 (Ctrl/Cmd+Shift+Z)" @click="emit('redo')"><span aria-hidden="true">↷</span></button>
