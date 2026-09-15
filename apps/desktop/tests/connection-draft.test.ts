@@ -48,6 +48,19 @@ test("Space toggles axis while origin and route remain stable", () => {
   assert.deepEqual(after.at(-1), before.at(-1));
 });
 
+test("Backspace removes only the latest temporary waypoint", () => {
+  let state = reduceConnectionDraft(createConnectionDraft(), { type: "start", port: output });
+  state = reduceConnectionDraft(state, { type: "place-waypoint", point: { x: 43, y: 71 } });
+  state = reduceConnectionDraft(state, { type: "place-waypoint", point: { x: 91, y: 119 } });
+  assert.deepEqual(state.waypoints, [{ x: 48, y: 64 }, { x: 96, y: 112 }]);
+  state = reduceConnectionDraft(state, { type: "remove-waypoint" });
+  assert.deepEqual(state.waypoints, [{ x: 48, y: 64 }]);
+  assert.equal(state.hasPlacedFirstWaypoint, true);
+  state = reduceConnectionDraft(state, { type: "remove-waypoint" });
+  assert.deepEqual(state.waypoints, []);
+  assert.equal(state.hasPlacedFirstWaypoint, false);
+});
+
 test("connection target validation gives actionable reasons and endpoint normalization is bidirectional", () => {
   assert.equal(validateConnectionDraftTarget(output, input), null);
   assert.equal(validateConnectionDraftTarget(output, { ...output, componentId: "other" })?.code, "same-direction");
