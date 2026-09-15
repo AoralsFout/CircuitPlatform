@@ -310,10 +310,6 @@ button:disabled { cursor: not-allowed; }
 .node-port--lower { top: 63%; }
 .node-port:hover, .node-port:focus-visible { color: var(--color-focus); outline: 2px solid color-mix(in srgb, var(--color-focus) 58%, transparent); outline-offset: 2px; }
 .canvas-draft-error { position: absolute; z-index: 4; right: 16px; bottom: 16px; max-width: min(430px, calc(100% - 32px)); border: 1px solid color-mix(in srgb, var(--color-status-error) 55%, var(--color-border)); padding: 8px 10px; color: var(--color-status-error); background: color-mix(in srgb, var(--theme-panel) 92%, transparent); font-size: 10px; }
-.circuit-node--input-a { top: 14%; left: 11%; }
-.circuit-node--input-b { top: 67%; left: 11%; }
-.circuit-node--gate { top: 39%; left: 44%; width: 150px; border-color: color-mix(in srgb, var(--color-signal-high) 58%, transparent); }
-.circuit-node--output { top: 41%; right: 9%; width: 156px; }
 .circuit-node:hover { border-color: var(--color-text-muted); }
 .circuit-node:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 3px; }
 .circuit-node--active { border-color: var(--color-status-success); box-shadow: 0 0 25px color-mix(in srgb, var(--color-status-success) 14%, transparent); }
@@ -321,6 +317,9 @@ button:disabled { cursor: not-allowed; }
 .circuit-node--focused { outline: 2px dashed var(--color-focus); outline-offset: 3px; }
 .circuit-node--selected.circuit-node--focused { outline-style: solid; outline-offset: 5px; }
 .circuit-node--pending { opacity: .52; border-color: var(--color-status-warning); border-style: dashed; box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-status-warning) 18%, transparent); pointer-events: none; }
+.circuit-node--pending.circuit-node--error { opacity: .9; pointer-events: auto; }
+.pending-placement-actions { display: flex; gap: 6px; margin-top: 8px; pointer-events: auto; }
+.pending-placement-actions button { border: 1px solid var(--color-border-strong); padding: 4px 7px; color: var(--color-text); background: var(--color-surface); cursor: pointer; font: inherit; }
 .output-signal { position: absolute; top: 12px; right: 14px; font-family: var(--font-data); font-size: 22px; }
 .output-description { margin-top: 7px; color: var(--color-text-faint); font-size: 9px; }
 .canvas-empty-state { position: absolute; top: 50%; left: 50%; display: flex; align-items: center; flex-direction: column; transform: translate(-50%, -50%); text-align: center; }

@@ -13,8 +13,8 @@
 - 节点拖动、Route 拖动、画布平移和 ConnectionDraft 的指针值通过 `requestAnimationFrame` 合并，每帧最多应用一次；pointerup 提交前立即刷新最后一个值。
 - CanvasScene 投影器按 EditorSnapshot、拖动预览和 Route 预览的引用缓存节点/连线几何；SimulationSnapshot 更新只复制状态叶子，不重新生成 Route。
 - 超过 500 个 Component 或 1,000 条 Wire 时，画布只关闭背景次级网格渐变、节点/画布光晕和连线高光；DOM 标签、键盘焦点、命中区域和操作能力保持不变。
-- `apps/desktop/scripts/performance-benchmark.ts` 独立构造目标规模并运行 5 秒 pan/drag 场景，输出 P95 JSON 并以 20ms 为失败门槛。
+- `apps/desktop/scripts/performance-benchmark.mjs` 启动 Vite 和 Electron，挂载真实 `CircuitCanvas`，构造目标规模并通过 DOM PointerEvent 运行 5 秒 pan/drag 场景；采样包含 DOM 事件、组件更新和 RAF 回调，输出 P95 JSON 并以 20ms 为失败门槛。
 
 ## 后果
 
-拖动预览仍然是临时 InteractionState，不创建 EditorSnapshot 或调用引擎；结构命令只在释放时提交。缓存依赖编辑器快照及预览对象的引用稳定性，结构或交互预览改变时会安全地重建。基准不等同于真实 Electron GPU 合成性能，Electron 验证仍需沿用 #15 的兼容 GPU 启动参数和视觉回归流程。
+拖动预览仍然是临时 InteractionState，不创建 EditorSnapshot 或调用引擎；结构命令只在释放时提交。缓存依赖编辑器快照及预览对象的引用稳定性，结构或交互预览改变时会安全地重建。基准 runner 以 `disable-gpu`、`no-sandbox`、`backgroundThrottling: false` 和可见窗口保证跨 Windows 环境稳定采样；视觉回归另外验证 Electron 页面合成，因此两者边界明确。

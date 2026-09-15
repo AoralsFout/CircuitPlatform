@@ -609,7 +609,7 @@ test("moves a component as one local layout history frame and aligns wire endpoi
 test("a no-op component move does not create layout history", async () => {
   const engine = new FakeEngine();
   const session = createSession(engine);
-  const result = await session.dispatch({ type: "move-node", nodeId: "and-gate", position: { x: 440, y: 220 } });
+  const result = await session.dispatch({ type: "move-component", componentId: "and-gate", position: { x: 440, y: 220 } });
   assert.equal(result.ok, true);
   assert.equal(result.snapshot.canUndo, false);
   assert.deepEqual(engine.calls, []);
@@ -874,12 +874,12 @@ test("Shift placement keeps the same kind pending until explicitly changed", asy
   assert.equal(final.snapshot.pendingPlacement, null);
 });
 
-test("duplicating a component copies only kind and selects a new offset node", async () => {
+test("duplicating a Component copies only kind and selects a new offset Component", async () => {
   const engine = new FakeEngine();
   const session = createSession(engine);
   await session.dispatch({ type: "select", selection: { kind: "component", id: "and-gate" } });
 
-  const result = await session.dispatch({ type: "duplicate-selected" });
+  const result = await session.dispatch({ type: "duplicate-component", componentId: "and-gate" });
 
   assert.equal(result.ok, true);
   const copy = result.snapshot.document.components.find((component) => component.id === result.snapshot.selection?.id);
@@ -908,7 +908,7 @@ test("failed duplication preserves the source selection and does not create hist
   const session = createSession(engine);
   await session.dispatch({ type: "select", selection: { kind: "component", id: "and-gate" } });
 
-  const result = await session.dispatch({ type: "copy-component", componentId: "and-gate" });
+  const result = await session.dispatch({ type: "duplicate-component", componentId: "and-gate" });
 
   assert.equal(result.ok, false);
   assert.deepEqual(result.snapshot.selection, { kind: "component", id: "and-gate" });

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="UTF-8" /><title>Canvas performance benchmark</title></head>
+<body><div id="app"></div>
+<script type="module">
+  // 性能基准挂载真实 CircuitCanvas；场景来自 registry 和 Route 投影，而不是静态 SVG。
+  import { createApp, h, ref } from "vue";
+  import CircuitCanvas from "/src/components/CircuitCanvas.vue";
+  import { createComponentDefinitionRegistry } from "/src/canvas/index.ts";
+  import { createDefaultOrthogonalRoute } from "/src/editor/route.ts";
+  const count = Number(new URLSearchParams(location.search).get("components") || 500);
+  const wireCount = Number(new URLSearchParams(location.search).get("wires") || 1000);
+  const registry = createComponentDefinitionRegistry();
+  const kinds = ["input", "and", "or", "not", "output"];
+  const nodes = Array.from({ length: count }, (_, index) => {
+    const kind = kinds[index % kinds.length];
+    const definition = registry.get(kind);
+    const position = { x: 32 + (index % 25) * 74, y: 32 + Math.floor(index / 25) * 58 };
+    return { id: `component-${index}`, kind, displayName: `Component ${index + 1}`, symbol: definition.symbol, description: definition.description, position, size: { ...definition.size }, selected: false, ports: definition.ports.map((port) => ({ ...port, offset: { ...port.offset }, point: { x: position.x + port.offset.x, y: position.y + port.offset.y }, signal: "X", dangling: false })) };
+  });
+  const wires = Array.from({ length: wireCount }, (_, index) => {
+    const source = nodes[index % count];
+    const target = nodes[(index + 1 + index % 23) % count];
+    const sourcePort = source.ports.find((port) => port.direction === "output") || source.ports[0];
+    const targetPort = target.ports.find((port) => port.direction === "input") || target.ports[0];
+    const start = sourcePort.point;
+    const end = targetPort.point;
+    return { id: `connection-${index}`, source: { componentId: source.id, port: sourcePort.id, point: start }, target: { componentId: target.id, port: targetPort.id, point: end }, route: createDefaultOrthogonalRoute(start, end), signal: "X", danglingEndpoints: [], selected: false };
+  });
+  const scene = { nodes, wires, bounds: { min: { x: 0, y: 0 }, max: { x: 2100, y: 1300 } } };
+  const viewport = ref({ x: 0, y: 0, zoom: 1, visibleRect: { width: 1920, height: 1080 } });
+  const interaction = ref({ focusedId: null, draggingNodeId: null, dragPreview: null, connectionDraft: null });
+  const controller = { componentDefinitions: registry.list(), recentComponentKinds: [], addComponent: async () => false, rememberComponentKind: () => undefined, duplicateComponent: async () => false, deleteComponent: async () => undefined, resetRoute: async () => undefined, deleteConnection: async () => undefined };
+  window.__benchmarkReady = true;
+  createApp({ setup: () => () => h(CircuitCanvas, { scene, viewport: viewport.value, interaction: interaction.value, controller, onViewportChange: (next) => { viewport.value = next; }, onNodeDragStart: ({ nodeId }) => { interaction.value = { ...interaction.value, draggingNodeId: nodeId }; }, onNodeDragMove: ({ pointerWorld }) => { requestAnimationFrame(() => { interaction.value = { ...interaction.value, dragPreview: { nodeId: interaction.value.draggingNodeId, position: pointerWorld } }; }); }, onNodeDragEnd: () => { interaction.value = { ...interaction.value, draggingNodeId: null }; }, onNodeDragCancel: () => { interaction.value = { ...interaction.value, draggingNodeId: null }; } }) }).mount("#app");
+</script></body></html>

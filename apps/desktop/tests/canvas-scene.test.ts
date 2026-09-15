@@ -49,3 +49,12 @@ test("projects non-default editor identities through explicit routes and signal 
   assert.deepEqual(scene.wires[0].danglingEndpoints, ["target"]);
   assert.equal(scene.wires[0].selected, false);
 });
+
+test("derives connected endpoint geometry from the current Component and Port definition", () => {
+  const current = structuredClone(snapshot());
+  current.document.components[0]!.position = { x: 96, y: 144 };
+  current.document.connections[0]!.source.point = { x: -999, y: -999 };
+  const scene = projectCanvasScene(current, { signals: {} }, createComponentDefinitionRegistry());
+  assert.deepEqual(scene.wires[0]!.source.point, { x: 244, y: 186 });
+  assert.deepEqual(scene.wires[0]!.target.point, { x: 320, y: 110 });
+});

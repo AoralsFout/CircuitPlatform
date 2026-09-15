@@ -7,7 +7,7 @@ import { createServer } from "vite";
 
 const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const outputRoot = resolve(desktopRoot, "artifacts", "visual-regression");
-const states = ["default", "empty", "selected-node", "selected-wire", "draft", "dangling", "pending", "error"];
+const states = ["default", "empty", "selected-component", "selected-wire", "draft", "dangling", "pending", "error"];
 const themes = ["dark", "light"];
 const viewports = {
   regular: { width: 1440, height: 900 },
@@ -45,8 +45,8 @@ async function main() {
   const options = parseArguments(process.argv.slice(2));
   const port = 4175;
   app.disableHardwareAcceleration();
-  // Fixture is static HTML/CSS; avoiding the Vue config keeps this check independent of the application build.
-  const vite = await createServer({ configFile: false, root: desktopRoot, server: { host: "127.0.0.1", port, strictPort: true } });
+  // 使用正式 Vite/Vue 配置，截图页面挂载真实 App 与 CircuitCanvas。
+  const vite = await createServer({ root: desktopRoot, server: { host: "127.0.0.1", port, strictPort: true } });
   try {
     await vite.listen();
     await waitForServer(`http://127.0.0.1:${port}/visual-regression.html`);
@@ -56,6 +56,8 @@ async function main() {
     app.commandLine.appendSwitch("no-sandbox");
     await app.whenReady();
     const window = new BrowserWindow({ show: false, width: 1440, height: 900, webPreferences: { sandbox: true } });
+    window.webContents.on("console-message", (_event, level, message) => console.error(`[visual console ${level}] ${message}`));
+    window.webContents.on("did-fail-load", (_event, code, description) => console.error(`[visual load ${code}] ${description}`));
     const manifest = [];
     for (const theme of options.themes) {
       for (const [viewportName, viewport] of Object.entries(viewports)) {
@@ -63,7 +65,11 @@ async function main() {
           window.setSize(viewport.width, viewport.height);
           const motion = options.reducedMotion ? "&motion=reduced" : "";
           await window.loadURL(`http://127.0.0.1:${port}/visual-regression.html?theme=${theme}&state=${state}${motion}`);
-          await new Promise((resolvePromise) => setTimeout(resolvePromise, 80));
+          // 等待真实 Vue 场景完成挂载；首次 Vite 依赖编译可能超过普通动画等待时间。
+          await window.webContents.executeJavaScript("new Promise((resolve, reject) => { const started = Date.now(); const check = () => document.querySelector('.app-shell') ? resolve(true) : Date.now() - started > 20000 ? reject(new Error('真实 Vue App 挂载超时')) : setTimeout(check, 50); check(); })");
+          await new Promise((resolvePromise) => setTimeout(resolvePromise, 180));
+          const bodyText = await window.webContents.executeJavaScript("document.body.innerText.slice(0, 120)");
+          if (!bodyText) throw new Error(`真实 Vue 页面未渲染：${theme}/${viewportName}/${state}`);
           const image = await window.webContents.capturePage();
           const filename = `${theme}-${viewportName}-${state}${options.reducedMotion ? "-reduced-motion" : ""}.png`;
           const outputPath = resolve(outputRoot, filename);

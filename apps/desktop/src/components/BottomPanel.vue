@@ -1,11 +1,6 @@
 <script setup lang="ts">
 import type { Signal } from "@circuit-platform/protocol";
-import type {
-  BottomTab,
-  NodeKey,
-  WaveformKey,
-  WaveformRow,
-} from "../composables/useEditorState";
+import type { BottomTab, WaveformKey, WaveformRow } from "../composables/useEditorState";
 import type { EditorConnectionId } from "../editor";
 import type { InspectorModel } from "../editor/inspector";
 import type { WaveformPoint, WorkspaceEngineState } from "../workspace";
@@ -23,12 +18,11 @@ defineProps<{
   waveform: readonly WaveformPoint[];
   simulationStep: number;
   outputs: readonly OutputItem[];
-  selectedNodeName: string;
-  selectedNode: NodeKey | null;
+  selectedComponentName: string;
   selectedConnection: EditorConnectionId | null;
-  selectedNodeId: string | null;
-  selectedNodeValue: Signal;
-  selectedNodeDescription: string;
+  selectedObjectId: string | null;
+  selectedComponentValue: Signal;
+  selectedComponentDescription: string;
   showDetails: boolean;
   engineState: WorkspaceEngineState;
   engineName: string;
@@ -38,7 +32,7 @@ defineProps<{
 
 const emit = defineEmits<{
   selectTab: [tab: BottomTab];
-  selectNode: [node: NodeKey];
+  selectComponent: [componentId: string];
   toggleDetails: [];
 }>();
 
@@ -80,7 +74,7 @@ function waveformValue(point: WaveformPoint, key: WaveformKey): Signal {
     </div>
     <div v-else-if="bottomTab === 'outputs'" class="bottom-content bottom-content--outputs" aria-live="polite">
       <div class="output-panel-heading"><div><span class="eyebrow">OUTPUT MONITOR</span><strong>当前电路输出</strong></div><span>{{ outputs.length }} 个输出</span></div>
-      <div class="output-list"><button v-for="output in outputs" :key="output.key" class="output-readout" type="button" @click="emit('selectNode', 'output')"><span class="output-readout-symbol" :class="signalClass(output.value)">OUT</span><span class="output-readout-copy"><strong>{{ output.label }}</strong><small>{{ output.description }}</small></span><b :class="signalClass(output.value)">{{ output.value }}</b></button></div>
+      <div class="output-list"><button v-for="output in outputs" :key="output.key" class="output-readout" type="button" @click="emit('selectComponent', output.key)"><span class="output-readout-symbol" :class="signalClass(output.value)">OUT</span><span class="output-readout-copy"><strong>{{ output.label }}</strong><small>{{ output.description }}</small></span><b :class="signalClass(output.value)">{{ output.value }}</b></button></div>
       <div class="bottom-engine"><span class="engine-indicator" :class="`engine-indicator--${engineState}`"></span><span>{{ engineName }}</span></div>
     </div>
     <div v-else class="bottom-content bottom-content--waveform">

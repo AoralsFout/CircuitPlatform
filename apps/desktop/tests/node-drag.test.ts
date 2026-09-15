@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createNodeDragController, snapNodePosition } from "../src/canvas/drag.ts";
 
-test("snaps node positions to the 16-world-unit grid unless Alt is held", () => {
+test("snaps Component positions to the 16-world-unit grid unless Alt is held", () => {
   assert.deepEqual(snapNodePosition({ x: 23, y: 40 }), { x: 16, y: 48 });
   assert.deepEqual(snapNodePosition({ x: 23, y: 40 }, true), { x: 23, y: 40 });
 });
