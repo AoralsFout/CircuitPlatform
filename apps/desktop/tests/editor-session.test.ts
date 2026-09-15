@@ -55,6 +55,15 @@ class FakeEngine implements CircuitEnginePort {
   }
 }
 
+class SettlingFakeEngine extends FakeEngine {
+  settleCalls = 0;
+
+  async settle(): Promise<EngineResult<{ status: "ok" }>> {
+    this.settleCalls += 1;
+    return { ok: true, value: { status: "ok" } };
+  }
+}
+
 test("maps editor keyboard shortcuts while preserving editable targets", () => {
   const key = (overrides: Partial<Parameters<typeof resolveEditorShortcut>[0]>) =>
     resolveEditorShortcut({ key: "", ctrlKey: false, metaKey: false, shiftKey: false, editableTarget: false, ...overrides });
@@ -721,6 +730,92 @@ test("transport failure keeps the pending add retryable without publishing a hal
   assert.equal(retried.ok, true);
   assert.equal(retried.snapshot.document.components[0]?.id, "component-1");
   assert.equal(retried.snapshot.document.components[0]?.displayName, "OR 门 1");
+});
+
+test("offline sessions keep local geometry editable while rejecting Circuit mutations", async () => {
+  let available = false;
+  const engine = new FakeEngine();
+  const session = createEditorSession({
+    document: createAndDemoDocument(),
+    bindings: {
+      components: { "input-a": 1, "input-b": 2, "and-gate": 3, output: 4 },
+      connections: { "wire-a": 10, "wire-b": 11, "wire-output": 12 },
+    },
+  }, engine, { isEngineAvailable: () => available });
+
+  const moved = await session.dispatch({ type: "move-component", componentId: "and-gate", position: { x: 512, y: 224 } });
+  assert.equal(moved.ok, true);
+  const edited = await session.dispatch({
+    type: "edit-route",
+    connectionId: "wire-output",
+    route: [{ x: 585, y: 270 }, { x: 640, y: 270 }, { x: 640, y: 350 }, { x: 805, y: 270 }],
+  });
+  assert.equal(edited.ok, true);
+
+  const beforeAdd = session.snapshot().document;
+  const blocked = await session.dispatch({ type: "add-component", kind: "or", position: { x: 96, y: 96 } });
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.error.code, "engine_unavailable");
+  assert.deepEqual(blocked.snapshot.document, beforeAdd);
+
+  await session.dispatch({ type: "select", selection: { kind: "component", id: "and-gate" } });
+  const blockedDelete = await session.dispatch({ type: "delete-selected" });
+  assert.equal(blockedDelete.ok, false);
+  assert.equal(blockedDelete.error.code, "engine_unavailable");
+  assert.equal(blockedDelete.error.category, "structure");
+  assert.equal(blockedDelete.snapshot.document.components.some((component) => component.id === "and-gate"), true);
+  assert.equal(engine.calls.length, 0);
+
+  const blockedConnection = await session.dispatch({
+    type: "create-connection",
+    left: { componentId: "input-a", port: "out", direction: "output", point: { x: 210, y: 150 } },
+    right: { componentId: "output", port: "in", direction: "input", point: { x: 805, y: 270 } },
+  });
+  assert.equal(blockedConnection.ok, false);
+  assert.equal(blockedConnection.error.code, "engine_unavailable");
+  const blockedReconnect = await session.dispatch({
+    type: "reconnect-connection",
+    connectionId: "wire-output",
+    left: { componentId: "and-gate", port: "out", direction: "output", point: { x: 585, y: 270 } },
+    right: { componentId: "output", port: "in", direction: "input", point: { x: 805, y: 270 } },
+  });
+  assert.equal(blockedReconnect.ok, false);
+  assert.equal(blockedReconnect.error.code, "engine_unavailable");
+
+  available = true;
+  session.setEngineAvailability(true);
+  const added = await session.dispatch({ type: "add-component", kind: "or", position: { x: 96, y: 96 } });
+  assert.equal(added.ok, true);
+});
+
+test("a combinational-loop settle error is separate from a committed structure", async () => {
+  const engine = new FakeEngine() as FakeEngine & {
+    settle: () => Promise<EngineResult<{ status: "ok" }>>;
+  };
+  engine.settle = async () => ({
+    ok: false,
+    error: { code: "combinational_loop", message: "检测到组合逻辑环路", retryable: false },
+  });
+  const session = createEditorSession({ document: { components: [], connections: [] }, bindings: { components: {}, connections: {} } }, engine);
+
+  const result = await session.dispatch({ type: "add-component", kind: "and", position: { x: 96, y: 96 } });
+  assert.equal(result.ok, true);
+  assert.equal(result.snapshot.document.components.length, 1);
+  assert.equal(result.snapshot.error, null);
+  assert.equal(result.snapshot.simulationError?.code, "combinational_loop");
+  assert.equal(result.snapshot.simulationError?.category, "simulation");
+});
+
+test("settles once for each successful Circuit transaction", async () => {
+  const engine = new SettlingFakeEngine();
+  const session = createEditorSession({ document: { components: [], connections: [] }, bindings: { components: {}, connections: {} } }, engine);
+
+  const added = await session.dispatch({ type: "add-component", kind: "and", position: { x: 96, y: 96 } });
+  assert.equal(added.ok, true);
+  assert.equal(engine.settleCalls, 1);
+  const undone = await session.dispatch({ type: "undo" });
+  assert.equal(undone.ok, true);
+  assert.equal(engine.settleCalls, 2);
 });
 
 test("added component is undoable without reusing its editor identity", async () => {

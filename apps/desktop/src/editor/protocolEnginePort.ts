@@ -26,7 +26,9 @@ async function call<T>(action: () => Promise<EngineResponse>, read: (response: E
     return {
       ok: false,
       error: {
-        code: "engine_operation_failed",
+        // 请求未得到协议响应时，Circuit 可能仍在引擎外部；让会话冻结结构事务，
+        // 同时保留可重试的本地编辑器状态。协议内的业务 error 不走此分支。
+        code: "engine_unavailable",
         message: error instanceof Error ? error.message : "仿真引擎操作失败。",
         retryable: true,
       },

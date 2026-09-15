@@ -114,6 +114,8 @@ export function useWorkspace(): WorkspaceBinding {
       { document: createAndDemoDocument(), bindings: toEditorBindings(bindings) },
       createProtocolEnginePort(adapter),
       {
+        // EditorSession 只询问一个布尔可用性 seam；引擎状态仍留在 Workspace 快照中。
+        isEngineAvailable: () => workspace.snapshot().engineState === "ready",
         onBindingsChanged(nextBindings) {
           state.value = workspace.rebindSimulation(toSimulationBindings(nextBindings));
         },
@@ -136,6 +138,7 @@ export function useWorkspace(): WorkspaceBinding {
 
   async function checkEngine(): Promise<void> {
     await reflect(() => workspace.checkEngine());
+    editor?.setEngineAvailability(state.value.engineState === "ready");
     await loadDemoWhenReady();
   }
 
