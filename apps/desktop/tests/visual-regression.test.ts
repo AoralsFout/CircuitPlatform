@@ -38,6 +38,8 @@ test("canvas exposes non-color state hooks for ports and wires", async () => {
   assert.match(styles, /\.node-port--left \.node-port__anchor[^}]+translate\(-50%, -50%\)/);
   assert.match(styles, /\.node-port--right \.node-port__anchor[^}]+translate\(50%, -50%\)/);
   assert.match(canvas, /signal-wire--draft/);
+  assert.match(canvas, /circuit-canvas--connecting/);
+  assert.match(styles, /\.circuit-canvas--connecting \{ cursor: crosshair; \}/);
   assert.match(canvas, /正在放置/);
   assert.match(canvas, /放置失败/);
   assert.match(canvas, />重试</);
@@ -62,4 +64,11 @@ test("canvas starts pointer panning only from background for an ordinary left dr
   assert.match(canvas, /circuit-canvas--panning/);
   assert.match(styles, /\.circuit-canvas \{[^}]+cursor: grab;/);
   assert.match(styles, /\.circuit-canvas--panning \{ cursor: grabbing; \}/);
+});
+
+test("context menu removes a draft waypoint or cancels an empty draft", async () => {
+  const canvas = await readFile(join(desktopRoot, "src", "components", "CircuitCanvas.vue"), "utf8");
+  const app = await readFile(join(desktopRoot, "src", "App.vue"), "utf8");
+  assert.match(canvas, /emit\("connectionWaypointRemoveOrCancel"\)/);
+  assert.match(app, /@connection-waypoint-remove-or-cancel="removeConnectionWaypointOrCancel"/);
 });

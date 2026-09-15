@@ -233,6 +233,12 @@ export function useEditorState(
     connectionDraft.value = reduceConnectionDraft(connectionDraft.value, { type: "remove-waypoint" });
   }
 
+  /** 右键优先删除最近一个临时折点；没有折点时直接取消当前布线。 */
+  function removeConnectionWaypointOrCancel(): void {
+    connectionMoveCoalescer.flush();
+    connectionDraft.value = reduceConnectionDraft(connectionDraft.value, { type: "remove-waypoint-or-cancel" });
+  }
+
   function cancelConnection(): void {
     connectionMoveCoalescer.cancel();
     connectionDraft.value = reduceConnectionDraft(connectionDraft.value, { type: "cancel" });
@@ -421,6 +427,7 @@ export function useEditorState(
     finishConnection,
     toggleConnectionAxis,
     removeConnectionWaypoint,
+    removeConnectionWaypointOrCancel,
     cancelConnection,
     focusCanvasObject,
   };

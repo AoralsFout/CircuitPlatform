@@ -68,6 +68,7 @@ const emit = defineEmits<{
   connectionEnd: [port: ConnectionDraftPort];
   connectionAxisToggle: [];
   connectionWaypointRemove: [];
+  connectionWaypointRemoveOrCancel: [];
   connectionCancel: [];
   focusChange: [id: string | null];
   clearSelection: [];
@@ -344,7 +345,7 @@ function onContextMenu(event: MouseEvent): void {
   if (props.interaction.connectionDraft) {
     objectMenu.value = null;
     componentMenu.value = null;
-    emit("connectionWaypointRemove");
+    emit("connectionWaypointRemoveOrCancel");
     canvasElement.value?.focus();
     return;
   }
@@ -753,7 +754,7 @@ watch(() => props.interaction.connectionDraft, (draft) => {
 <template>
   <div class="editor-canvas-wrap">
     <div class="canvas-info"><span class="canvas-mode"><span class="mode-dot" aria-hidden="true"></span>场景模式</span><span>Delete 删除 · Ctrl/Cmd+D 复制 · Ctrl/Cmd+Z 撤销 · Esc 取消</span></div>
-    <div ref="canvasElement" class="circuit-canvas" :class="{ 'circuit-canvas--dense': isDenseCanvasScene(scene), 'circuit-canvas--panning': isPanning }" role="application" tabindex="0" aria-label="电路画布" @wheel="onWheel" @contextmenu="onContextMenu" @keydown="onCanvasKeydown" @dragover="onDragOver" @drop="onDrop" @pointerdown="onPointerDown" @pointermove="onPointerMove" @pointerup="onPointerUp" @pointercancel="onPointerUp">
+    <div ref="canvasElement" class="circuit-canvas" :class="{ 'circuit-canvas--dense': isDenseCanvasScene(scene), 'circuit-canvas--panning': isPanning, 'circuit-canvas--connecting': interaction.connectionDraft }" role="application" tabindex="0" aria-label="电路画布" @wheel="onWheel" @contextmenu="onContextMenu" @keydown="onCanvasKeydown" @dragover="onDragOver" @drop="onDrop" @pointerdown="onPointerDown" @pointermove="onPointerMove" @pointerup="onPointerUp" @pointercancel="onPointerUp">
       <div class="canvas-grid" :style="gridStyle()" aria-hidden="true"></div>
       <div class="canvas-viewport" :style="viewportStyle()">
         <svg class="signal-map" aria-label="电路连接">

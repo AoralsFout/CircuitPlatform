@@ -88,6 +88,7 @@ const {
   finishConnection,
   toggleConnectionAxis,
   removeConnectionWaypoint,
+  removeConnectionWaypointOrCancel,
   cancelConnection,
   focusCanvasObject,
 } = useEditorState(state, editorState, select, moveComponent, updatePlacement, editRoute, createConnection);
@@ -227,6 +228,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           @connection-end="finishConnection"
           @connection-axis-toggle="toggleConnectionAxis"
           @connection-waypoint-remove="removeConnectionWaypoint"
+          @connection-waypoint-remove-or-cancel="removeConnectionWaypointOrCancel"
           @connection-cancel="cancelConnection"
           @focus-change="focusCanvasObject"
           @viewport-change="setViewport"

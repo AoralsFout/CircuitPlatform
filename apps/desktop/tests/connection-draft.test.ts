@@ -86,6 +86,19 @@ test("Backspace removes only the latest temporary waypoint", () => {
   assert.equal(state.hasPlacedFirstWaypoint, false);
 });
 
+test("right-click removes the latest temporary waypoint or cancels an empty draft", () => {
+  let state = reduceConnectionDraft(createConnectionDraft(), { type: "start", port: output });
+  state = reduceConnectionDraft(state, { type: "remove-waypoint-or-cancel" });
+  assert.equal(state.phase, "idle");
+  assert.equal(state.origin, null);
+
+  state = reduceConnectionDraft(createConnectionDraft(), { type: "start", port: output });
+  state = reduceConnectionDraft(state, { type: "place-waypoint", point: { x: 43, y: 71 } });
+  state = reduceConnectionDraft(state, { type: "remove-waypoint-or-cancel" });
+  assert.equal(state.phase, "drawing");
+  assert.deepEqual(state.waypoints, []);
+});
+
 test("connection target validation gives actionable reasons and endpoint normalization is bidirectional", () => {
   assert.equal(validateConnectionDraftTarget(output, input), null);
   assert.equal(validateConnectionDraftTarget(output, { ...output, componentId: "other" })?.code, "same-direction");

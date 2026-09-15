@@ -43,6 +43,7 @@ export type ConnectionDraftAction =
   | { type: "place-waypoint"; point: Point; altKey?: boolean }
   | { type: "toggle-axis" }
   | { type: "remove-waypoint" }
+  | { type: "remove-waypoint-or-cancel" }
   | { type: "fail"; error: ConnectionDraftError }
   | { type: "clear-error" }
   | { type: "cancel" };
@@ -173,6 +174,17 @@ export function reduceConnectionDraft(
   if (action.type === "toggle-axis") return { ...copyState(state), axis: state.axis === "horizontal" ? "vertical" : "horizontal", error: null };
   if (action.type === "remove-waypoint") {
     if (state.waypoints.length === 0) return copyState(state);
+    const waypoints = state.waypoints.slice(0, -1);
+    return {
+      ...copyState(state),
+      waypoints,
+      cursor: waypoints.at(-1) ? copyPoint(waypoints.at(-1)!) : copyPoint(state.origin.point),
+      hasPlacedFirstWaypoint: waypoints.length > 0,
+      error: null,
+    };
+  }
+  if (action.type === "remove-waypoint-or-cancel") {
+    if (state.waypoints.length === 0) return createConnectionDraft();
     const waypoints = state.waypoints.slice(0, -1);
     return {
       ...copyState(state),
