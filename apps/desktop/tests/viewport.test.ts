@@ -28,6 +28,7 @@ test("wheel and pointer gestures pan on the expected axis", () => {
   assert.equal(applyWheelViewport(viewport, { deltaX: 0, deltaY: 50, shiftKey: true }, { x: 400, y: 250 }).x, -50);
   assert.equal(isViewportPanPointer(1, false), true);
   assert.equal(isViewportPanPointer(0, true), true);
+  assert.equal(isViewportPanPointer(0, false, true), true);
   assert.equal(isViewportPanPointer(0, false), false);
 });
 

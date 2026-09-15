@@ -216,7 +216,13 @@ export function applyWheelViewport(
 /** `applyWheelViewport` 的交互层别名。 */
 export const applyViewportWheel = applyWheelViewport;
 
-/** 便于交互层判断 pointer 是否代表中键或 Space+左键平移。 */
-export function isViewportPanPointer(button: number, spacePressed: boolean): boolean {
-  return button === 1 || (button === 0 && spacePressed);
+/**
+ * 判断 pointer 是否应启动视口平移。
+ * @param button Pointer 按钮编号；1 表示中键，0 表示左键。
+ * @param spacePressed 左键平移时是否按住 Space。
+ * @param isBackground 左键是否命中画布空白背景。
+ * @returns 中键、Space+左键或空白处左键拖动时返回 true。
+ */
+export function isViewportPanPointer(button: number, spacePressed: boolean, isBackground = false): boolean {
+  return button === 1 || (button === 0 && (spacePressed || isBackground));
 }

@@ -77,6 +77,7 @@ const canvasElement = ref<HTMLElement | null>(null);
 let resizeObserver: ResizeObserver | null = null;
 let spacePressed = false;
 let panPointer: { pointerId: number; x: number; y: number } | null = null;
+const isPanning = ref(false);
 const panMoveCoalescer = createFrameCoalescer<{ pointerId: number; x: number; y: number }>((next) => {
   if (!panPointer || panPointer.pointerId !== next.pointerId) return;
   const delta = { x: next.x - panPointer.x, y: next.y - panPointer.y };
@@ -443,16 +444,17 @@ function onPointerDown(event: PointerEvent): void {
     event.stopPropagation();
     return;
   }
-  if (event.button === 0 && !spacePressed) {
-    const hit = hitTestCanvas(props.scene, pointerInWorld(event), { zoom: props.viewport.zoom });
-    if (hit.kind === "background") {
-      objectMenu.value = null;
-      componentMenu.value = null;
-      emit("clearSelection");
-    }
+  const hit = event.button === 0 && !spacePressed
+    ? hitTestCanvas(props.scene, pointerInWorld(event), { zoom: props.viewport.zoom })
+    : null;
+  if (hit?.kind === "background") {
+    objectMenu.value = null;
+    componentMenu.value = null;
+    emit("clearSelection");
   }
-  if (!isViewportPanPointer(event.button, spacePressed)) return;
+  if (!isViewportPanPointer(event.button, spacePressed, hit?.kind === "background")) return;
   panPointer = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+  isPanning.value = true;
   canvasElement.value?.setPointerCapture(event.pointerId);
   event.preventDefault();
   event.stopPropagation();
@@ -530,6 +532,7 @@ function onPointerUp(event: PointerEvent): void {
   else panMoveCoalescer.flush();
   if (canvasElement.value?.hasPointerCapture(event.pointerId)) canvasElement.value.releasePointerCapture(event.pointerId);
   panPointer = null;
+  isPanning.value = false;
 }
 
 function onNodeClick(nodeId: string): void {
@@ -730,6 +733,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   panMoveCoalescer.cancel();
+  isPanning.value = false;
   resizeObserver?.disconnect();
   window.removeEventListener("keydown", onKeydown);
   window.removeEventListener("keyup", onKeyup);
@@ -746,7 +750,7 @@ watch(() => props.interaction.connectionDraft, (draft) => {
 <template>
   <div class="editor-canvas-wrap">
     <div class="canvas-info"><span class="canvas-mode"><span class="mode-dot" aria-hidden="true"></span>场景模式</span><span>Delete 删除 · Ctrl/Cmd+D 复制 · Ctrl/Cmd+Z 撤销 · Esc 取消</span></div>
-    <div ref="canvasElement" class="circuit-canvas" :class="{ 'circuit-canvas--dense': isDenseCanvasScene(scene) }" role="application" tabindex="0" aria-label="电路画布" @wheel="onWheel" @contextmenu="onContextMenu" @keydown="onCanvasKeydown" @dragover="onDragOver" @drop="onDrop" @pointerdown="onPointerDown" @pointermove="onPointerMove" @pointerup="onPointerUp" @pointercancel="onPointerUp">
+    <div ref="canvasElement" class="circuit-canvas" :class="{ 'circuit-canvas--dense': isDenseCanvasScene(scene), 'circuit-canvas--panning': isPanning }" role="application" tabindex="0" aria-label="电路画布" @wheel="onWheel" @contextmenu="onContextMenu" @keydown="onCanvasKeydown" @dragover="onDragOver" @drop="onDrop" @pointerdown="onPointerDown" @pointermove="onPointerMove" @pointerup="onPointerUp" @pointercancel="onPointerUp">
       <div class="canvas-grid" :style="gridStyle()" aria-hidden="true"></div>
       <div class="canvas-viewport" :style="viewportStyle()">
         <svg class="signal-map" aria-label="电路连接">
@@ -766,7 +770,7 @@ watch(() => props.interaction.connectionDraft, (draft) => {
         </svg>
         <article v-for="node in scene.nodes" :key="node.id" class="circuit-node" :class="{ 'circuit-node--selected': node.selected, 'circuit-node--focused': interaction.focusedId === node.id, 'circuit-node--dragging': interaction.draggingComponentId === node.id }" :style="nodeStyle(node)" role="button" tabindex="0" data-canvas-focus data-focus-kind="component" :data-focus-id="node.id" :data-selected="node.selected ? 'true' : 'false'" :aria-label="`选择${node.kind.toUpperCase()} 元件`" @focus="emit('focusChange', node.id)" @pointerdown.stop="onNodePointerDown($event, node)" @click="onNodeClick(node.id)">
           <strong>{{ node.kind.toUpperCase() }}</strong>
-          <span v-for="port in node.ports" :key="port.id" class="node-port" :class="[port.direction === 'input' ? 'node-port--left' : 'node-port--right', signalClass(port.signal), { 'node-port--dangling': port.dangling, 'node-port--connection-target': isHoveredConnectionTarget(node.id, port.id) }]" :style="{ top: `${port.offset.y}px` }" :data-port-id="port.id" :data-node-id="node.id" :data-signal="port.signal" :data-dangling="port.dangling ? 'true' : 'false'" :data-focus-id="`port:${node.id}:${port.id}`" data-focus-kind="port" data-canvas-focus role="button" tabindex="0" :aria-label="`${port.direction === 'input' ? '输入' : '输出'}端口 ${port.name}，信号 ${port.signal}${port.dangling ? '，悬空' : ''}`" @focus="emit('focusChange', `port:${node.id}:${port.id}`)" @pointerdown.stop="onPortPointerDown($event, node, port)" @pointerup.stop="onPortPointerUp($event, node, port)" @click.stop="onPortClick($event)">{{ port.name }} · {{ port.signal }}<template v-if="port.dangling"> · 悬空</template></span>
+          <span v-for="port in node.ports" :key="port.id" class="node-port" :class="[port.direction === 'input' ? 'node-port--left' : 'node-port--right', signalClass(port.signal), { 'node-port--dangling': port.dangling, 'node-port--connection-target': isHoveredConnectionTarget(node.id, port.id) }]" :style="{ top: `${port.offset.y}px` }" :data-port-id="port.id" :data-node-id="node.id" :data-signal="port.signal" :data-dangling="port.dangling ? 'true' : 'false'" :data-focus-id="`port:${node.id}:${port.id}`" data-focus-kind="port" data-canvas-focus role="button" tabindex="0" :aria-label="`${port.direction === 'input' ? '输入' : '输出'}端口 ${port.name}，信号 ${port.signal}${port.dangling ? '，悬空' : ''}`" @focus="emit('focusChange', `port:${node.id}:${port.id}`)" @pointerdown.stop="onPortPointerDown($event, node, port)" @pointerup.stop="onPortPointerUp($event, node, port)" @click.stop="onPortClick($event)"><span class="node-port__anchor" aria-hidden="true"></span><span class="node-port__label">{{ port.name }}</span></span>
         </article>
         <article v-if="interaction.pendingPlacement" class="circuit-node circuit-node--pending" :class="{ 'circuit-node--error': interaction.pendingPlacement.error }" :style="{ left: `${interaction.pendingPlacement.position.x}px`, top: `${interaction.pendingPlacement.position.y}px`, width: `${interaction.pendingPlacement.size.width}px`, height: `${interaction.pendingPlacement.size.height}px` }" role="status" :aria-label="`${interaction.pendingPlacement.error ? '放置失败' : '正在放置'} ${interaction.pendingPlacement.kind} 元件`">
           <span class="node-tag">{{ interaction.pendingPlacement.error ? '放置失败' : '待放置' }}</span><strong>{{ interaction.pendingPlacement.kind.toUpperCase() }}</strong>
