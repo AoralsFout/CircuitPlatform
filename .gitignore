@@ -15,3 +15,4 @@ engine/build/
 !.vscode/settings.json
 Thumbs.db
 Desktop.ini
+apps/desktop/artifacts/visual-regression/
