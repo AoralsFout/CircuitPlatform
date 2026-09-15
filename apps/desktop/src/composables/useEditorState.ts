@@ -4,12 +4,13 @@ import type { EditorComponentId, EditorConnectionId, EditorSelection, EditorSnap
 import type { InputKey, WorkspaceSnapshot } from "../workspace";
 import {
   createComponentDefinitionRegistry,
+  createCanvasSceneProjector,
+  createFrameCoalescer,
   createNodeDragController,
   createRouteEditController,
   createViewportState,
   emptyCanvasScene,
   fitViewportToBounds,
-  projectCanvasScene,
   resizeViewport,
   setViewportZoomAt,
   type InteractionState,
@@ -99,6 +100,7 @@ export function useEditorState(
     },
   });
   const registry = createComponentDefinitionRegistry();
+  const sceneProjector = createCanvasSceneProjector(registry);
   let recentStorage: Storage | null = null;
   try {
     recentStorage = typeof window === "undefined" ? null : window.localStorage;
@@ -125,6 +127,9 @@ export function useEditorState(
   });
   const routeEditPreview = ref<{ connectionId: string; route: readonly Point[] } | null>(null);
   const connectionDraft = ref<ConnectionDraftState>(createConnectionDraft());
+  const connectionMoveCoalescer = createFrameCoalescer<{ point: Point; altKey: boolean }>(({ point, altKey }) => {
+    connectionDraft.value = reduceConnectionDraft(connectionDraft.value, { type: "move", point, altKey });
+  });
   // 键盘焦点是临时的 DOM 导航状态，不能从 EditorSnapshot 的选择状态推导。
   const focusedId = ref<string | null>(null);
   const routeEditController = createRouteEditController({
@@ -143,6 +148,10 @@ export function useEditorState(
   const previewPositions = computed<Readonly<Record<string, Point>>>(() => {
     const preview = dragPreview.value;
     return preview ? { [preview.nodeId]: { ...preview.position } } : {};
+  });
+  const previewRoutes = computed<Readonly<Record<string, readonly Point[]>> | undefined>(() => {
+    const preview = routeEditPreview.value;
+    return preview ? { [preview.connectionId]: preview.route } : undefined;
   });
 
   const canvasScene = computed(() => {
@@ -169,7 +178,7 @@ export function useEditorState(
           : "X";
       }
     }
-    return projectCanvasScene(snapshot, { signals }, registry, previewPositions.value, routeEditPreview.value ? { [routeEditPreview.value.connectionId]: routeEditPreview.value.route } : undefined);
+    return sceneProjector.project(snapshot, { signals }, previewPositions.value, previewRoutes.value);
   });
   const inspector = computed<InspectorModel>(() => createInspectorModel(
     canvasScene.value,
@@ -208,6 +217,7 @@ export function useEditorState(
   /** 从任意方向的端口开始临时连接；提交前不会改动 EditorDocument。 */
   function startConnection(port: ConnectionDraftPort): void {
     if (editorState.value?.pendingPlacement || editorState.value?.operation !== "idle") return;
+    connectionMoveCoalescer.cancel();
     const connectionId = editorState.value.document.connections.find((connection) => {
       const endpointMatches = (endpoint: { componentId: string; port: string }): boolean => endpoint.componentId === port.componentId && endpoint.port === port.port;
       return connection.lifecycle === "visible" && (
@@ -220,16 +230,18 @@ export function useEditorState(
 
   /** 更新草稿指针预览；不创建快照或历史记录。 */
   function moveConnection(point: Point, altKey = false): void {
-    connectionDraft.value = reduceConnectionDraft(connectionDraft.value, { type: "move", point, altKey });
+    connectionMoveCoalescer.schedule({ point: { ...point }, altKey });
   }
 
   /** 点击或拖拽释放到空白处时保留一个首个 Waypoint，继续点击式布线。 */
   function placeConnectionWaypoint(point: Point, altKey = false): void {
+    connectionMoveCoalescer.flush();
     connectionDraft.value = reduceConnectionDraft(connectionDraft.value, { type: "place-waypoint", point, altKey });
   }
 
   /** 释放到端口时提交一个结构事务；失败保留草稿和用户 Route。 */
   async function finishConnection(port: ConnectionDraftPort): Promise<void> {
+    connectionMoveCoalescer.flush();
     const draft = connectionDraft.value;
     if (!draft.origin) return;
     const route = connectionDraftRoute(draft, port);
@@ -251,15 +263,18 @@ export function useEditorState(
 
   /** Space 在布线期间只切换当前段轴向；Esc 由工作区命令清除草稿。 */
   function toggleConnectionAxis(): void {
+    connectionMoveCoalescer.flush();
     connectionDraft.value = reduceConnectionDraft(connectionDraft.value, { type: "toggle-axis" });
   }
 
   /** 键盘 Backspace 退回最近一个临时折点；不触碰历史记录或持久文档。 */
   function removeConnectionWaypoint(): void {
+    connectionMoveCoalescer.flush();
     connectionDraft.value = reduceConnectionDraft(connectionDraft.value, { type: "remove-waypoint" });
   }
 
   function cancelConnection(): void {
+    connectionMoveCoalescer.cancel();
     connectionDraft.value = reduceConnectionDraft(connectionDraft.value, { type: "cancel" });
   }
 
