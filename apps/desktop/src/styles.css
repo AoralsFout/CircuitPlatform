@@ -25,6 +25,7 @@
   --theme-shadow: rgba(0, 0, 0, .28);
   --theme-sidebar: rgba(21, 29, 34, .98);
   --theme-canvas-glow: rgba(35, 102, 97, .13);
+  --theme-surface-raised: #1d2b32;
 
   --color-bg: var(--theme-bg);
   --color-panel: var(--theme-panel);
@@ -41,6 +42,10 @@
   --color-status-warning: var(--theme-status-warning);
   --color-status-error: var(--theme-status-error);
   --color-focus: var(--theme-focus);
+  --color-surface-raised: var(--theme-surface-raised);
+  --color-surface-hover: color-mix(in srgb, var(--color-surface) 82%, var(--color-focus) 18%);
+  --color-danger: var(--color-status-error);
+  --shadow-panel: 0 18px 48px var(--theme-shadow);
 }
 
 :root[data-theme="light"] {
@@ -65,6 +70,7 @@
   --theme-shadow: rgba(23, 37, 42, .12);
   --theme-sidebar: rgba(229, 235, 234, .98);
   --theme-canvas-glow: rgba(20, 122, 104, .08);
+  --theme-surface-raised: #ffffff;
 }
 
 @media (prefers-color-scheme: light) {
@@ -90,6 +96,7 @@
     --theme-shadow: rgba(23, 37, 42, .12);
     --theme-sidebar: rgba(229, 235, 234, .98);
     --theme-canvas-glow: rgba(20, 122, 104, .08);
+    --theme-surface-raised: #ffffff;
   }
 }
 
@@ -99,12 +106,12 @@
 *::-webkit-scrollbar-thumb { border: 2px solid var(--theme-bg); border-radius: 5px; background: var(--theme-border-strong); }
 *::-webkit-scrollbar-thumb:hover { background: var(--color-signal-low); }
 
-body { min-width: 960px; min-height: 100vh; margin: 0; color: var(--color-text); background: var(--color-bg); }
+body { min-width: 0; min-height: 100dvh; margin: 0; color: var(--color-text); background: var(--color-bg); }
 button { font: inherit; }
 button:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 button:disabled { cursor: not-allowed; }
 
-.app-shell { display: grid; height: 100vh; min-height: 620px; grid-template-rows: 54px minmax(0, 1fr); overflow: hidden; background: radial-gradient(circle at 75% 0%, var(--theme-canvas-glow), transparent 31%), var(--color-bg); }
+.app-shell { display: grid; width: 100%; height: 100dvh; min-width: 0; min-height: 420px; grid-template-rows: 54px minmax(0, 1fr); overflow: hidden; background: radial-gradient(circle at 75% 0%, var(--theme-canvas-glow), transparent 31%), var(--color-bg); }
 .topbar { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 0 18px; border-bottom: 1px solid var(--color-border); background: color-mix(in srgb, var(--color-panel) 93%, transparent); }
 .brand-lockup, .topbar-actions, .toolbar-breadcrumb, .toolbar-tools { display: flex; align-items: center; }
 .brand-lockup { min-width: 0; gap: 11px; }
@@ -276,13 +283,15 @@ button:disabled { cursor: not-allowed; }
 .canvas-zoom-layer { position: absolute; inset: 0; transform: scale(var(--canvas-zoom)); transform-origin: center; transition: transform .18s ease; }
 .signal-map { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
 .signal-wire-hit { fill: none; stroke: transparent; stroke-width: 16; vector-effect: non-scaling-stroke; pointer-events: stroke; cursor: pointer; }
-.signal-wire-hit:focus-visible, .signal-wire-hit--focused { stroke: color-mix(in srgb, var(--color-focus) 62%, transparent); outline: none; }
+.signal-wire-hit:focus-visible, .signal-wire-hit--focused { stroke: color-mix(in srgb, var(--color-focus) 68%, transparent); stroke-dasharray: 3 3; outline: none; }
 .route-segment-hit { fill: none; stroke: transparent; stroke-width: 16; vector-effect: non-scaling-stroke; pointer-events: stroke; cursor: ns-resize; }
 .route-waypoint-handle { fill: var(--theme-canvas); stroke: var(--color-focus); stroke-width: 2; vector-effect: non-scaling-stroke; cursor: move; }
 .signal-wire { fill: none; stroke: var(--color-signal-low); stroke-width: 2.2; vector-effect: non-scaling-stroke; pointer-events: none; }
+.signal-wire--low { stroke: var(--color-signal-low); }
 .signal-wire--live { stroke: var(--color-signal-high); stroke-width: 3; filter: drop-shadow(0 0 5px color-mix(in srgb, var(--color-signal-high) 42%, transparent)); }
 .signal-wire--unknown { stroke: var(--color-signal-unknown); stroke-dasharray: 6 5; }
 .signal-wire--dangling { stroke: var(--color-status-warning); stroke-width: 2.5; stroke-dasharray: 5 5; filter: none; }
+.signal-wire--draft { stroke: var(--color-focus); stroke-width: 3; stroke-dasharray: 5 4; }
 .signal-wire:focus-visible, .signal-wire--selected { stroke: var(--color-focus); stroke-width: 5; outline: none; }
 .dangling-endpoint { fill: var(--theme-canvas); stroke: var(--color-status-warning); stroke-width: 2; vector-effect: non-scaling-stroke; pointer-events: auto; cursor: crosshair; }
 .circuit-node { position: absolute; display: flex; width: 148px; height: 84px; flex-direction: column; justify-content: center; border: 1px solid var(--color-border-strong); border-radius: 4px; padding: 13px 14px; background: color-mix(in srgb, var(--color-panel) 90%, var(--theme-canvas)); box-shadow: 0 10px 25px var(--theme-shadow); cursor: pointer; }
@@ -306,8 +315,9 @@ button:disabled { cursor: not-allowed; }
 .circuit-node:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 3px; }
 .circuit-node--active { border-color: var(--color-status-success); box-shadow: 0 0 25px color-mix(in srgb, var(--color-status-success) 14%, transparent); }
 .circuit-node--selected { border-color: var(--color-focus); box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-focus) 28%, transparent), 0 10px 25px var(--theme-shadow); }
-.circuit-node--focused:not(.circuit-node--selected) { outline: 2px dashed var(--color-focus); outline-offset: 3px; }
-.circuit-node--pending { opacity: .48; border-style: dashed; pointer-events: none; }
+.circuit-node--focused { outline: 2px dashed var(--color-focus); outline-offset: 3px; }
+.circuit-node--selected.circuit-node--focused { outline-style: solid; outline-offset: 5px; }
+.circuit-node--pending { opacity: .52; border-color: var(--color-status-warning); border-style: dashed; box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-status-warning) 18%, transparent); pointer-events: none; }
 .output-signal { position: absolute; top: 12px; right: 14px; font-family: var(--font-data); font-size: 22px; }
 .output-description { margin-top: 7px; color: var(--color-text-faint); font-size: 9px; }
 .canvas-empty-state { position: absolute; top: 50%; left: 50%; display: flex; align-items: center; flex-direction: column; transform: translate(-50%, -50%); text-align: center; }
@@ -355,7 +365,7 @@ button:disabled { cursor: not-allowed; }
 .legend-line--dangling { height: 0; border-top: 2px dashed var(--color-status-warning); background: transparent; }
 
 .bottom-panel { position: relative; min-height: 0; border-top: 1px solid var(--color-border); background: var(--theme-panel); }
-.bottom-error { position: absolute; z-index: 2; top: 7px; right: 15px; max-width: 42%; margin: 0; overflow: hidden; color: var(--color-status-error); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.bottom-error { position: absolute; z-index: 2; top: 7px; right: 15px; max-width: min(52%, 520px); margin: 0; overflow: hidden; border-left: 2px solid var(--color-status-error); padding-left: 7px; color: var(--color-status-error); font-size: 9px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
 .bottom-tabs { display: flex; gap: 19px; height: 35px; padding: 0 15px; border-bottom: 1px solid var(--color-border); }
 .bottom-tabs button { height: 35px; padding: 0; font-size: 10px; }
 .tab-count { display: inline-grid; height: 15px; min-width: 15px; margin-left: 5px; vertical-align: -3px; font-size: 8px; }
@@ -410,7 +420,10 @@ button:disabled { cursor: not-allowed; }
 .signal-state--low { color: var(--color-signal-low); }
 .signal-state--unknown { color: var(--color-signal-unknown); }
 .node-port.signal-state--high::before { color: var(--color-signal-high); }
+.node-port.signal-state--low::before { color: var(--color-signal-low); }
 .node-port.signal-state--unknown::before { border-style: dashed; }
+.node-port--dangling { color: var(--color-status-warning); }
+.node-port--dangling::before { border-style: dashed; border-color: var(--color-status-warning); }
 
 @media (max-width: 1160px) {
   .editor-layout { grid-template-columns: 48px 238px minmax(0, 1fr); }
@@ -419,11 +432,44 @@ button:disabled { cursor: not-allowed; }
   .topbar { padding-inline: 12px; }
 }
 
+/* 窄窗口仍保留画布、工具栏和状态面板；侧栏可由工具轨道重新打开。 */
+@media (max-width: 760px) {
+  .app-shell { min-height: 400px; grid-template-rows: 46px minmax(0, 1fr); }
+  .topbar { gap: 8px; padding-inline: 9px; }
+  .brand-lockup { gap: 7px; }
+  .brand-name, .topbar-divider, .project-name, .save-state, .engine-chip { display: none; }
+  .topbar-actions { margin-left: auto; }
+  .editor-layout, .editor-layout--sidebar-collapsed { grid-template-columns: 36px minmax(0, 1fr); }
+  .editor-layout > .sidebar { display: none; }
+  .editor-main, .editor-layout--sidebar-collapsed .editor-main { grid-column: 2; grid-template-rows: 42px minmax(0, 1fr) 132px; }
+  .tool-rail { gap: 5px; padding: 8px 4px; }
+  .rail-button { width: 28px; height: 28px; }
+  .canvas-info > span:last-child { display: none; }
+  .editor-canvas-wrap { padding: 9px 8px 7px; }
+  .canvas-legend { gap: 8px; flex-wrap: wrap; }
+  .bottom-content--inspector, .bottom-content--properties { gap: 10px; }
+  .bottom-content--inspector .inspector-copy, .bottom-content--inspector .inspector-port-list { display: none; }
+  .bottom-content--inspector .inspector-value { width: 120px; }
+  .bottom-content--outputs { grid-template-columns: minmax(0, 1fr); }
+  .bottom-content--outputs .bottom-engine { display: none; }
+  .output-readout { min-width: 170px; }
+  .bottom-error { right: 8px; max-width: 65%; }
+}
+
 @media (max-height: 720px) {
   .editor-main { grid-template-rows: 44px minmax(0, 1fr) 145px; }
   .circuit-node { height: 76px; }
 }
 
+@media (max-height: 600px) {
+  .app-shell { min-height: 360px; }
+  .editor-main { grid-template-rows: 40px minmax(0, 1fr) 116px; }
+  .editor-canvas-wrap { padding-block: 6px; }
+  .canvas-info, .canvas-legend { display: none; }
+  .circuit-canvas { min-height: 180px; }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
+  *, *::before, *::after { scroll-behavior: auto !important; animation: none !important; transition: none !important; }
+  .signal-wire--live { filter: none; }
 }
