@@ -26,6 +26,8 @@ CircuitPlatform 是一个可运行、可验证、可演进的数字电路仿真�
 
 Issues 和规格使用 `AoralsFout/CircuitPlatform` 的 GitHub Issues 管理。参见 `docs/agents/issue-tracker.md`。
 
+所有 GitHub 读取和写入操作都使用 `gh` CLI。禁止通过浏览器或浏览器自动化操作 GitHub。在受限执行环境中，直接使用工具提供的提权或沙箱外执行方式运行 `gh`，确保它可以读取用户级 GitHub CLI 配置并访问网络；如果 `gh` 尚未授权，按相同方式运行 `gh auth login`，并由用户完成设备授权。
+
 ### Triage labels
 
 使用五种标准 triage 标签：`needs-triage`、`needs-info`、`ready-for-agent`、`ready-for-human` 和 `wontfix`。参见 `docs/agents/triage-labels.md`。
