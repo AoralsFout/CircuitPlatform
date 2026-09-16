@@ -414,7 +414,25 @@ export function createWorkspace(adapter: EngineAdapter): Workspace {
       state.message = "示例已创建，试着切换输入 A 或输入 B。";
       await runSimulationInternal(state.runtimeBindings);
       state.isBusy = false;
-      const editor = { components: { "input-a": ids.inputA, "input-b": ids.inputB, "and-gate": ids.andGate, output: ids.output }, componentKinds: { "input-a": "input", "input-b": "input", "and-gate": "and", output: "output" } } satisfies SimulationBindings;
+      const editor = {
+        components: {
+          "input-a": ids.inputA,
+          "input-b": ids.inputB,
+          "and-gate": ids.andGate,
+          output: ids.output,
+        },
+        connections: {
+          "wire-a": connections.wireA,
+          "wire-b": connections.wireB,
+          "wire-output": connections.wireOutput,
+        },
+        componentKinds: {
+          "input-a": "input",
+          "input-b": "input",
+          "and-gate": "and",
+          output: "output",
+        },
+      } satisfies SimulationBindings;
       const bindings = { components: { ...ids }, connections } as DemoRuntimeBindings;
       Object.defineProperty(bindings, "editor", { value: editor, enumerable: false });
       return {

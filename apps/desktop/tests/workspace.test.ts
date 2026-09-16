@@ -95,6 +95,11 @@ test("creates and runs the AND example through the adapter", async () => {
     components: { inputA: 1, inputB: 2, andGate: 3, output: 4 },
     connections: { wireA: 1, wireB: 2, wireOutput: 3 },
   });
+  assert.deepEqual(loaded.bindings?.editor.connections, {
+    "wire-a": 1,
+    "wire-b": 2,
+    "wire-output": 3,
+  });
   assert.equal(state.outputValue, 1);
   assert.equal(state.waveform.length, 1);
   assert.deepEqual(state.waveform[0], { step: 1, a: 1, b: 1, output: 1 });
@@ -228,6 +233,66 @@ test("refreshes the AND output signal immediately after creating its output wire
     const outputWire = scene.wires.find((wire) => wire.source.componentId === "and-gate" && wire.target.componentId === newOutput.id);
 
     assert.equal(outputWire?.signal, 1);
+  } finally {
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
+});
+
+test("deletes a connection loaded with the demo through the workspace binding", async () => {
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const engine = new FakeEngine();
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { circuitPlatform: engine },
+  });
+
+  try {
+    const binding = useWorkspace();
+    await binding.bootstrap();
+    engine.calls.length = 0;
+
+    await binding.deleteConnection("wire-a");
+
+    assert.equal(binding.editorState.value?.error, null);
+    assert.equal(
+      binding.editorState.value?.document.connections.some((connection) => connection.id === "wire-a"),
+      false,
+    );
+    assert.deepEqual(engine.calls[0], { type: "removeConnection", connectionId: 1 });
+  } finally {
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
+});
+
+test("clears a demo loaded through the workspace binding", async () => {
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const engine = new FakeEngine();
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { circuitPlatform: engine },
+  });
+
+  try {
+    const binding = useWorkspace();
+    await binding.bootstrap();
+    engine.calls.length = 0;
+
+    await binding.requestClear();
+    await binding.confirmClear();
+
+    assert.equal(binding.editorState.value?.error, null);
+    assert.equal(binding.editorState.value?.document.components.length, 0);
+    assert.equal(binding.editorState.value?.document.connections.length, 0);
+    assert.deepEqual(
+      engine.calls.filter((call) => call.type === "removeConnection"),
+      [
+        { type: "removeConnection", connectionId: 1 },
+        { type: "removeConnection", connectionId: 2 },
+        { type: "removeConnection", connectionId: 3 },
+      ],
+    );
   } finally {
     if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
     else Reflect.deleteProperty(globalThis, "window");
