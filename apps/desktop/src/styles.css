@@ -223,6 +223,7 @@ button:disabled { cursor: not-allowed; }
 .object-context-menu__item--destructive { color: var(--color-danger) !important; }
 
 .editor-main { display: grid; min-width: 0; min-height: 0; grid-column: 3; grid-template-rows: 46px minmax(0, 1fr) 165px; background: var(--color-bg); }
+.editor-main.editor-main--bottom-panel-collapsed { grid-template-rows: 46px minmax(0, 1fr) 35px; }
 .editor-layout--sidebar-collapsed .editor-main { grid-column: 2; }
 .settings-page { grid-column: 2 / -1; min-width: 0; min-height: 0; overflow: auto; padding: 44px clamp(32px, 7vw, 110px); background: radial-gradient(circle at 75% 0%, var(--theme-canvas-glow), transparent 34%), var(--color-bg); }
 .settings-heading { max-width: 670px; }
@@ -379,6 +380,9 @@ button:disabled { cursor: not-allowed; }
 .bottom-error { position: absolute; z-index: 2; top: 7px; right: 15px; max-width: min(52%, 520px); margin: 0; overflow: hidden; border-left: 2px solid var(--color-status-error); padding-left: 7px; color: var(--color-status-error); font-size: 9px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
 .bottom-tabs { display: flex; gap: 19px; height: 35px; padding: 0 15px; border-bottom: 1px solid var(--color-border); }
 .bottom-tabs button { height: 35px; padding: 0; font-size: 10px; }
+.bottom-tabs__spacer { flex: 1; }
+.bottom-panel-toggle { display: grid; width: 24px; place-items: center; border: 0; color: var(--color-text-faint); background: transparent; cursor: pointer; font-family: var(--font-data); font-size: 16px; line-height: 1; }
+.bottom-panel-toggle:hover { color: var(--color-text); background: var(--color-surface); }
 .tab-count { display: inline-grid; height: 15px; min-width: 15px; margin-left: 5px; vertical-align: -3px; font-size: 8px; }
 .bottom-content { height: calc(100% - 35px); padding: 14px 15px; }
 .bottom-content--inspector { display: flex; align-items: center; gap: 22px; }
@@ -452,6 +456,7 @@ button:disabled { cursor: not-allowed; }
   .editor-layout, .editor-layout--sidebar-collapsed { grid-template-columns: 36px minmax(0, 1fr); }
   .editor-layout > .sidebar { display: none; }
   .editor-main, .editor-layout--sidebar-collapsed .editor-main { grid-column: 2; grid-template-rows: 42px minmax(0, 1fr) 132px; }
+  .editor-main.editor-main--bottom-panel-collapsed { grid-template-rows: 42px minmax(0, 1fr) 35px; }
   .tool-rail { gap: 5px; padding: 8px 4px; }
   .rail-button { width: 28px; height: 28px; }
   .canvas-info > span:last-child { display: none; }

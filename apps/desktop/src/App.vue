@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted } from "vue";
+import { onBeforeUnmount, onMounted, ref } from "vue";
 import BottomPanel from "./components/BottomPanel.vue";
 import CircuitCanvas from "./components/CircuitCanvas.vue";
 import ClearCanvasDialog from "./components/ClearCanvasDialog.vue";
@@ -100,6 +100,12 @@ const {
   cycle: cycleTheme,
 } = useThemePreference();
 
+const isBottomPanelExpanded = ref(true);
+
+function toggleBottomPanel(): void {
+  isBottomPanelExpanded.value = !isBottomPanelExpanded.value;
+}
+
 /** 提交画布待放置元件；成功后与右键菜单添加共用最近使用记录。 */
 async function placeComponent(center: { x: number; y: number }, altKey: boolean): Promise<void> {
   const kind = editorState.value?.pendingPlacement?.kind;
@@ -186,7 +192,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
         @place-component="beginPlacementFromSidebar"
       />
 
-      <section v-if="activeRailPage !== 'settings'" class="editor-main" aria-label="电路编辑器">
+      <section v-if="activeRailPage !== 'settings'" class="editor-main" :class="{ 'editor-main--bottom-panel-collapsed': !isBottomPanelExpanded }" aria-label="电路编辑器">
         <p v-if="editorState?.operation === 'recovery-required'" class="bottom-error" role="alert">编辑器与仿真引擎的结构状态可能不一致。请关闭并重新打开应用后再继续编辑。</p>
         <EditorToolbar
           :zoom-label="zoomLabel"
@@ -239,6 +245,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           @cancel-placement="cancelCurrentOperation"
         />
         <BottomPanel
+          :is-expanded="isBottomPanelExpanded"
           :bottom-tab="bottomTab"
           :outputs="outputs"
           :selected-connection="selectedConnection"
@@ -255,6 +262,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           :waveform-rows="waveformRows"
           :simulation-step="state.simulationStep"
           @select-tab="bottomTab = $event"
+          @toggle-panel="toggleBottomPanel"
           @select-component="selectComponent"
           @toggle-details="showDetails = !showDetails"
         />
