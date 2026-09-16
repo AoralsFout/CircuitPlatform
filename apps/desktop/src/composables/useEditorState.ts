@@ -147,7 +147,13 @@ export function useEditorState(
   const canvasScene = computed(() => {
     const snapshot = editorState.value;
     if (!snapshot) return emptyCanvasScene();
-    const simulation = createSimulationSnapshot(snapshot, registry, { inputA: workspaceState.value.inputA, inputB: workspaceState.value.inputB, inputValues: workspaceState.value.inputValues, output: workspaceState.value.outputValue });
+    const simulation = createSimulationSnapshot(snapshot, registry, {
+      inputA: workspaceState.value.inputA,
+      inputB: workspaceState.value.inputB,
+      inputValues: workspaceState.value.inputValues,
+      output: workspaceState.value.outputValue,
+      signals: workspaceState.value.signals,
+    });
     return sceneProjector.project(snapshot, simulation, previewPositions.value, previewRoutes.value);
   });
   const inspector = computed<InspectorModel>(() => createInspectorModel(

@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ComponentKindName, EngineResponse, Signal } from "@circuit-platform/protocol";
-import { createAndDemoDocument, createEditorSession, type EditorBindings } from "../src/editor/index.ts";
+import { createComponentDefinitionRegistry, projectCanvasScene } from "../src/canvas/index.ts";
+import { createAndDemoDocument, createEditorSession, type EditorBindings, type EditorSnapshot } from "../src/editor/index.ts";
 import { createProtocolEnginePort } from "../src/editor/protocolEnginePort.ts";
+import { createSimulationSnapshot } from "../src/editor/simulation.ts";
+import { useWorkspace } from "../src/composables/useWorkspace.ts";
 import { createWorkspace, type EngineAdapter, type InputKey } from "../src/workspace/index.ts";
 
 type Call =
@@ -108,6 +111,7 @@ test("creates and runs the AND example through the adapter", async () => {
     "setInput",
     "settle",
     "getSignal",
+    "getSignal",
   ]);
 });
 
@@ -151,6 +155,83 @@ test("toggles an input, runs the circuit, and appends a waveform point", async (
     { step: 2, a: 0, b: 1, output: 0 },
   ]);
   assert.equal(state.outputDescription, "至少一个输入为 0");
+});
+
+test("projects the settled AND result onto the gate output wire", async () => {
+  const engine = new FakeEngine();
+  const workspace = createWorkspace(engine);
+  await workspace.checkEngine();
+  await workspace.loadDemoCircuit();
+
+  const state = await workspace.toggleInput("b");
+  const registry = createComponentDefinitionRegistry();
+  const document = createAndDemoDocument();
+  const editorSnapshot = {
+    document,
+    selection: null,
+    operation: "idle" as const,
+    canUndo: false,
+    canRedo: false,
+    confirmation: null,
+    error: null,
+  };
+  const displayValues = {
+    inputA: state.inputA,
+    inputB: state.inputB,
+    inputValues: state.inputValues,
+    output: state.outputValue,
+    signals: state.signals,
+  };
+  const simulation = createSimulationSnapshot(editorSnapshot, registry, displayValues);
+  const scene = projectCanvasScene(editorSnapshot, simulation, registry);
+
+  assert.equal(state.outputValue, 0);
+  const andGate = scene.nodes.find((node) => node.id === "and-gate");
+  assert.equal(andGate?.ports.find((port) => port.id === "in1")?.signal, 1);
+  assert.equal(andGate?.ports.find((port) => port.id === "in2")?.signal, 0);
+  assert.equal(andGate?.ports.find((port) => port.id === "out")?.signal, 0);
+  assert.equal(scene.wires.find((wire) => wire.id === "wire-output")?.signal, 0);
+});
+
+test("refreshes the AND output signal immediately after creating its output wire", async () => {
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const engine = new FakeEngine();
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { circuitPlatform: engine },
+  });
+
+  try {
+    const binding = useWorkspace();
+    await binding.bootstrap();
+    assert.equal(await binding.addComponent("output", { x: 1040, y: 240 }), true);
+    const newOutput = binding.editorState.value?.document.components.find((component) => component.kind === "output" && component.id !== "output");
+    assert.ok(newOutput);
+
+    const created = await binding.createConnection(
+      { componentId: "and-gate", port: "out", direction: "output", point: { x: 588, y: 262 } },
+      { componentId: newOutput.id, port: "in", direction: "input", point: { x: 1040, y: 282 } },
+    );
+    assert.equal(created.ok, true, created.error);
+
+    const editorSnapshot = binding.editorState.value as EditorSnapshot;
+    const state = binding.state.value;
+    const registry = createComponentDefinitionRegistry();
+    const simulation = createSimulationSnapshot(editorSnapshot, registry, {
+      inputA: state.inputA,
+      inputB: state.inputB,
+      inputValues: state.inputValues,
+      output: state.outputValue,
+      signals: state.signals,
+    });
+    const scene = projectCanvasScene(editorSnapshot, simulation, registry);
+    const outputWire = scene.wires.find((wire) => wire.source.componentId === "and-gate" && wire.target.componentId === newOutput.id);
+
+    assert.equal(outputWire?.signal, 1);
+  } finally {
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
 });
 
 test("keeps the committed input when the next simulation is rejected", async () => {

@@ -9,15 +9,16 @@ import {
   type EditorSession,
   type EditorSnapshot,
   type WireColorId,
-} from "../editor";
-import { createProtocolEnginePort } from "../editor/protocolEnginePort";
+} from "../editor/index.ts";
+import { createProtocolEnginePort } from "../editor/protocolEnginePort.ts";
 import type { ConnectionDraftPort } from "../editor/connection-draft.ts";
 import {
   createWorkspace,
   type DemoRuntimeBindings,
+  type EngineAdapter,
   type InputKey,
   type WorkspaceSnapshot,
-} from "../workspace";
+} from "../workspace/index.ts";
 import type { ComponentKindName } from "@circuit-platform/protocol";
 
 interface WorkspaceBinding {
@@ -70,17 +71,28 @@ function toEditorBindings(bindings: DemoRuntimeBindings): EditorBindings {
  * @returns 只读仿真/编辑器快照，以及基于稳定 editor ID 的界面操作。
  */
 export function useWorkspace(): WorkspaceBinding {
-  const adapter = window.circuitPlatform;
+  const adapter = (window as unknown as { circuitPlatform: EngineAdapter }).circuitPlatform;
   const workspace = createWorkspace(adapter);
   const state = shallowRef(workspace.snapshot());
   const editorState = shallowRef<EditorSnapshot | null>(null);
   let editor: EditorSession | null = null;
   let unsubscribeEditor: (() => void) | null = null;
+  let simulationRefreshRequested = false;
 
   async function reflect(operation: () => Promise<WorkspaceSnapshot>): Promise<void> {
     const pending = operation();
     state.value = workspace.snapshot();
     state.value = await pending;
+  }
+
+  // EditorSession 的结构 settle 用于验证 Circuit；工作区仍需重新提交当前输入并读取可展示信号。
+  async function refreshSimulationAfterBindingsChange(): Promise<void> {
+    if (!simulationRefreshRequested) {
+      state.value = workspace.snapshot();
+      return;
+    }
+    simulationRefreshRequested = false;
+    await reflect(() => workspace.runSimulation());
   }
 
   function attachEditor(bindings: DemoRuntimeBindings): void {
@@ -93,6 +105,7 @@ export function useWorkspace(): WorkspaceBinding {
         isEngineAvailable: () => workspace.snapshot().engineState === "ready",
         onBindingsChanged(nextBindings) {
           state.value = workspace.rebindSimulation(nextBindings);
+          simulationRefreshRequested = true;
         },
       },
     );
@@ -131,7 +144,7 @@ export function useWorkspace(): WorkspaceBinding {
     editorState.value = editor.snapshot();
     const result = await pending;
     editorState.value = result.snapshot;
-    state.value = workspace.snapshot();
+    await refreshSimulationAfterBindingsChange();
   }
 
   /** 右键菜单直接复用 EditorSession 的 add-component 命令；成功才返回 true。 */
@@ -141,7 +154,7 @@ export function useWorkspace(): WorkspaceBinding {
     editorState.value = editor.snapshot();
     const result = await pending;
     editorState.value = result.snapshot;
-    state.value = workspace.snapshot();
+    await refreshSimulationAfterBindingsChange();
     return result.ok;
   }
 
@@ -156,7 +169,7 @@ export function useWorkspace(): WorkspaceBinding {
     editorState.value = editor.snapshot();
     const result = await pending;
     editorState.value = result.snapshot;
-    state.value = workspace.snapshot();
+    await refreshSimulationAfterBindingsChange();
     return result.ok;
   }
 
@@ -167,7 +180,7 @@ export function useWorkspace(): WorkspaceBinding {
     editorState.value = editor.snapshot();
     const result = await pending;
     editorState.value = result.snapshot;
-    state.value = workspace.snapshot();
+    await refreshSimulationAfterBindingsChange();
     return result.ok;
   }
 
@@ -178,7 +191,7 @@ export function useWorkspace(): WorkspaceBinding {
     editorState.value = editor.snapshot();
     const result = await pending;
     editorState.value = result.snapshot;
-    state.value = workspace.snapshot();
+    await refreshSimulationAfterBindingsChange();
     return result.ok;
   }
 
@@ -191,7 +204,7 @@ export function useWorkspace(): WorkspaceBinding {
     editorState.value = editor.snapshot();
     const result = await pending;
     editorState.value = result.snapshot;
-    state.value = workspace.snapshot();
+    await refreshSimulationAfterBindingsChange();
     return result.ok ? { ok: true } : { ok: false, error: result.error.message };
   }
 

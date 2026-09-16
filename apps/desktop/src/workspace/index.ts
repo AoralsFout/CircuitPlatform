@@ -78,6 +78,8 @@ export interface WorkspaceSnapshot {
   inputB: BinarySignal;
   /** 当前所有 Input Component 的值，键为工作区绑定中的编辑器 ID。 */
   inputValues: Readonly<Record<InputKey, BinarySignal>>;
+  /** 最近一次稳定求值后的端口信号，键为 `${editorComponentId}:${portId}`。 */
+  signals: Readonly<Record<string, Signal>>;
   outputValue: Signal;
   outputDescription: string;
   hasLab: boolean;
@@ -110,6 +112,7 @@ interface MutableState {
   inputA: BinarySignal;
   inputB: BinarySignal;
   inputValues: Record<InputKey, BinarySignal>;
+  signals: Record<string, Signal>;
   outputValue: Signal;
   hasLab: boolean;
   runtimeBindings: RuntimeSimulationBindings | null;
@@ -122,10 +125,30 @@ interface RuntimeInputBinding {
   componentId: number;
 }
 
+interface RuntimeSignalBinding {
+  key: string;
+  componentId: number;
+  port: string;
+}
+
 interface RuntimeSimulationBindings {
   inputs: readonly RuntimeInputBinding[];
-  output: number;
+  output: RuntimeSignalBinding;
+  observedSignals: readonly RuntimeSignalBinding[];
 }
+
+// 只向引擎读取元件的驱动端；Input 的值来自本次提交，接收端由编辑器沿 Connection 投影。
+const observableOutputPorts: Readonly<Partial<Record<ComponentKindName, readonly string[]>>> = {
+  and: ["out"],
+  or: ["out"],
+  nand: ["out"],
+  nor: ["out"],
+  xor: ["out"],
+  xnor: ["out"],
+  not: ["out"],
+  clock: ["out"],
+  d_flip_flop: ["q"],
+};
 
 function isErrorResponse(response: EngineResponse): response is Extract<EngineResponse, { type: "error" }> {
   return response.type === "error";
@@ -164,6 +187,7 @@ function createInitialState(): MutableState {
     inputA: 1,
     inputB: 1,
     inputValues: {},
+    signals: {},
     outputValue: "X",
     hasLab: false,
     runtimeBindings: null,
@@ -184,6 +208,7 @@ function createWorkspaceSnapshot(state: MutableState): WorkspaceSnapshot {
     inputB: state.inputB,
     outputValue: state.outputValue,
     inputValues: { ...state.inputValues },
+    signals: { ...state.signals },
     outputDescription: outputDescription(state.outputValue),
     hasLab: state.hasLab,
     simulationStep: state.simulationStep,
@@ -203,17 +228,36 @@ function runtimeBindingsFrom(ids: LabIds | SimulationBindings): RuntimeSimulatio
         { key: "a", componentId: ids.inputA },
         { key: "b", componentId: ids.inputB },
       ],
-      output: ids.output,
+      output: { key: "output:in", componentId: ids.output, port: "in" },
+      observedSignals: [{ key: "and-gate:out", componentId: ids.andGate, port: "out" }],
     };
   }
 
-  const inputs = Object.entries(ids.components)
+  const components = Object.entries(ids.components);
+  const inputs = components
     .filter(([id, componentId]) => ids.componentKinds?.[id] === "input" && componentId !== undefined)
     .map(([key, componentId]) => ({ key, componentId: componentId as number }));
-  const output = Object.entries(ids.components).find(([id, componentId]) => ids.componentKinds?.[id] === "output" && componentId !== undefined)?.[1];
-  const hasAndGate = Object.entries(ids.components).some(([id, componentId]) => ids.componentKinds?.[id] === "and" && componentId !== undefined);
-  if (inputs.length < 2 || output === undefined || !hasAndGate) return null;
-  return { inputs, output };
+  const outputEntry = components.find((entry): entry is [string, number] => {
+    const [id, componentId] = entry;
+    return ids.componentKinds?.[id] === "output" && componentId !== undefined;
+  });
+  const hasAndGate = components.some(([id, componentId]) => ids.componentKinds?.[id] === "and" && componentId !== undefined);
+  if (inputs.length < 2 || !outputEntry || !hasAndGate) return null;
+  const [outputKey, outputComponentId] = outputEntry;
+  const observedSignals = components.flatMap(([key, componentId]) => {
+    const kind = ids.componentKinds?.[key];
+    if (componentId === undefined || kind === undefined) return [];
+    return (observableOutputPorts[kind] ?? []).map((port) => ({
+      key: `${key}:${port}`,
+      componentId,
+      port,
+    }));
+  });
+  return {
+    inputs,
+    output: { key: `${outputKey}:in`, componentId: outputComponentId, port: "in" },
+    observedSignals,
+  };
 }
 
 function valuesForBindings(
@@ -297,11 +341,26 @@ export function createWorkspace(adapter: EngineAdapter): Workspace {
         expectResponse(await adapter.setInput(binding.componentId, value), "input_set");
       }
       expectResponse(await adapter.settle(), "settled");
-      const result = expectResponse(await adapter.getSignal(bindings.output, "in"), "signal_result");
+      const result = expectResponse(
+        await adapter.getSignal(bindings.output.componentId, bindings.output.port),
+        "signal_result",
+      );
+      const observedSignals: Record<string, Signal> = {};
+      for (const binding of bindings.observedSignals) {
+        observedSignals[binding.key] = expectResponse(
+          await adapter.getSignal(binding.componentId, binding.port),
+          "signal_result",
+        ).value;
+      }
       state.inputValues = Object.fromEntries(committedValues.map(({ binding, value }) => [binding.key, value]));
       state.inputA = committedValues[0]?.value ?? state.inputA;
       state.inputB = committedValues[1]?.value ?? state.inputB;
       state.outputValue = result.value;
+      state.signals = {
+        ...Object.fromEntries(committedValues.map(({ binding, value }) => [`${binding.key}:out`, value])),
+        ...observedSignals,
+        [bindings.output.key]: result.value,
+      };
       state.simulationStep += 1;
       state.waveform.push({
         step: state.simulationStep,
@@ -379,6 +438,7 @@ export function createWorkspace(adapter: EngineAdapter): Workspace {
 
   function rebindSimulation(ids: LabIds | SimulationBindings | null): WorkspaceSnapshot {
     state.runtimeBindings = ids ? runtimeBindingsFrom(ids) : null;
+    state.signals = {};
     if (state.runtimeBindings) {
       state.inputValues = valuesForBindings(state.runtimeBindings, state.inputValues, state.inputA, state.inputB);
       state.inputA = state.runtimeBindings.inputs[0] ? state.inputValues[state.runtimeBindings.inputs[0].key] ?? state.inputA : state.inputA;
