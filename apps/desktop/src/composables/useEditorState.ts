@@ -1,6 +1,15 @@
 import { computed, ref, watch, type DeepReadonly, type Ref } from "vue";
 import type { ComponentKindName, Signal } from "@circuit-platform/protocol";
-import type { EditorComponentId, EditorConnectionId, EditorSelection, EditorSnapshot, Point } from "../editor";
+import {
+  readDefaultWireColor,
+  writeDefaultWireColor,
+  type EditorComponentId,
+  type EditorConnectionId,
+  type EditorSelection,
+  type EditorSnapshot,
+  type Point,
+  type WireColorId,
+} from "../editor";
 import type { InputKey, WorkspaceSnapshot } from "../workspace";
 import {
   createComponentDefinitionRegistry,
@@ -60,7 +69,7 @@ export function useEditorState(
   moveComponent: (componentId: EditorComponentId, position: Point) => Promise<void> = async () => undefined,
   updatePlacement?: (center: Point, altKey?: boolean) => Promise<void>,
   editRoute: (connectionId: EditorConnectionId, route: readonly Point[]) => Promise<void> = async () => undefined,
-  createConnection: (left: ConnectionDraftPort, right: ConnectionDraftPort, route?: readonly Point[], connectionId?: string) => Promise<{ ok: boolean; error?: string }> = async () => ({ ok: false }),
+  createConnection: (left: ConnectionDraftPort, right: ConnectionDraftPort, route?: readonly Point[], connectionId?: string, color?: WireColorId) => Promise<{ ok: boolean; error?: string }> = async () => ({ ok: false }),
 ) {
   const showDetails = ref(false);
   const showSidebar = ref(true);
@@ -88,6 +97,7 @@ export function useEditorState(
     // 浏览器禁用持久化时，最近使用仍保存在当前内存会话中。
   }
   const recentComponentKinds = ref(readRecentComponentKinds(recentStorage, registry.list()));
+  const defaultWireColor = ref<WireColorId>(readDefaultWireColor(recentStorage));
   const draggingComponentId = ref<EditorComponentId | null>(null);
   const dragPreview = ref<{ componentId: EditorComponentId; position: Point } | null>(null);
   const dragController = createNodeDragController({
@@ -210,7 +220,14 @@ export function useEditorState(
       connection.lifecycle === "visible" && connection.target.componentId === (draft.origin?.direction === "input" ? draft.origin.componentId : port.componentId) &&
       connection.target.port === (draft.origin?.direction === "input" ? draft.origin.port : port.port),
     )?.id;
-    const result = await createConnection(draft.origin, port, route, draft.connectionId ?? targetConnectionId);
+    const replacingConnectionId = draft.connectionId ?? targetConnectionId;
+    const result = await createConnection(
+      draft.origin,
+      port,
+      route,
+      replacingConnectionId,
+      replacingConnectionId ? undefined : defaultWireColor.value,
+    );
     if (result.ok) {
       connectionDraft.value = createConnectionDraft();
     } else {
@@ -305,6 +322,11 @@ export function useEditorState(
   /** 记录已成功添加的类型；失败的引擎命令不会经过此入口。 */
   function rememberComponentKind(kind: ComponentKindName): void {
     recentComponentKinds.value = writeRecentComponentKind(recentStorage, recentComponentKinds.value, kind);
+  }
+
+  /** 修改并持久化新建 Wire 的默认外观；既有 Wire 保持自己的颜色。 */
+  function setDefaultWireColor(color: WireColorId): void {
+    defaultWireColor.value = writeDefaultWireColor(recentStorage, color);
   }
 
   function selectRailPage(page: RailPage): void {
@@ -403,6 +425,8 @@ export function useEditorState(
     interaction,
     componentDefinitions: registry.list(),
     recentComponentKinds,
+    defaultWireColor,
+    setDefaultWireColor,
     rememberComponentKind,
     selectComponent,
     selectConnection,

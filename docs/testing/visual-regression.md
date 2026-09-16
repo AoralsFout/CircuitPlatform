@@ -23,8 +23,8 @@ pnpm --filter @circuit-platform/desktop visual:test -- --reduced-motion
 
 ## 验收重点
 
-- 深浅主题下，端口和 Wire 都同时以 `0 / 1 / X` 文本与颜色/线型表达。
-- Dangling 使用警告色、虚线和“悬空”文字；pending 使用虚线边框和状态文案；错误使用持久错误条，而不是只显示短暂 Toast。
-- 选择使用蓝色边框，键盘焦点使用虚线外轮廓；两者同时存在时仍可区分。
+- 深浅主题下，Wire 保持用户预设色，`0 / 1 / X` 文字沿 output → input 方向表达信号状态。
+- Dangling 保持线路预设色和悬空端点，但不显示流动文字；pending 使用虚线边框和状态文案；错误使用持久错误条，而不是只显示短暂 Toast。
+- Wire 选择和键盘焦点使用连续外描边，内层仍能辨认原线路色；不得退化为宽虚线。
 - 720×560 的窄窗口隐藏侧栏但保留工具轨道、画布、工具栏和状态面板，不遮住关键状态。
-- `--reduced-motion` 与系统 `prefers-reduced-motion: reduce` 均关闭过渡、动画和高电平光晕。
+- `--reduced-motion` 与系统 `prefers-reduced-motion: reduce` 均关闭过渡和流动，将信号文字静态放在线路中央。

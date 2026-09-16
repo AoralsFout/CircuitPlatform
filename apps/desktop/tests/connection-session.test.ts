@@ -81,6 +81,29 @@ test("created wire is one history frame and undo/redo keeps its editor identity"
   assert.equal(redone.snapshot.document.connections[0].id, id);
 });
 
+test("wire colors are independent from Circuit state and participate in local undo history", async () => {
+  const { engine, session } = createSession();
+  const created = await session.dispatch({
+    type: "create-connection",
+    left: port("source", "output", { x: 148, y: 42 }),
+    right: port("target", "input", { x: 160, y: 42 }),
+    color: "violet",
+  });
+  const connectionId = created.snapshot.document.connections[0]!.id;
+  assert.equal(created.snapshot.document.connections[0]!.color, "violet");
+  const engineCallsAfterCreate = engine.calls.length;
+
+  const changed = await session.dispatch({ type: "set-wire-color", connectionId, color: "pink" });
+  assert.equal(changed.snapshot.document.connections[0]!.color, "pink");
+  assert.equal(engine.calls.length, engineCallsAfterCreate);
+
+  const undone = await session.dispatch({ type: "undo" });
+  assert.equal(undone.snapshot.document.connections[0]!.color, "violet");
+  const redone = await session.dispatch({ type: "redo" });
+  assert.equal(redone.snapshot.document.connections[0]!.color, "pink");
+  assert.equal(engine.calls.length, engineCallsAfterCreate);
+});
+
 test("reconnects an occupied input in one transaction while retaining the editor connection identity", async () => {
   const { engine, session } = createSession();
   const created = await session.dispatch({ type: "create-connection", left: port("source", "output", { x: 148, y: 42 }), right: port("target", "input", { x: 160, y: 42 }) });

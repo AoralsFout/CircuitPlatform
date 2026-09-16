@@ -61,7 +61,8 @@
         }
         if (state === "dangling") {
           click(document.querySelector(".circuit-node"));
-          click(document.querySelector('[aria-label="删除选中对象 (Delete)"]'));
+          click(await waitFor('[title="删除选中对象 (Delete)"]:not(:disabled)'));
+          await waitFor(".dangling-endpoint");
         }
         if (state === "empty") {
           click(document.querySelector('[aria-label="清空画布"]'));

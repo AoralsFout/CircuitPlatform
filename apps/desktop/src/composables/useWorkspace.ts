@@ -8,6 +8,7 @@ import {
   type EditorSelection,
   type EditorSession,
   type EditorSnapshot,
+  type WireColorId,
 } from "../editor";
 import { createProtocolEnginePort } from "../editor/protocolEnginePort";
 import type { ConnectionDraftPort } from "../editor/connection-draft.ts";
@@ -29,10 +30,12 @@ interface WorkspaceBinding {
   select(selection: EditorSelection): Promise<void>;
   moveComponent(componentId: EditorComponentId, position: Point): Promise<void>;
   editRoute(connectionId: string, route: readonly Point[]): Promise<void>;
-  createConnection(left: ConnectionDraftPort, right: ConnectionDraftPort, route?: readonly Point[], connectionId?: string): Promise<{ ok: boolean; error?: string }>;
+  createConnection(left: ConnectionDraftPort, right: ConnectionDraftPort, route?: readonly Point[], connectionId?: string, color?: WireColorId): Promise<{ ok: boolean; error?: string }>;
   /** 使用稳定 Editor Connection ID 修复悬空端点或替换已占用输入。 */
   reconnectConnection(connectionId: string, left: Parameters<WorkspaceBinding["createConnection"]>[0], right: Parameters<WorkspaceBinding["createConnection"]>[1], route?: readonly Point[]): Promise<{ ok: boolean; error?: string }>;
   resetRoute(connectionId: string): Promise<void>;
+  /** 修改单条 Wire 的外观预设；不触碰 C++ Circuit。 */
+  setWireColor(connectionId: string, color: WireColorId): Promise<void>;
   deleteWaypoint(connectionId: string, pointIndex: number): Promise<void>;
   deleteSelection(): Promise<void>;
   /** 删除指定 Component，供对象右键菜单直接复用稳定编辑器身份。 */
@@ -180,11 +183,11 @@ export function useWorkspace(): WorkspaceBinding {
   }
 
   /** 创建或安全重接连接；失败只返回错误，草稿由画布交互层继续保留。 */
-  async function createConnection(left: Parameters<WorkspaceBinding["createConnection"]>[0], right: Parameters<WorkspaceBinding["createConnection"]>[1], route?: readonly Point[], connectionId?: string): Promise<{ ok: boolean; error?: string }> {
+  async function createConnection(left: Parameters<WorkspaceBinding["createConnection"]>[0], right: Parameters<WorkspaceBinding["createConnection"]>[1], route?: readonly Point[], connectionId?: string, color?: WireColorId): Promise<{ ok: boolean; error?: string }> {
     if (!editor) return { ok: false, error: "编辑器尚未准备好。" };
     const pending = editor.dispatch(connectionId
       ? { type: "reconnect-connection", connectionId, left, right, route }
-      : { type: "create-connection", left, right, route });
+      : { type: "create-connection", left, right, route, color });
     editorState.value = editor.snapshot();
     const result = await pending;
     editorState.value = result.snapshot;
@@ -209,6 +212,7 @@ export function useWorkspace(): WorkspaceBinding {
     createConnection,
     reconnectConnection,
     resetRoute: (connectionId) => dispatch({ type: "reset-route", connectionId }),
+    setWireColor: (connectionId, color) => dispatch({ type: "set-wire-color", connectionId, color }),
     deleteWaypoint: (connectionId, pointIndex) => dispatch({ type: "delete-waypoint", connectionId, pointIndex }),
     deleteSelection: () => dispatch({ type: "delete-selected" }),
     deleteComponent: (componentId) => dispatch({ type: "delete-component", componentId }),

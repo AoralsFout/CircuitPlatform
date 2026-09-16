@@ -3,6 +3,7 @@ import type { RailPage } from "../composables/useEditorState";
 import type { ComponentDefinition } from "../canvas";
 import type { ComponentKindName } from "@circuit-platform/protocol";
 import type { InputKey } from "../workspace";
+import { WIRE_COLOR_PRESETS, type WireColorId } from "../editor";
 
 interface InputControl {
   key: InputKey;
@@ -27,6 +28,7 @@ defineProps<{
   components: readonly SidebarComponent[];
   componentCount: number;
   componentDefinitions: readonly ComponentDefinition[];
+  defaultWireColor: WireColorId;
 }>();
 
 const emit = defineEmits<{
@@ -34,6 +36,7 @@ const emit = defineEmits<{
   selectComponent: [componentId: string];
   toggleInput: [key: InputKey];
   placeComponent: [kind: ComponentKindName, continuous: boolean];
+  defaultWireColorChange: [color: WireColorId];
 }>();
 
 function startComponentDrag(event: DragEvent, kind: ComponentKindName): void {
@@ -54,6 +57,23 @@ function startComponentDrag(event: DragEvent, kind: ComponentKindName): void {
         <button v-for="definition in componentDefinitions" :key="definition.kind" class="component-item" :class="{ 'component-item--disabled': !definition.available }" type="button" :draggable="definition.available" :disabled="!definition.available" :title="definition.disabledReason ?? `添加${definition.displayName}`" @dragstart="startComponentDrag($event, definition.kind)" @click="emit('placeComponent', definition.kind, $event.shiftKey)">
           <span class="component-symbol">{{ definition.symbol }}</span><span><strong>{{ definition.displayName }}</strong><small>{{ definition.kind.toUpperCase() }} / {{ definition.ports.filter((port) => port.direction === 'input').length }} → {{ definition.ports.filter((port) => port.direction === 'output').length }}</small></span><span class="drag-hint">＋</span>
         </button>
+      </div>
+      <div class="wire-default-setting">
+        <div class="sidebar-section-title"><span>Wire 默认颜色</span><small>仅影响新连线</small></div>
+        <div class="wire-color-options" role="radiogroup" aria-label="新建 Wire 默认颜色">
+          <button
+            v-for="preset in WIRE_COLOR_PRESETS"
+            :key="preset.id"
+            class="wire-color-swatch"
+            :class="[`wire-color--${preset.id}`, { 'wire-color-swatch--active': preset.id === defaultWireColor }]"
+            type="button"
+            role="radio"
+            :aria-checked="preset.id === defaultWireColor"
+            :aria-label="preset.label"
+            :title="preset.label"
+            @click="emit('defaultWireColorChange', preset.id)"
+          ><span aria-hidden="true"></span></button>
+        </div>
       </div>
       <p class="sidebar-hint">单击元件后移动到画布并单击放置；也可直接拖到画布释放；按 Esc 取消。</p>
     </template>

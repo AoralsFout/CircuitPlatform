@@ -38,6 +38,7 @@ const {
   duplicateComponent,
   editRoute,
   resetRoute,
+  setWireColor,
   deleteWaypoint,
   createConnection,
 } = useWorkspace();
@@ -65,6 +66,8 @@ const {
   interaction,
   componentDefinitions,
   recentComponentKinds,
+  defaultWireColor,
+  setDefaultWireColor,
   rememberComponentKind,
   selectComponent,
   selectConnection,
@@ -186,10 +189,12 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
         :components="sidebarComponents"
         :component-count="editorState?.document.components.length ?? 0"
         :component-definitions="componentDefinitions"
+        :default-wire-color="defaultWireColor"
         @close="showSidebar = false"
         @select-component="selectComponent"
         @toggle-input="toggleInput"
         @place-component="beginPlacementFromSidebar"
+        @default-wire-color-change="setDefaultWireColor"
       />
 
       <section v-if="activeRailPage !== 'settings'" class="editor-main" :class="{ 'editor-main--bottom-panel-collapsed': !isBottomPanelExpanded }" aria-label="电路编辑器">
@@ -216,7 +221,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           :scene="canvasScene"
           :viewport="viewport"
           :interaction="interaction"
-          :controller="{ componentDefinitions, recentComponentKinds, addComponent, rememberComponentKind, duplicateComponent, deleteComponent, resetRoute, deleteWaypoint, deleteConnection }"
+          :controller="{ componentDefinitions, recentComponentKinds, addComponent, rememberComponentKind, duplicateComponent, deleteComponent, resetRoute, setWireColor, deleteWaypoint, deleteConnection }"
           @select-component="select({ kind: 'component', id: $event })"
           @select-connection="select({ kind: 'connection', id: $event })"
           @clear-selection="select(null)"

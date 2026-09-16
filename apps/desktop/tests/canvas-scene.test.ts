@@ -47,6 +47,7 @@ test("projects non-default editor identities through explicit routes and signal 
   assert.equal(scene.nodes.find((node) => node.id === "source-17")?.ports[0].signal, 1);
   assert.deepEqual(scene.wires[0].route, snapshot().document.connections[0].route);
   assert.deepEqual(scene.wires[0].danglingEndpoints, ["target"]);
+  assert.equal(scene.wires[0].color, "blue");
   assert.equal(scene.wires[0].selected, false);
 });
 

@@ -7,6 +7,7 @@ import type {
   Point,
 } from "../editor";
 import { createDefaultOrthogonalRoute, routeFromWaypoints } from "../editor/route.ts";
+import { DEFAULT_WIRE_COLOR, isWireColorId, type WireColorId } from "../editor/wire-appearance.ts";
 
 export type PortDirection = "input" | "output";
 
@@ -225,6 +226,8 @@ export interface CanvasWire {
   /** 用户可见的有序折点；默认 Route 的派生折线不重复计入。 */
   waypoints?: readonly Point[];
   signal: Signal;
+  /** 与信号状态无关的线路外观预设。 */
+  color?: WireColorId;
   danglingEndpoints: readonly EditorEndpointSide[];
   selected: boolean;
 }
@@ -414,6 +417,7 @@ export function projectCanvasScene(
     route,
     waypoints,
     signal: getSignal(simulationSnapshot, connection.source.componentId, connection.source.port),
+    color: isWireColorId(connection.color) ? connection.color : DEFAULT_WIRE_COLOR,
     danglingEndpoints: [...connection.danglingEndpoints],
     selected: selected?.kind === "connection" && selected.id === connection.id,
     } satisfies CanvasWire;

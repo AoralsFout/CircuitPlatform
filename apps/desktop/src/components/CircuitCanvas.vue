@@ -25,6 +25,7 @@ import {
 } from "../editor/component-menu";
 import { contextActionsFor, type ContextAction, type ContextActionId } from "../editor/context-menu";
 import type { CanvasHitTarget } from "../canvas/hit-testing";
+import { DEFAULT_WIRE_COLOR, WIRE_COLOR_PRESETS, isWireColorId, type WireColorId } from "../editor";
 
 export interface CanvasController {
   componentDefinitions: readonly ComponentDefinition[];
@@ -34,6 +35,7 @@ export interface CanvasController {
   duplicateComponent: (componentId: string) => Promise<boolean>;
   deleteComponent: (componentId: string) => Promise<void>;
   resetRoute: (connectionId: string) => Promise<void>;
+  setWireColor: (connectionId: string, color: WireColorId) => Promise<void>;
   deleteWaypoint: (connectionId: string, pointIndex: number) => Promise<void>;
   deleteConnection: (connectionId: string) => Promise<void>;
 }
@@ -119,10 +121,22 @@ function signalClass(value: 0 | 1 | "X"): string {
   return "signal-state--unknown";
 }
 
-function wireClass(value: 0 | 1 | "X"): string {
-  if (value === 1) return "signal-wire--live";
-  if (value === "X") return "signal-wire--unknown";
-  return "signal-wire--low";
+function wireColorClass(color: WireColorId | undefined): string {
+  return `wire-color--${isWireColorId(color) ? color : DEFAULT_WIRE_COLOR}`;
+}
+
+function wirePathId(wireId: string): string {
+  return `wire-path-${wireId.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+}
+
+function objectMenuWireId(): string | null {
+  const target = objectMenu.value?.target;
+  return target && (target.kind === "wire" || target.kind === "wire-handle") ? target.connectionId : null;
+}
+
+function objectMenuWireColor(): WireColorId {
+  const connectionId = objectMenuWireId();
+  return props.scene.wires.find((wire) => wire.id === connectionId)?.color ?? DEFAULT_WIRE_COLOR;
 }
 
 function pathFor(points: readonly { x: number; y: number }[]): string {
@@ -291,6 +305,14 @@ async function selectObjectAction(action: ContextActionId): Promise<void> {
   } else if (action === "delete-connection") {
     await props.controller.deleteConnection(target.connectionId);
   }
+}
+
+/** 从对象菜单修改单条 Wire 颜色，并把变更提交到编辑器撤销历史。 */
+async function selectWireColor(color: WireColorId): Promise<void> {
+  const connectionId = objectMenuWireId();
+  if (!connectionId) return;
+  closeObjectMenu();
+  await props.controller.setWireColor(connectionId, color);
 }
 
 function openComponentMenu(anchor: { x: number; y: number }, altKey = false): void {
@@ -766,7 +788,16 @@ watch(() => props.interaction.connectionDraft, (draft) => {
             <template v-if="wire.selected" v-for="(point, pointIndex) in wire.route.slice(1, -1)" :key="`${wire.id}-waypoint-${pointIndex}`">
               <circle class="route-waypoint-handle" :cx="point.x" :cy="point.y" r="7" role="button" tabindex="0" :aria-label="`编辑连线 ${wire.id} 折点 ${pointIndex + 1}`" @pointerdown.stop="onRouteWaypointPointerDown($event, wire, pointIndex + 1)" />
             </template>
-            <path class="signal-wire" :class="[wireClass(wire.signal), { 'signal-wire--dangling': wire.danglingEndpoints.length > 0, 'signal-wire--selected': wire.selected }]" :data-signal="wire.signal" :data-dangling="wire.danglingEndpoints.length > 0 ? 'true' : 'false'" :d="pathFor(wire.route)" />
+            <path v-if="wire.selected" class="signal-wire-outline" :d="pathFor(wire.route)" aria-hidden="true" />
+            <path :id="wirePathId(wire.id)" class="signal-wire" :class="[wireColorClass(wire.color), { 'signal-wire--dangling': wire.danglingEndpoints.length > 0 }]" :data-signal="wire.signal" :data-wire-color="wire.color ?? DEFAULT_WIRE_COLOR" :data-dangling="wire.danglingEndpoints.length > 0 ? 'true' : 'false'" :d="pathFor(wire.route)" />
+            <template v-if="wire.danglingEndpoints.length === 0">
+              <template v-if="!isDenseCanvasScene(scene)">
+                <text v-for="phase in [0, 1, 2]" :key="`${wire.id}-signal-${phase}`" class="wire-signal-flow" :class="wireColorClass(wire.color)" aria-hidden="true">
+                  <textPath :href="`#${wirePathId(wire.id)}`" startOffset="-10%"><animate attributeName="startOffset" from="-10%" to="110%" dur="5.1s" :begin="`${phase * -1.7}s`" repeatCount="indefinite" />{{ wire.signal }}</textPath>
+                </text>
+              </template>
+              <text class="wire-signal-label" :class="[wireColorClass(wire.color), { 'wire-signal-label--dense': isDenseCanvasScene(scene) }]" aria-hidden="true"><textPath :href="`#${wirePathId(wire.id)}`" startOffset="50%">{{ wire.signal }}</textPath></text>
+            </template>
             <circle v-if="wire.danglingEndpoints.includes('source')" class="dangling-endpoint" :cx="wire.source.point.x" :cy="wire.source.point.y" r="6" role="button" tabindex="0" :aria-label="`修复悬空连接 ${wire.id} 的来源端点`" @pointerdown.stop="onDanglingEndpointPointerDown($event, wire, 'source')" />
             <circle v-if="wire.danglingEndpoints.includes('target')" class="dangling-endpoint" :cx="wire.target.point.x" :cy="wire.target.point.y" r="6" role="button" tabindex="0" :aria-label="`修复悬空连接 ${wire.id} 的目标端点`" @pointerdown.stop="onDanglingEndpointPointerDown($event, wire, 'target')" />
           </template>
@@ -803,6 +834,23 @@ watch(() => props.interaction.connectionDraft, (draft) => {
         @wheel.stop
         @keydown="onObjectMenuKeydown"
       >
+        <div v-if="objectMenuWireId()" class="object-context-menu__colors" role="group" aria-label="Wire 颜色">
+          <span>线路颜色</span>
+          <div class="wire-color-options">
+            <button
+              v-for="preset in WIRE_COLOR_PRESETS"
+              :key="preset.id"
+              class="wire-color-swatch"
+              :class="[`wire-color--${preset.id}`, { 'wire-color-swatch--active': preset.id === objectMenuWireColor() }]"
+              type="button"
+              role="menuitemradio"
+              :aria-checked="preset.id === objectMenuWireColor()"
+              :aria-label="preset.label"
+              :title="preset.label"
+              @click="selectWireColor(preset.id)"
+            ><span aria-hidden="true"></span></button>
+          </div>
+        </div>
         <button
           v-for="action in objectMenu.actions"
           :key="action.id"
@@ -814,6 +862,6 @@ watch(() => props.interaction.connectionDraft, (draft) => {
       </div>
       <div class="canvas-crosshair canvas-crosshair--tl" aria-hidden="true"></div><div class="canvas-crosshair canvas-crosshair--br" aria-hidden="true"></div>
     </div>
-    <div class="canvas-legend"><span><i class="legend-line legend-line--live"></i>高电平 <b>1</b></span><span><i class="legend-line"></i>低电平 <b>0</b></span><span><i class="legend-line legend-line--unknown"></i>未知 <b>X</b></span><span><i class="legend-line legend-line--dangling"></i>悬空</span></div>
+    <div class="canvas-legend"><span><i class="legend-line legend-line--flow">1</i>文字沿输出流向输入</span><span><i class="legend-line legend-line--outline"></i>选中描边</span><span><i class="legend-line legend-line--dangling"></i>悬空无流动文字</span></div>
   </div>
 </template>

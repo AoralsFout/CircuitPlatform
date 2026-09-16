@@ -26,6 +26,17 @@ export {
 } from "./connection-draft.ts";
 import type { ConnectionDraftPort } from "./connection-draft.ts";
 import { normalizeConnectionEndpoints, validateConnectionDraftTarget } from "./connection-draft.ts";
+import type { WireColorId } from "./wire-appearance.ts";
+
+export {
+  DEFAULT_WIRE_COLOR,
+  DEFAULT_WIRE_COLOR_STORAGE_KEY,
+  WIRE_COLOR_PRESETS,
+  isWireColorId,
+  readDefaultWireColor,
+  writeDefaultWireColor,
+  type WireColorId,
+} from "./wire-appearance.ts";
 
 export {
   ROUTE_GRID_SIZE,
@@ -84,6 +95,8 @@ export interface EditorConnection {
   target: EditorEndpoint;
   lifecycle: "visible" | "hidden" | "deleted";
   danglingEndpoints: readonly EditorEndpointSide[];
+  /** 与信号值无关的用户外观预设；旧文档缺省时由投影层回退。 */
+  color?: WireColorId;
   /** 可选的显式正交 Route；首尾点分别对应 source/target，旧文档可由投影层补齐。 */
   route?: readonly Point[];
   /** 可选的 Waypoint 语义投影；route 存在时 route 是渲染用的完整点列。 */
@@ -155,7 +168,8 @@ export type EditorCommand =
   | { type: "move-route-segment"; connectionId: EditorConnectionId; segmentIndex: number; offset: Point; altKey?: boolean }
   | { type: "delete-waypoint"; connectionId: EditorConnectionId; pointIndex: number }
   | { type: "reset-route"; connectionId: EditorConnectionId }
-  | { type: "create-connection"; left: ConnectionDraftPort; right: ConnectionDraftPort; route?: readonly Point[]; waypoints?: readonly Point[] }
+  | { type: "set-wire-color"; connectionId: EditorConnectionId; color: WireColorId }
+  | { type: "create-connection"; left: ConnectionDraftPort; right: ConnectionDraftPort; route?: readonly Point[]; waypoints?: readonly Point[]; color?: WireColorId }
   /** 用同一个稳定 Editor Connection ID 替换连接端点，提交过程由会话补偿管理。 */
   | { type: "reconnect-connection"; connectionId: EditorConnectionId; left: ConnectionDraftPort; right: ConnectionDraftPort; route?: readonly Point[]; waypoints?: readonly Point[] }
   | { type: "begin-placement"; kind: ComponentKindName; center?: Point; altKey?: boolean; continuous?: boolean }
@@ -304,6 +318,7 @@ interface CreateConnectionFrame {
   target: EditorConnection["target"];
   route: readonly Point[];
   waypoints: readonly Point[];
+  color?: WireColorId;
   selectionBefore: EditorSelection;
 }
 
@@ -332,7 +347,15 @@ interface EditRouteFrame {
   selectionBefore: EditorSelection;
 }
 
-type HistoryFrame = DeleteComponentFrame | DeleteConnectionFrame | ClearDocumentFrame | MoveComponentFrame | AddComponentFrame | CreateConnectionFrame | ReconnectConnectionFrame | EditRouteFrame;
+interface SetWireColorFrame {
+  type: "set-wire-color";
+  connectionId: EditorConnectionId;
+  colorBefore?: WireColorId;
+  colorAfter: WireColorId;
+  selectionBefore: EditorSelection;
+}
+
+type HistoryFrame = DeleteComponentFrame | DeleteConnectionFrame | ClearDocumentFrame | MoveComponentFrame | AddComponentFrame | CreateConnectionFrame | ReconnectConnectionFrame | EditRouteFrame | SetWireColorFrame;
 
 const busyError: EngineError = {
   code: "editor_busy",
@@ -718,7 +741,7 @@ export function createEditorSession(
   }
 
   function isCircuitHistoryFrame(frame: HistoryFrame | undefined): boolean {
-    return frame !== undefined && frame.type !== "move-component" && frame.type !== "edit-route";
+    return frame !== undefined && frame.type !== "move-component" && frame.type !== "edit-route" && frame.type !== "set-wire-color";
   }
 
   /** 仅阻止会改变 C++ Circuit 的命令，离线时仍可编辑本地几何和视口。 */
@@ -1081,6 +1104,7 @@ export function createEditorSession(
     right: ConnectionDraftPort,
     route?: readonly Point[],
     waypoints?: readonly Point[],
+    color?: WireColorId,
   ): CreateConnectionFrame | EngineError {
     const targetError = validateConnectionDraftTarget(left, right, false);
     if (targetError) {
@@ -1115,6 +1139,7 @@ export function createEditorSession(
       target: endpointTarget,
       route: routeAfter.map((point) => ({ ...point })),
       waypoints: (waypoints ?? routeAfter.slice(1, -1)).map((point) => ({ ...point })),
+      color,
       selectionBefore: selection ? { ...selection } : null,
     };
   }
@@ -1207,6 +1232,7 @@ export function createEditorSession(
       target: { ...frame.target, point: { ...frame.target.point } },
       route: frame.route.map((point) => ({ ...point })),
       waypoints: frame.waypoints.map((point) => ({ ...point })),
+      ...(frame.color ? { color: frame.color } : {}),
       lifecycle: "visible",
       danglingEndpoints: [],
     });
@@ -1732,6 +1758,43 @@ export function createEditorSession(
     return { ok: true, snapshot: finishOperation() };
   }
 
+  function applyWireColorFrame(frame: SetWireColorFrame, after: boolean): void {
+    const connection = document.connections.get(frame.connectionId);
+    if (!connection || connection.lifecycle !== "visible") return;
+    const color = after ? frame.colorAfter : frame.colorBefore;
+    if (color) connection.color = color;
+    else delete connection.color;
+  }
+
+  async function setWireColor(frame: SetWireColorFrame): Promise<CommandResult> {
+    if (frame.colorBefore === frame.colorAfter) {
+      selection = { kind: "connection", id: frame.connectionId };
+      return { ok: true, snapshot: finishOperation() };
+    }
+    applyWireColorFrame(frame, true);
+    selection = { kind: "connection", id: frame.connectionId };
+    undoStack.push(frame);
+    redoStack.length = 0;
+    return { ok: true, snapshot: finishOperation() };
+  }
+
+  async function undoSetWireColor(frame: SetWireColorFrame): Promise<CommandResult> {
+    applyWireColorFrame(frame, false);
+    selection = frame.selectionBefore;
+    undoStack.pop();
+    redoStack.push(frame);
+    return { ok: true, snapshot: finishOperation() };
+  }
+
+  async function redoSetWireColor(frame: SetWireColorFrame, remainingRedo: readonly HistoryFrame[]): Promise<CommandResult> {
+    applyWireColorFrame(frame, true);
+    selection = { kind: "connection", id: frame.connectionId };
+    redoStack.length = 0;
+    redoStack.push(...remainingRedo);
+    undoStack.push(frame);
+    return { ok: true, snapshot: finishOperation() };
+  }
+
   async function undoClearDocument(frame: ClearDocumentFrame): Promise<CommandResult> {
     const newComponentIds: EngineComponentId[] = [];
     const newConnectionIds: EngineConnectionId[] = [];
@@ -1804,6 +1867,7 @@ export function createEditorSession(
     if (frame.type === "create-connection") return undoCreateConnection(frame);
     if (frame.type === "reconnect-connection") return undoReconnectConnection(frame);
     if (frame.type === "edit-route") return undoEditRoute(frame);
+    if (frame.type === "set-wire-color") return undoSetWireColor(frame);
     return undoDeleteConnection(frame);
   }
 
@@ -1837,6 +1901,7 @@ export function createEditorSession(
       return result;
     }
     if (frame.type === "edit-route") return redoEditRoute(frame, remainingRedo);
+    if (frame.type === "set-wire-color") return redoSetWireColor(frame, remainingRedo);
     const connection = document.connections.get(frame.connectionId);
     if (!connection) return fail(recoveryError("重做所需的连接不存在。"));
     const result = await deleteConnection({
@@ -1912,6 +1977,17 @@ export function createEditorSession(
       if (!frame) return fail(noSelectionError);
       return moveComponent(frame);
     }
+    if (command.type === "set-wire-color") {
+      const connection = document.connections.get(command.connectionId);
+      if (!connection || connection.lifecycle !== "visible") return fail(noSelectionError);
+      return setWireColor({
+        type: "set-wire-color",
+        connectionId: connection.id,
+        colorBefore: connection.color,
+        colorAfter: command.color,
+        selectionBefore: selection ? { ...selection } : null,
+      });
+    }
     if (
       command.type === "edit-route" ||
       command.type === "move-route-waypoint" ||
@@ -1942,7 +2018,7 @@ export function createEditorSession(
       return reconnectConnection(frame);
     }
     if (command.type === "create-connection") {
-      const frame = connectionFrame(command.left, command.right, command.route, command.waypoints);
+      const frame = connectionFrame(command.left, command.right, command.route, command.waypoints, command.color);
       if ("code" in frame) return fail(frame);
       return createConnection(frame);
     }

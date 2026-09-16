@@ -38,6 +38,13 @@ test("canvas exposes non-color state hooks for ports and wires", async () => {
   assert.match(styles, /\.node-port--left \.node-port__anchor[^}]+translate\(-50%, -50%\)/);
   assert.match(styles, /\.node-port--right \.node-port__anchor[^}]+translate\(50%, -50%\)/);
   assert.match(canvas, /signal-wire--draft/);
+  assert.match(canvas, /wire-signal-flow/);
+  assert.match(canvas, /wire-signal-label/);
+  assert.match(canvas, /wire\.danglingEndpoints\.length === 0/);
+  assert.match(canvas, /attributeName="startOffset"/);
+  assert.match(canvas, /signal-wire-outline/);
+  assert.doesNotMatch(styles, /\.signal-wire--live\s*\{/);
+  assert.doesNotMatch(styles, /\.signal-wire--unknown\s*\{/);
   assert.match(canvas, /circuit-canvas--connecting/);
   assert.match(styles, /\.circuit-canvas--connecting \{ cursor: crosshair; \}/);
   assert.match(canvas, /正在放置/);
