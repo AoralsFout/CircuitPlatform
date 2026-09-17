@@ -2,34 +2,159 @@
 <html lang="zh-CN"><head><meta charset="UTF-8" /><title>Canvas performance benchmark</title></head>
 <body><div id="app"></div>
 <script type="module">
-  // 性能基准挂载真实 CircuitCanvas；场景来自 registry 和 Route 投影，而不是静态 SVG。
-  import { createApp, h, ref } from "vue";
+  // 性能基准挂载真实 CircuitCanvas，并按 useEditorState 的同一条路径投影场景：
+  // EditorSnapshot + 交互预览 → createCanvasSceneProjector → CircuitCanvas。
+  // 交互状态由真实 DOM PointerEvent 驱动，不直接改写场景几何。
+  import { createApp, computed, h, nextTick, ref } from "vue";
   import CircuitCanvas from "/src/components/CircuitCanvas.vue";
-  import { createComponentDefinitionRegistry } from "/src/canvas/index.ts";
+  import { createCanvasSceneProjector, createComponentDefinitionRegistry, createFrameCoalescer } from "/src/canvas/index.ts";
+  import { createRouteEditController } from "/src/canvas/route-edit.ts";
+  import { createConnectionDraft, connectionDraftRoute, reduceConnectionDraft } from "/src/editor/connection-draft.ts";
+  import { positionFromPlacementCenter } from "/src/editor/placement.ts";
   import { createDefaultOrthogonalRoute } from "/src/editor/route.ts";
-  const count = Number(new URLSearchParams(location.search).get("components") || 500);
-  const wireCount = Number(new URLSearchParams(location.search).get("wires") || 1000);
+
+  const params = new URLSearchParams(location.search);
+  const mode = params.get("mode") || "pan";
+  const count = Number(params.get("components") || 500);
+  const wireCount = Number(params.get("wires") || 1000);
   const registry = createComponentDefinitionRegistry();
+  const projector = createCanvasSceneProjector(registry);
+
   const kinds = ["input", "and", "or", "not", "output"];
-  const nodes = Array.from({ length: count }, (_, index) => {
+  const components = Array.from({ length: count }, (_, index) => {
     const kind = kinds[index % kinds.length];
-    const definition = registry.get(kind);
-    const position = { x: 32 + (index % 25) * 74, y: 32 + Math.floor(index / 25) * 58 };
-    return { id: `component-${index}`, kind, displayName: `Component ${index + 1}`, symbol: definition.symbol, description: definition.description, position, size: { ...definition.size }, selected: false, ports: definition.ports.map((port) => ({ ...port, offset: { ...port.offset }, point: { x: position.x + port.offset.x, y: position.y + port.offset.y }, signal: "X", dangling: false })) };
+    return {
+      id: `component-${index}`,
+      kind,
+      displayName: `Component ${index + 1}`,
+      position: { x: 32 + (index % 25) * 74, y: 32 + Math.floor(index / 25) * 58 },
+      lifecycle: "active",
+    };
   });
-  const wires = Array.from({ length: wireCount }, (_, index) => {
-    const source = nodes[index % count];
-    const target = nodes[(index + 1 + index % 23) % count];
-    const sourcePort = source.ports.find((port) => port.direction === "output") || source.ports[0];
-    const targetPort = target.ports.find((port) => port.direction === "input") || target.ports[0];
-    const start = sourcePort.point;
-    const end = targetPort.point;
-    return { id: `connection-${index}`, source: { componentId: source.id, port: sourcePort.id, point: start }, target: { componentId: target.id, port: targetPort.id, point: end }, route: createDefaultOrthogonalRoute(start, end), signal: "X", danglingEndpoints: [], selected: false };
+  const portPoint = (component, direction) => {
+    const definition = registry.get(component.kind);
+    const port = definition.ports.find((candidate) => candidate.direction === direction) || definition.ports[0];
+    return { port, point: { x: component.position.x + port.offset.x, y: component.position.y + port.offset.y } };
+  };
+  const connections = Array.from({ length: wireCount }, (_, index) => {
+    const source = components[index % count];
+    const target = components[(index + 1 + index % 23) % count];
+    const from = portPoint(source, "output");
+    const to = portPoint(target, "input");
+    return {
+      id: `connection-${index}`,
+      source: { componentId: source.id, port: from.port.id, point: from.point },
+      target: { componentId: target.id, port: to.port.id, point: to.point },
+      lifecycle: "visible",
+      danglingEndpoints: [],
+      route: createDefaultOrthogonalRoute(from.point, to.point),
+    };
   });
-  const scene = { nodes, wires, bounds: { min: { x: 0, y: 0 }, max: { x: 2100, y: 1300 } } };
+
+  // route 模式需要一条已选中且带折点的 Wire，Canvas 才会渲染折点手柄。
+  const snapshot = ref({
+    document: { components, connections },
+    selection: mode === "route" ? { kind: "connection", id: "connection-0" } : null,
+    operation: "idle",
+    canUndo: false,
+    canRedo: false,
+    confirmation: null,
+    error: null,
+  });
+  const simulation = { signals: {} };
   const viewport = ref({ x: 0, y: 0, zoom: 1, visibleRect: { width: 1920, height: 1080 } });
-  const interaction = ref({ focusedId: null, draggingNodeId: null, dragPreview: null, connectionDraft: null });
-  const controller = { componentDefinitions: registry.list(), recentComponentKinds: [], addComponent: async () => false, rememberComponentKind: () => undefined, duplicateComponent: async () => false, deleteComponent: async () => undefined, resetRoute: async () => undefined, deleteConnection: async () => undefined };
+
+  const draggingComponentId = ref(null);
+  const dragPreview = ref(null);
+  const dragCoalescer = createFrameCoalescer((preview) => { dragPreview.value = preview; });
+
+  const pendingPlacement = ref(null);
+  const placementDefinition = registry.get("and");
+
+  const draft = ref(createConnectionDraft());
+  const draftCoalescer = createFrameCoalescer(({ point, altKey }) => {
+    draft.value = reduceConnectionDraft(draft.value, { type: "move", point, altKey });
+  });
+
+  const routeEditPreview = ref(null);
+  const routeEditController = createRouteEditController({
+    onPreview: (preview) => { routeEditPreview.value = preview; },
+    onCommit: () => {},
+    onCancel: () => { routeEditPreview.value = null; },
+  });
+
+  const previewPositions = computed(() => dragPreview.value ? { [dragPreview.value.componentId]: dragPreview.value.position } : {});
+  const previewRoutes = computed(() => routeEditPreview.value ? { [routeEditPreview.value.connectionId]: routeEditPreview.value.route } : undefined);
+  const scene = computed(() => projector.project(snapshot.value, simulation, previewPositions.value, previewRoutes.value));
+
+  const interaction = computed(() => ({
+    focusedId: null,
+    draggingComponentId: draggingComponentId.value,
+    dragPreview: dragPreview.value,
+    connectionDraft: draft.value.origin ? connectionDraftRoute(draft.value) : null,
+    routeEditPreview: routeEditPreview.value,
+    pendingPlacement: pendingPlacement.value
+      ? {
+          kind: pendingPlacement.value.kind,
+          position: positionFromPlacementCenter(pendingPlacement.value.center, placementDefinition.size, pendingPlacement.value.altKey),
+          size: placementDefinition.size,
+          error: null,
+        }
+      : null,
+  }));
+
+  const controller = {
+    componentDefinitions: registry.list(),
+    recentComponentKinds: [],
+    addComponent: async () => false,
+    rememberComponentKind: () => undefined,
+    duplicateComponent: async () => false,
+    deleteComponent: async () => undefined,
+    resetRoute: async () => undefined,
+    setWireColor: async () => undefined,
+    deleteWaypoint: async () => undefined,
+    deleteConnection: async () => undefined,
+  };
+
+  // 基准 runner 用它把「状态更新 → Vue 完成渲染」纳入同一帧的计时。
+  window.__flush = () => nextTick();
+  // 基准 runner 用它确认交互真的发生了；只测到空转的基准必须失败而不是给出好看的数字。
+  window.__benchmarkState = () => ({
+    sceneNodes: scene.value.nodes.length,
+    sceneWires: scene.value.wires.length,
+    elements: document.querySelectorAll("*").length,
+    animated: document.querySelectorAll("animate").length,
+    viewport: { x: viewport.value.x, y: viewport.value.y },
+    placementCenter: pendingPlacement.value ? { ...pendingPlacement.value.center } : null,
+    draftPoints: draft.value.origin ? connectionDraftRoute(draft.value).length : 0,
+    dragPreview: dragPreview.value ? { ...dragPreview.value.position } : null,
+    routeEditPoints: routeEditPreview.value ? routeEditPreview.value.route.length : 0,
+  });
+
+  createApp({
+    setup: () => () => h(CircuitCanvas, {
+      scene: scene.value,
+      viewport: viewport.value,
+      interaction: interaction.value,
+      controller,
+      onViewportChange: (next) => { viewport.value = next; },
+      onNodeDragStart: ({ nodeId }) => { draggingComponentId.value = nodeId; },
+      onNodeDragMove: ({ pointerWorld }) => { dragCoalescer.schedule({ componentId: draggingComponentId.value, position: pointerWorld }); },
+      onNodeDragEnd: () => { draggingComponentId.value = null; dragPreview.value = null; },
+      onNodeDragCancel: () => { draggingComponentId.value = null; dragPreview.value = null; },
+      onPlacementMove: (center, altKey) => { pendingPlacement.value = { kind: "and", center, altKey }; },
+      onConnectionStart: (port) => { draft.value = reduceConnectionDraft(draft.value, { type: "start", port }); },
+      onConnectionMove: ({ point, altKey }) => { draftCoalescer.schedule({ point, altKey }); },
+      onConnectionEnd: (port) => { draft.value = reduceConnectionDraft(draft.value, { type: "end", port }); },
+      onConnectionCancel: () => { draftCoalescer.cancel(); draft.value = createConnectionDraft(); },
+      onRouteEditStart: ({ connectionId, route, target, pointerWorld }) => { routeEditController.start(connectionId, route, target, pointerWorld); },
+      onRouteEditMove: ({ pointerWorld, altKey }) => { routeEditController.move(pointerWorld, altKey); },
+      onRouteEditEnd: () => { routeEditController.end(); },
+      onRouteEditCancel: () => { routeEditController.cancel(); },
+    }),
+  }).mount("#app");
+
+  // route / place 模式需要一个已激活的交互起点，否则 Canvas 不会派发 Move 事件。
+  if (mode === "place") pendingPlacement.value = { kind: "and", center: { x: 200, y: 200 }, altKey: false };
   window.__benchmarkReady = true;
-  createApp({ setup: () => () => h(CircuitCanvas, { scene, viewport: viewport.value, interaction: interaction.value, controller, onViewportChange: (next) => { viewport.value = next; }, onNodeDragStart: ({ nodeId }) => { interaction.value = { ...interaction.value, draggingNodeId: nodeId }; }, onNodeDragMove: ({ pointerWorld }) => { requestAnimationFrame(() => { interaction.value = { ...interaction.value, dragPreview: { nodeId: interaction.value.draggingNodeId, position: pointerWorld } }; }); }, onNodeDragEnd: () => { interaction.value = { ...interaction.value, draggingNodeId: null }; }, onNodeDragCancel: () => { interaction.value = { ...interaction.value, draggingNodeId: null }; } }) }).mount("#app");
 </script></body></html>
