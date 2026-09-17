@@ -151,7 +151,6 @@ export function useEditorState(
       inputA: workspaceState.value.inputA,
       inputB: workspaceState.value.inputB,
       inputValues: workspaceState.value.inputValues,
-      output: workspaceState.value.outputValue,
       signals: workspaceState.value.signals,
     });
     return sceneProjector.project(snapshot, simulation, previewPositions.value, previewRoutes.value);
@@ -166,7 +165,7 @@ export function useEditorState(
     if (workspaceState.value.engineState !== "ready") {
       return { focusedId: focusedId.value, draggingComponentId: null, dragPreview: null, connectionDraft: null, routeEditPreview: null, emptyState: { title: "等待仿真引擎", message: workspaceState.value.message } };
     }
-    if (!workspaceState.value.hasLab) {
+    if (!workspaceState.value.hasCircuit) {
       return { focusedId: focusedId.value, draggingComponentId: null, dragPreview: null, connectionDraft: null, routeEditPreview: null, emptyState: { title: "正在准备示例电路", message: workspaceState.value.message } };
     }
     if (!editorState.value) {
@@ -293,10 +292,11 @@ export function useEditorState(
     value: (workspaceState.value.inputValues[node.id] ?? (index === 0 ? workspaceState.value.inputA : index === 1 ? workspaceState.value.inputB : 0)) as 0 | 1,
     componentId: node.id,
   })));
+  // 输出面板读取文档中全部 Output 元件，每个元件显示自己求值后的信号。
   const outputs = computed(() => canvasScene.value.nodes.filter((node) => node.kind === "output").map((node) => ({
     key: node.id,
     label: node.displayName,
-    value: node.ports.find((port) => port.direction === "input")?.signal ?? workspaceState.value.outputValue,
+    value: node.ports.find((port) => port.direction === "input")?.signal ?? "X",
     description: node.description,
   })));
   const engineStateLabel = computed(() => {

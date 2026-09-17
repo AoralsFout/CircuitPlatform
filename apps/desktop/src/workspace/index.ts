@@ -1,6 +1,6 @@
 import type { ComponentKindName, EngineResponse, Signal } from "@circuit-platform/protocol";
 
-/** 输入设置项的稳定键；示例电路使用 a/b，通用编辑器使用 Component ID。 */
+/** 输入设置项的稳定键；键是编辑器组件 ID，与引擎身份无关。 */
 export type InputKey = string;
 export type BinarySignal = 0 | 1;
 export type WorkspaceEngineState = "checking" | "ready" | "unavailable" | "error";
@@ -30,34 +30,29 @@ export interface EngineAdapter {
   getSignal(componentId: number, port: string): Promise<EngineResponse>;
 }
 
-export interface LabIds {
-  inputA: number;
-  inputB: number;
-  andGate: number;
-  output: number;
+/**
+ * 一份电路文档中参与结构推送的最小投影；`EditorDocument` 结构上是它的超集。
+ * 工作区不依赖编辑器模块，只接受它理解的结构子集。
+ */
+export interface CircuitDocument {
+  components: readonly { id: string; kind: ComponentKindName }[];
+  connections: readonly {
+    id: string;
+    source: { componentId: string; port: string };
+    target: { componentId: string; port: string };
+  }[];
 }
 
-/** 编辑器向仿真工作区提供的通用运行时绑定，不依赖示例 Component ID。 */
+/** 编辑器向仿真工作区提供的通用运行时绑定，不依赖任何固定示例身份。 */
 export interface SimulationBindings {
   components: Readonly<Partial<Record<string, number>>>;
   componentKinds?: Readonly<Partial<Record<string, ComponentKindName>>>;
   connections?: Readonly<Partial<Record<string, number>>>;
 }
 
-export interface DemoRuntimeBindings {
-  components: LabIds;
-  connections: {
-    wireA: number;
-    wireB: number;
-    wireOutput: number;
-  };
-  /** 默认文档对应的通用编辑器绑定；旧的 LabIds 仅是启动仿真的适配结果。 */
-  editor: SimulationBindings;
-}
-
-export interface DemoLoadResult {
+export interface CircuitLoadResult {
   snapshot: WorkspaceSnapshot;
-  bindings: DemoRuntimeBindings | null;
+  bindings: SimulationBindings | null;
 }
 
 export interface WaveformPoint {
@@ -74,29 +69,31 @@ export interface WorkspaceSnapshot {
   operationError: string | null;
   isBusy: boolean;
   simulationState: SimulationState;
+  /** 兼容投影：按绑定顺序的前两个 Input 元件。 */
   inputA: BinarySignal;
   inputB: BinarySignal;
   /** 当前所有 Input Component 的值，键为工作区绑定中的编辑器 ID。 */
   inputValues: Readonly<Record<InputKey, BinarySignal>>;
   /** 最近一次稳定求值后的端口信号，键为 `${editorComponentId}:${portId}`。 */
   signals: Readonly<Record<string, Signal>>;
+  /** 兼容投影：文档中第一个 Output 元件的值；全部输出见 `signals`。 */
   outputValue: Signal;
-  outputDescription: string;
-  hasLab: boolean;
+  hasCircuit: boolean;
   simulationStep: number;
   waveform: readonly WaveformPoint[];
   canRun: boolean;
 }
 
 /**
- * 工作区领域行为的窄接口：负责引擎检查、AND 示例编排、求值、输入切换和展示快照。
+ * 工作区领域行为的窄接口：负责引擎检查、文档推送、求值、输入切换和展示快照。
  * 操作失败不会抛给 UI；错误会被记录到返回快照的 message，且保留此前可用状态。
  */
 export interface Workspace {
   checkEngine(): Promise<WorkspaceSnapshot>;
-  loadDemoCircuit(): Promise<DemoLoadResult>;
+  /** 把一份电路文档整体推送到引擎，并返回本次会话的编辑器 ID → 引擎 ID 绑定。 */
+  loadCircuit(document: CircuitDocument): Promise<CircuitLoadResult>;
   /** 由编辑器会话在结构提交后更新仿真所使用的临时引擎身份。 */
-  rebindSimulation(ids: LabIds | SimulationBindings | null): WorkspaceSnapshot;
+  rebindSimulation(bindings: SimulationBindings | null): WorkspaceSnapshot;
   runSimulation(): Promise<WorkspaceSnapshot>;
   toggleInput(key: InputKey): Promise<WorkspaceSnapshot>;
   snapshot(): WorkspaceSnapshot;
@@ -114,7 +111,7 @@ interface MutableState {
   inputValues: Record<InputKey, BinarySignal>;
   signals: Record<string, Signal>;
   outputValue: Signal;
-  hasLab: boolean;
+  hasCircuit: boolean;
   runtimeBindings: RuntimeSimulationBindings | null;
   simulationStep: number;
   waveform: WaveformPoint[];
@@ -133,7 +130,8 @@ interface RuntimeSignalBinding {
 
 interface RuntimeSimulationBindings {
   inputs: readonly RuntimeInputBinding[];
-  output: RuntimeSignalBinding;
+  /** 文档中全部 Output 元件的接收端；每个 Output 单独读取自己的值。 */
+  outputs: readonly RuntimeSignalBinding[];
   observedSignals: readonly RuntimeSignalBinding[];
 }
 
@@ -148,6 +146,11 @@ const observableOutputPorts: Readonly<Partial<Record<ComponentKindName, readonly
   not: ["out"],
   clock: ["out"],
   d_flip_flop: ["q"],
+};
+
+// 承载可展示读数的接收端；Output 元件的值来自它的输入 Port。
+const observableInputPorts: Readonly<Partial<Record<ComponentKindName, string>>> = {
+  output: "in",
 };
 
 function isErrorResponse(response: EngineResponse): response is Extract<EngineResponse, { type: "error" }> {
@@ -171,11 +174,6 @@ function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
 
-function outputDescription(value: Signal): string {
-  if (value === "X") return "等待稳定求值";
-  return value === 1 ? "所有输入都为 1" : "至少一个输入为 0";
-}
-
 function createInitialState(): MutableState {
   return {
     engineState: "checking",
@@ -189,7 +187,7 @@ function createInitialState(): MutableState {
     inputValues: {},
     signals: {},
     outputValue: "X",
-    hasLab: false,
+    hasCircuit: false,
     runtimeBindings: null,
     simulationStep: 0,
     waveform: [],
@@ -209,8 +207,7 @@ function createWorkspaceSnapshot(state: MutableState): WorkspaceSnapshot {
     outputValue: state.outputValue,
     inputValues: { ...state.inputValues },
     signals: { ...state.signals },
-    outputDescription: outputDescription(state.outputValue),
-    hasLab: state.hasLab,
+    hasCircuit: state.hasCircuit,
     simulationStep: state.simulationStep,
     waveform: state.waveform.map((point) => ({ ...point })),
     canRun:
@@ -221,43 +218,37 @@ function createWorkspaceSnapshot(state: MutableState): WorkspaceSnapshot {
   };
 }
 
-function runtimeBindingsFrom(ids: LabIds | SimulationBindings): RuntimeSimulationBindings | null {
-  if ("inputA" in ids) {
-    return {
-      inputs: [
-        { key: "a", componentId: ids.inputA },
-        { key: "b", componentId: ids.inputB },
-      ],
-      output: { key: "output:in", componentId: ids.output, port: "in" },
-      observedSignals: [{ key: "and-gate:out", componentId: ids.andGate, port: "out" }],
-    };
-  }
+/**
+ * 从编辑器绑定推导本次求值需要提交和读取的运行时身份。
+ * 收集文档中全部 Input 与全部 Output 元件，不对电路形状做任何假设。
+ */
+function runtimeBindingsFrom(bindings: SimulationBindings): RuntimeSimulationBindings | null {
+  const components = Object.entries(bindings.components)
+    .filter((entry): entry is [string, number] => entry[1] !== undefined);
+  if (components.length === 0) return null;
 
-  const components = Object.entries(ids.components);
   const inputs = components
-    .filter(([id, componentId]) => ids.componentKinds?.[id] === "input" && componentId !== undefined)
-    .map(([key, componentId]) => ({ key, componentId: componentId as number }));
-  const outputEntry = components.find((entry): entry is [string, number] => {
-    const [id, componentId] = entry;
-    return ids.componentKinds?.[id] === "output" && componentId !== undefined;
+    .filter(([id]) => bindings.componentKinds?.[id] === "input")
+    .map(([key, componentId]) => ({ key, componentId }));
+
+  const outputs = components.flatMap(([id, componentId]) => {
+    const kind = bindings.componentKinds?.[id];
+    if (kind === undefined) return [];
+    const port = observableInputPorts[kind];
+    return port === undefined ? [] : [{ key: `${id}:${port}`, componentId, port }];
   });
-  const hasAndGate = components.some(([id, componentId]) => ids.componentKinds?.[id] === "and" && componentId !== undefined);
-  if (inputs.length < 2 || !outputEntry || !hasAndGate) return null;
-  const [outputKey, outputComponentId] = outputEntry;
+
   const observedSignals = components.flatMap(([key, componentId]) => {
-    const kind = ids.componentKinds?.[key];
-    if (componentId === undefined || kind === undefined) return [];
+    const kind = bindings.componentKinds?.[key];
+    if (kind === undefined) return [];
     return (observableOutputPorts[kind] ?? []).map((port) => ({
       key: `${key}:${port}`,
       componentId,
       port,
     }));
   });
-  return {
-    inputs,
-    output: { key: `${outputKey}:in`, componentId: outputComponentId, port: "in" },
-    observedSignals,
-  };
+
+  return { inputs, outputs, observedSignals };
 }
 
 function valuesForBindings(
@@ -275,7 +266,7 @@ function valuesForBindings(
 /**
  * 创建一个由指定引擎 adapter 驱动的电路工作区。
  * @param adapter 实际 Electron adapter 或测试 fake；其响应必须符合共享协议。
- * @returns 可观察快照并提供完整示例行为的工作区模块。
+ * @returns 可观察快照并提供通用文档推送与求值行为的工作区模块。
  */
 export function createWorkspace(adapter: EngineAdapter): Workspace {
   const state = createInitialState();
@@ -291,7 +282,7 @@ export function createWorkspace(adapter: EngineAdapter): Workspace {
       if (result.status === "ok") {
         state.engineState = "ready";
         state.engineName = result.engine ?? "CircuitPlatform C++ Engine";
-        state.message = "引擎已就绪，可以运行示例电路。";
+        state.message = "引擎已就绪，可以编辑电路。";
       } else {
         state.engineState = result.status;
         state.message = result.message ?? "无法获得引擎状态。";
@@ -341,10 +332,16 @@ export function createWorkspace(adapter: EngineAdapter): Workspace {
         expectResponse(await adapter.setInput(binding.componentId, value), "input_set");
       }
       expectResponse(await adapter.settle(), "settled");
-      const result = expectResponse(
-        await adapter.getSignal(bindings.output.componentId, bindings.output.port),
-        "signal_result",
-      );
+
+      // 每个 Output 元件读取自己的接收端，不假设文档中只有一个 Output。
+      const outputSignals: Record<string, Signal> = {};
+      for (const binding of bindings.outputs) {
+        outputSignals[binding.key] = expectResponse(
+          await adapter.getSignal(binding.componentId, binding.port),
+          "signal_result",
+        ).value;
+      }
+
       const observedSignals: Record<string, Signal> = {};
       for (const binding of bindings.observedSignals) {
         observedSignals[binding.key] = expectResponse(
@@ -352,14 +349,15 @@ export function createWorkspace(adapter: EngineAdapter): Workspace {
           "signal_result",
         ).value;
       }
+
       state.inputValues = Object.fromEntries(committedValues.map(({ binding, value }) => [binding.key, value]));
       state.inputA = committedValues[0]?.value ?? state.inputA;
       state.inputB = committedValues[1]?.value ?? state.inputB;
-      state.outputValue = result.value;
+      state.outputValue = bindings.outputs.length > 0 ? outputSignals[bindings.outputs[0].key] ?? "X" : "X";
       state.signals = {
         ...Object.fromEntries(committedValues.map(({ binding, value }) => [`${binding.key}:out`, value])),
         ...observedSignals,
-        [bindings.output.key]: result.value,
+        ...outputSignals,
       };
       state.simulationStep += 1;
       state.waveform.push({
@@ -368,7 +366,7 @@ export function createWorkspace(adapter: EngineAdapter): Workspace {
         b: state.inputB,
         output: state.outputValue,
       });
-      state.message = "仿真已稳定，输出值已更新。";
+      state.message = "仿真已稳定，信号已更新。";
       return true;
     } catch (error) {
       state.message = errorMessage(error, "仿真失败。");
@@ -380,67 +378,52 @@ export function createWorkspace(adapter: EngineAdapter): Workspace {
     }
   }
 
-  async function loadDemoCircuit(): Promise<DemoLoadResult> {
-    if (state.hasLab || state.isBusy || state.engineState !== "ready") {
+  /**
+   * 把一份文档按顺序推送到引擎：先建全部 Component，再建全部 Connection。
+   * 任何一步失败都按创建顺序反向补偿，不留下半成品结构。
+   */
+  async function loadCircuit(document: CircuitDocument): Promise<CircuitLoadResult> {
+    if (state.hasCircuit || state.isBusy || state.engineState !== "ready") {
       return { snapshot: createWorkspaceSnapshot(state), bindings: null };
     }
     state.isBusy = true;
-    state.message = "正在创建 2 个输入、AND 门和输出端…";
+    state.message = "正在把电路结构推送到仿真引擎…";
     state.operationError = null;
+    const components: Record<string, number> = {};
+    const connections: Record<string, number> = {};
+    const componentKinds: Record<string, ComponentKindName> = {};
     const createdComponentIds: number[] = [];
     const createdConnectionIds: number[] = [];
-    const addTrackedComponent = async (kind: ComponentKindName): Promise<number> => {
-      const id = await addComponent(kind);
-      createdComponentIds.push(id);
-      return id;
-    };
     try {
-      const ids: LabIds = {
-        inputA: await addTrackedComponent("input"),
-        inputB: await addTrackedComponent("input"),
-        andGate: await addTrackedComponent("and"),
-        output: await addTrackedComponent("output"),
-      };
-      const wireA = await addConnection(ids.inputA, "out", ids.andGate, "in1");
-      createdConnectionIds.push(wireA);
-      const wireB = await addConnection(ids.inputB, "out", ids.andGate, "in2");
-      createdConnectionIds.push(wireB);
-      const wireOutput = await addConnection(ids.andGate, "out", ids.output, "in");
-      createdConnectionIds.push(wireOutput);
-      const connections = { wireA, wireB, wireOutput };
-      state.runtimeBindings = runtimeBindingsFrom(ids);
-      state.inputValues = { a: state.inputA, b: state.inputB };
-      state.hasLab = true;
-      state.message = "示例已创建，试着切换输入 A 或输入 B。";
+      for (const component of document.components) {
+        const id = await addComponent(component.kind);
+        createdComponentIds.push(id);
+        components[component.id] = id;
+        componentKinds[component.id] = component.kind;
+      }
+      for (const connection of document.connections) {
+        const source = components[connection.source.componentId];
+        const target = components[connection.target.componentId];
+        if (source === undefined || target === undefined) {
+          throw new Error(`连接 ${connection.id} 引用了文档中不存在的 Component。`);
+        }
+        const id = await addConnection(source, connection.source.port, target, connection.target.port);
+        createdConnectionIds.push(id);
+        connections[connection.id] = id;
+      }
+      const bindings: SimulationBindings = { components, connections, componentKinds };
+      const runtimeBindings = runtimeBindingsFrom(bindings);
+      state.runtimeBindings = runtimeBindings;
+      if (runtimeBindings) {
+        state.inputValues = valuesForBindings(runtimeBindings, state.inputValues, state.inputA, state.inputB);
+      }
+      state.hasCircuit = true;
+      state.message = "电路已就绪，试着切换输入。";
       await runSimulationInternal(state.runtimeBindings);
       state.isBusy = false;
-      const editor = {
-        components: {
-          "input-a": ids.inputA,
-          "input-b": ids.inputB,
-          "and-gate": ids.andGate,
-          output: ids.output,
-        },
-        connections: {
-          "wire-a": connections.wireA,
-          "wire-b": connections.wireB,
-          "wire-output": connections.wireOutput,
-        },
-        componentKinds: {
-          "input-a": "input",
-          "input-b": "input",
-          "and-gate": "and",
-          output: "output",
-        },
-      } satisfies SimulationBindings;
-      const bindings = { components: { ...ids }, connections } as DemoRuntimeBindings;
-      Object.defineProperty(bindings, "editor", { value: editor, enumerable: false });
-      return {
-        snapshot: createWorkspaceSnapshot(state),
-        bindings,
-      };
+      return { snapshot: createWorkspaceSnapshot(state), bindings };
     } catch (error) {
-      state.message = errorMessage(error, "创建示例电路失败。");
+      state.message = errorMessage(error, "推送电路结构失败。");
       state.operationError = state.message;
       for (const connectionId of createdConnectionIds.reverse()) {
         try { await adapter.removeConnection(connectionId); } catch { /* 保留原始创建错误。 */ }
@@ -448,15 +431,18 @@ export function createWorkspace(adapter: EngineAdapter): Workspace {
       for (const componentId of createdComponentIds.reverse()) {
         try { await adapter.removeComponent(componentId); } catch { /* 保留原始创建错误。 */ }
       }
+      state.runtimeBindings = null;
+      state.hasCircuit = false;
     } finally {
       state.isBusy = false;
     }
     return { snapshot: createWorkspaceSnapshot(state), bindings: null };
   }
 
-  function rebindSimulation(ids: LabIds | SimulationBindings | null): WorkspaceSnapshot {
-    state.runtimeBindings = ids ? runtimeBindingsFrom(ids) : null;
+  function rebindSimulation(bindings: SimulationBindings | null): WorkspaceSnapshot {
+    state.runtimeBindings = bindings ? runtimeBindingsFrom(bindings) : null;
     state.signals = {};
+    state.outputValue = "X";
     if (state.runtimeBindings) {
       state.inputValues = valuesForBindings(state.runtimeBindings, state.inputValues, state.inputA, state.inputB);
       state.inputA = state.runtimeBindings.inputs[0] ? state.inputValues[state.runtimeBindings.inputs[0].key] ?? state.inputA : state.inputA;
@@ -489,7 +475,7 @@ export function createWorkspace(adapter: EngineAdapter): Workspace {
 
   return {
     checkEngine,
-    loadDemoCircuit,
+    loadCircuit,
     rebindSimulation,
     runSimulation,
     toggleInput,

@@ -489,7 +489,10 @@ function isAlreadyAbsent(error: EngineError): boolean {
   return error.code === "component_not_found" || error.code === "connection_not_found";
 }
 
-/** 创建固定 AND 示例的稳定编辑器文档，返回不包含引擎身份的初始可见结构。 */
+/**
+ * 创建启动示例的编辑器文档；返回不包含引擎身份的初始可见结构。
+ * 这只是普通的文档数据：它由工作区按通用路径推送到引擎，没有任何专用仿真投影。
+ */
 export function createAndDemoDocument(): EditorDocument {
   return {
     components: [

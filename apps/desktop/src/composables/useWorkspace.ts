@@ -4,6 +4,7 @@ import {
   createEditorSession,
   type EditorBindings,
   type EditorComponentId,
+  type EditorDocument,
   type Point,
   type EditorSelection,
   type EditorSession,
@@ -14,9 +15,9 @@ import { createProtocolEnginePort } from "../editor/protocolEnginePort.ts";
 import type { ConnectionDraftPort } from "../editor/connection-draft.ts";
 import {
   createWorkspace,
-  type DemoRuntimeBindings,
   type EngineAdapter,
   type InputKey,
+  type SimulationBindings,
   type WorkspaceSnapshot,
 } from "../workspace/index.ts";
 import type { ComponentKindName } from "@circuit-platform/protocol";
@@ -62,8 +63,8 @@ interface WorkspaceBinding {
   duplicateComponent(componentId?: EditorComponentId): Promise<boolean>;
 }
 
-function toEditorBindings(bindings: DemoRuntimeBindings): EditorBindings {
-  return { components: bindings.editor.components, connections: bindings.editor.connections ?? {}, componentKinds: bindings.editor.componentKinds };
+function toEditorBindings(bindings: SimulationBindings): EditorBindings {
+  return { components: bindings.components, connections: bindings.connections ?? {}, componentKinds: bindings.componentKinds };
 }
 
 /**
@@ -95,10 +96,10 @@ export function useWorkspace(): WorkspaceBinding {
     await reflect(() => workspace.runSimulation());
   }
 
-  function attachEditor(bindings: DemoRuntimeBindings): void {
+  function attachEditor(document: EditorDocument, bindings: SimulationBindings): void {
     unsubscribeEditor?.();
     editor = createEditorSession(
-      { document: createAndDemoDocument(), bindings: toEditorBindings(bindings) },
+      { document, bindings: toEditorBindings(bindings) },
       createProtocolEnginePort(adapter),
       {
         // EditorSession 只询问一个布尔可用性 seam；引擎状态仍留在 Workspace 快照中。
@@ -115,19 +116,21 @@ export function useWorkspace(): WorkspaceBinding {
     });
   }
 
-  async function loadDemoWhenReady(): Promise<void> {
-    if (state.value.engineState !== "ready" || state.value.hasLab) return;
-    const pending = workspace.loadDemoCircuit();
+  /** 把启动示例当作普通文档推送到引擎；示例不占用任何专用代码路径。 */
+  async function loadExampleWhenReady(): Promise<void> {
+    if (state.value.engineState !== "ready" || state.value.hasCircuit) return;
+    const document = createAndDemoDocument();
+    const pending = workspace.loadCircuit(document);
     state.value = workspace.snapshot();
     const loaded = await pending;
     state.value = loaded.snapshot;
-    if (loaded.bindings) attachEditor(loaded.bindings);
+    if (loaded.bindings) attachEditor(document, loaded.bindings);
   }
 
   async function checkEngine(): Promise<void> {
     await reflect(() => workspace.checkEngine());
     editor?.setEngineAvailability(state.value.engineState === "ready");
-    await loadDemoWhenReady();
+    await loadExampleWhenReady();
   }
 
   async function runSimulation(): Promise<void> {
