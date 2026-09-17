@@ -15,18 +15,27 @@ _Avoid_: Instance（Subcircuit 放入电路后仍称为 Component，不另造"�
 **Subcircuit**：被另一份 Circuit 当作 Component 使用的 Project。它的 Input 和 Output 元件构成对外的 Port；内部其他 Component 对外不可见。Subcircuit 通过引用被使用，不是拷贝；一份 Project 可以在多份 Circuit 中被多次使用，也可以自身使用其他 Subcircuit，但引用关系不允许成环。
 _Avoid_: Module、Block、CompoundComponent
 
-**Port**：Component 用来接收或输出数字信号的连接点，具有输入或输出方向。
+**Port**：Component 用来接收或输出数字信号的连接点，具有输入或输出方向和一个位宽。
 
-**Connection**：一个输出 Port 到一个输入 Port 的连接记录。Connection 独立于 Component 生命周期存在，端点被删除后可以成为悬空连接。
+**位宽 Width**：Port 一次接收或输出的位数。位宽为 1 的是单比特 Port，大于 1 的是多位 Port。
+_Avoid_: Bus、向量长度（「总线」只在口语中指代位宽大于 1 的 Port 或 Connection，不是独立的领域对象）
+
+**位区间 BitRange**：Port 在宿主 Component 的一条多位总线上占据的连续位范围。位区间决定该 Port 的位宽。
+
+**拆线器 Splitter**：把一条多位输入拆成若干条位区间输出的 Component。
+
+**合线器 Merger**：把若干条位区间输入合并成一条多位输出的 Component。
+
+**Connection**：一个输出 Port 到一个输入 Port 的连接记录，两端 Port 的位宽必须相同。Connection 独立于 Component 生命周期存在，端点被删除后可以成为悬空连接。
 _Avoid_: Wire（Wire 专指编辑器中的视觉线段时才使用）
 
 **DanglingConnection**：缺少一个或两个有效端点的 Connection。它可以被查看、删除或重新连接，但不参与信号传播。
 
 ## 信号与状态
 
-**SignalValue**：信号的具体值，第一版包括 `0`、`1` 和 `X`，其中 `X` 表示未知。
+**SignalValue**：信号的具体值，是一个多位值：每一位独立取 `0`、`1` 或 `X`，其中 `X` 表示该位未知。
 
-**Signal**：在仿真中通过 Port 和 Connection 传播的数字信息，具有一个 SignalValue。
+**Signal**：在仿真中通过 Port 和 Connection 传播的数字信息，具有一个 SignalValue，位宽由所在 Port 决定。
 
 **Simulation**：对一份 Circuit 进行求值和运行的过程。
 
