@@ -36,8 +36,11 @@ C++ 数字电路仿真引擎
 
 画布位置不影响仿真结果；同一份 Circuit 可以被多个 Simulation 使用。
 
+Subcircuit 是 Project 与编辑器层的概念，在进入引擎之前就已经被展平为普通 Component（[ADR 0014](decisions/0014-subcircuit-by-reference-flattened-simulation.md)），因此不改变上面的三类状态划分。
+
 ## 第一版连接规则
 
+- 两端 Port 的位宽必须相同；不同位宽拒绝连接，不做隐式扩展或截断（[ADR 0016](decisions/0016-strict-port-width.md)，Phase 4.5 起生效）。
 - Connection 必须从输出 Port 指向输入 Port。
 - 一个输出 Port 可以连接多个输入 Port，这是 fan-out。
 - 一个输入 Port 不能连接多个输出 Port，以避免信号竞争。
@@ -49,6 +52,8 @@ C++ 数字电路仿真引擎
 - 组合逻辑环路在仿真稳定化时报告错误；包含状态元件的反馈回路不属于同一种组合环路。
 
 ## 当前 Circuit 接口
+
+本节与下一节记录的是当前实现状态，不描述后续阶段的接口。Phase 4.5 会让 `Port` 增加位宽、`SignalValue` 从三值标量变为逐位多位值、`addConnection` 增加位宽校验、`addComponent` 支持携带端口清单（[ADR 0015](decisions/0015-width-as-port-attribute.md)、[ADR 0016](decisions/0016-strict-port-width.md)）；届时本节同步更新。
 
 当前 C++ 领域模块提供以下操作：
 

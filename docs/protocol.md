@@ -6,6 +6,12 @@ Electron 主进程与 C++ 引擎通过 stdin/stdout 建立一条长连接。双�
 
 协议适配层只负责序列化、反序列化和错误格式化，不负责 Circuit 规则或信号求值。
 
+## 信号值的当前表示
+
+本版本中信号值在协议里是混用的：`0` 和 `1` 以 JSON 数字传输，`X` 以字符串传输，TypeScript 侧的类型是 `0 | 1 | "X"`。这是历史实现，不是有意设计，本文档的示例与实现保持一致（`"value":1` 是数字）。
+
+[ADR 0015](decisions/0015-width-as-port-attribute.md) 决定 Phase 4.5 起把信号值统一为字符串（`"0"`、`"1"`、`"X"`、`"1010"`、`"X1X0"`），长度必须等于端口位宽。在那之前，`set_input` 和 `get_signal` 的值仍按上面的混用形式理解。
+
 所有 `componentId` 和 `connectionId` 都从 `1` 开始。渲染进程传入删除接口的 ID 必须是正安全整数；C++ 删除处理还会拒绝零，以及负数、小数、指数形式、字符串和超出无符号整数范围的值。
 
 ## 请求
@@ -54,7 +60,7 @@ Electron 主进程与 C++ 引擎通过 stdin/stdout 建立一条长连接。双�
 {"type":"error","requestId":"r4","code":"combinational_loop","message":"检测到组合逻辑环路"}
 ```
 
-当前可能出现的错误代码包括 `bad_json`、`bad_request`、`invalid_kind`、`invalid_connection`、`component_not_found`、`connection_not_found`、`invalid_signal`、`invalid_input`、`port_not_found`、`combinational_loop` 和 `unsupported_message`。
+当前可能出现的错误代码包括 `bad_json`、`bad_request`、`invalid_kind`、`invalid_connection`、`component_not_found`、`connection_not_found`、`invalid_signal`、`invalid_input`、`port_not_found`、`combinational_loop` 和 `unsupported_message`。Phase 4.5 会加入位宽不匹配与位区间非法的错误代码（[ADR 0016](decisions/0016-strict-port-width.md)、[ADR 0017](decisions/0017-paired-splitter-and-merger.md)）。
 
 ## 生命周期约定
 
@@ -62,9 +68,19 @@ Electron 主进程与 C++ 引擎通过 stdin/stdout 建立一条长连接。双�
 - 添加或删除元件、添加或删除连接后会重建 `Simulation` 快照；因此结构修改会清空运行时状态。
 - `remove_component` 删除 Component 但保留相关 Connection；端点失效的 Connection 变为悬空连接，不参与仿真。
 - `remove_connection` 只删除指定 Connection，不删除两端 Component。
-- 悬空 Connection 在领域层可以被查看、删除或重新连接；当前协议可以按已知 ID 删除它，后续查询和重连接口也必须保持 Connection 独立于 Component 生命周期的规则。
+- 悬空 Connection 在领域层可以被查看、删除或重新连接；当前协议只能按已知 ID 删除它。编辑器的「重接」不新增协议请求，而是用「删除旧 Connection + 创建新 Connection」的补偿事务实现（见 [ADR 0007](decisions/0007-editor-session-and-stable-editor-ids.md) 与前端设计规范 14.1）；若将来出现需要原子重接的用例，再评估新请求类型。
 - `Simulation` 不读取 UI 位置，也不向 Electron 暴露 C++ 对象；跨进程边界只传输协议数据。
 - 当前 `clock` 和 `d_flip_flop` 仅能被创建，时序行为将在后续阶段实现。
+
+## 规划中的变更（Phase 4.5）
+
+以下变更已由 [ADR 0015](decisions/0015-width-as-port-attribute.md)、[ADR 0016](decisions/0016-strict-port-width.md) 和 [ADR 0017](decisions/0017-paired-splitter-and-merger.md) 决定，但尚未实现。列在这里以免与上面的当前协议混淆：
+
+- `add_component` 的 `kind` 增加 `splitter` 与 `merger`；请求可选携带端口清单（含位宽与位区间），省略时引擎回退到内置定义；
+- `component_added` 回传该 Component 实际的端口清单，前端不再内置一份端口定义；
+- 新增 `set_port_width`（或等价的 `update_component`）修改既有元件的位宽。Component 与 Connection 的引擎身份保留，改宽后不再匹配的 Connection 转为悬空连接；
+- `set_input` 与 `get_signal` 的信号值统一为字符串，长度等于端口位宽；
+- `add_connection` 增加位宽校验，两端位宽不同直接拒绝，不做隐式扩展或截断。
 
 ## 实现约束
 

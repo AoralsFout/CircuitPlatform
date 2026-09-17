@@ -12,15 +12,18 @@ _Avoid_: Instance（Subcircuit 放入电路后仍称为 Component，不另造"�
 
 **Project**：用户保存和打开的工作单元，包含一份 Circuit、它的编辑器布局和元数据。一个 Project 恰好包含一份 Circuit；只有保存过的 Project 才拥有身份，也才能被其他 Circuit 作为 Subcircuit 引用。
 
-**Subcircuit**：被另一份 Circuit 当作 Component 使用的 Project。它的 Input 和 Output 元件构成对外的 Port；内部其他 Component 对外不可见。Subcircuit 通过引用被使用，不是拷贝；一份 Project 可以在多份 Circuit 中被多次使用，也可以自身使用其他 Subcircuit，但引用关系不允许成环。
+**Subcircuit**：被另一份 Circuit 当作 Component 使用的 Project。它的 Input 和 Output 元件构成对外的 Port；内部其他 Component 对外不可见。Subcircuit 通过引用被使用，不是拷贝；一份 Project 可以在多份 Circuit 中被多次使用，也可以自身使用其他 Subcircuit，但引用关系不允许成环。Subcircuit 在加载时被展平，引擎不需要感知层次。
 _Avoid_: Module、Block、CompoundComponent
+
+**展平 Flatten**：加载父 Project 时，把每个 Subcircuit 使用的内部 Component 和 Connection 复制为普通 Component，并把外部 Port 上的 Connection 改接到内部 Input 元件的 `out` 或 Output 元件的 `in`。展平发生在进入引擎之前，因此引擎和协议都不出现层次概念。同一份 Project 在父 Circuit 中被放入多份时，每份各自展平出独立的 Component 和 SimulationState。
+_Avoid_: 内联、实例化
 
 **Port**：Component 用来接收或输出数字信号的连接点，具有输入或输出方向和一个位宽。
 
 **位宽 Width**：Port 一次接收或输出的位数。位宽为 1 的是单比特 Port，大于 1 的是多位 Port。
 _Avoid_: Bus、向量长度（「总线」只在口语中指代位宽大于 1 的 Port 或 Connection，不是独立的领域对象）
 
-**位区间 BitRange**：Port 在宿主 Component 的一条多位总线上占据的连续位范围。位区间决定该 Port 的位宽。
+**位区间 BitRange**：拆线器或合线器的某个 Port 在其宿主元件的那条多位 Port 上占据的连续位范围。位区间决定该 Port 的位宽。
 
 **拆线器 Splitter**：把一条多位输入拆成若干条位区间输出的 Component。
 
