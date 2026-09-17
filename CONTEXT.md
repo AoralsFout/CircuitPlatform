@@ -6,8 +6,14 @@
 
 **Circuit**：一份静态的数字电路定义，包含元件及其端口之间的连接关系。它描述电路“是什么”，不描述当前仿真值，也不描述画布上的展示位置；Connection 可以在元件被删除后继续存在。
 
-**Component**：电路中的逻辑或状态元件，例如 AND 门、输入端、输出端、Clock 和 D Flip-Flop。
+**Component**：电路中的逻辑或状态元件，例如 AND 门、输入端、输出端、Clock、D Flip-Flop，以及放入电路中的 Subcircuit。
 _Avoid_: Node（在本项目中容易与 UI 节点或图算法节点混淆）
+_Avoid_: Instance（Subcircuit 放入电路后仍称为 Component，不另造"实例"一词）
+
+**Project**：用户保存和打开的工作单元，包含一份 Circuit、它的编辑器布局和元数据。一个 Project 恰好包含一份 Circuit。
+
+**Subcircuit**：被另一份 Circuit 当作 Component 使用的 Project。它的 Input 和 Output 元件构成对外的 Port；内部其他 Component 对外不可见。Subcircuit 通过引用被使用，不是拷贝；一份 Project 可以在多份 Circuit 中被多次使用，也可以自身使用其他 Subcircuit，但引用关系不允许成环。
+_Avoid_: Module、Block、CompoundComponent
 
 **Port**：Component 用来接收或输出数字信号的连接点，具有输入或输出方向。
 
