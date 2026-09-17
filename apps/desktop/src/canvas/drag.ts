@@ -103,7 +103,10 @@ export function createNodeDragController(options: NodeDragControllerOptions) {
       active.pendingAltKey = altKey;
       schedule();
     },
-    /** 刷新最后一次 pointer move 并提交一次；没有实际位移时不产生历史。 */
+    /**
+     * 刷新最后一次 pointer move 并提交一次；没有实际位移时不产生历史。
+     * 无论是否提交都会调用 `onCommit` 或 `onCancel` 之一，调用者据此清掉临时预览。
+     */
     end(): void {
       if (!active) return;
       if (frameHandle !== null) cancelFrame(frameHandle);
@@ -113,7 +116,10 @@ export function createNodeDragController(options: NodeDragControllerOptions) {
       active = null;
       if (!samePoint(completed.pointerStart, completed.pendingPointer) && !samePoint(completed.originalPosition, completed.preview.position)) {
         options.onCommit(completed.preview);
+        return;
       }
+      // 没有位移的一次按下同样结束了一次拖动，预览必须被回收。
+      options.onCancel?.();
     },
     /** 取消临时预览，不调用提交回调。 */
     cancel(): void {

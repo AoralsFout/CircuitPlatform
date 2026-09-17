@@ -79,3 +79,32 @@ test("context menu removes a draft waypoint or cancels an empty draft", async ()
   assert.match(canvas, /emit\("connectionWaypointRemoveOrCancel"\)/);
   assert.match(app, /@connection-waypoint-remove-or-cancel="removeConnectionWaypointOrCancel"/);
 });
+
+/** 键盘等价路径必须真的接线到画布、App 与主进程，而不只是在解析器里存在。 */
+test("keyboard equivalents for nudging and zooming are wired end to end", async () => {
+  const canvas = await readFile(join(desktopRoot, "src", "components", "CircuitCanvas.vue"), "utf8");
+  const app = await readFile(join(desktopRoot, "src", "App.vue"), "utf8");
+  const styles = await readFile(join(desktopRoot, "src", "styles.css"), "utf8");
+  const main = await readFile(join(desktopRoot, "electron", "main.cjs"), "utf8");
+
+  // 键盘微调复用指针拖动事件，从而继承「一次手势 = 一条历史命令」。
+  assert.match(canvas, /emit\("nodeDragStart", \{ nodeId: target\.componentId/);
+  assert.match(canvas, /emit\("routeEditStart", \{ connectionId: target\.connectionId/);
+  assert.match(canvas, /if \(event\.key\.startsWith\("Arrow"\)\) endNudge\(\)/);
+  assert.match(app, /@node-drag-start=/);
+
+  // Route 手柄进入方向键导航环，但不占用 Tab 序。
+  assert.match(canvas, /data-canvas-arrow-focus/);
+  assert.match(canvas, /const ARROW_FOCUS_SELECTOR = "\[data-canvas-focus\], \[data-canvas-arrow-focus\]"/);
+  assert.match(canvas, /querySelectorAll<HTMLElement>\("\[data-canvas-focus\]"\)/);
+  assert.match(styles, /\.route-waypoint-handle:focus-visible/);
+  assert.match(styles, /\.route-segment-hit:focus-visible/);
+
+  // 缩放在 App 的快捷键分发里处理，且不能落到删除兜底分支。
+  assert.match(app, /case "zoom-in": adjustZoom\(ZOOM_STEP\)/);
+  assert.match(app, /case "zoom-fit": fitViewport\(\)/);
+  assert.match(app, /const unhandled: never = shortcut/);
+
+  // Electron 默认菜单会抢走这几个加速键，并让裸 Alt 聚焦菜单栏。
+  assert.match(main, /Menu\.setApplicationMenu\(null\)/);
+});

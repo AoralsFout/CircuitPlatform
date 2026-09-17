@@ -78,7 +78,10 @@ export function createRouteEditController(options: RouteEditControllerOptions) {
       active.altKey = altKey;
       schedule();
     },
-    /** 刷新最终预览并提交一条 Route 历史命令。 */
+    /**
+     * 刷新最终预览并提交一条 Route 历史命令。
+     * 无论是否提交都会调用 `onCommit` 或 `onCancel` 之一，调用者据此清掉临时预览。
+     */
     end(): void {
       if (!active) return;
       if (frame !== null) stopFrame(frame);
@@ -86,7 +89,12 @@ export function createRouteEditController(options: RouteEditControllerOptions) {
       flush();
       const completed = active;
       active = null;
-      if (!sameRoute(completed.startRoute, completed.route)) options.onCommit({ connectionId: completed.connectionId, route: completed.route });
+      if (!sameRoute(completed.startRoute, completed.route)) {
+        options.onCommit({ connectionId: completed.connectionId, route: completed.route });
+        return;
+      }
+      // 路由没有实际改变时同样结束了一次编辑，预览必须被回收。
+      options.onCancel?.();
     },
     /** 取消当前临时编辑，不写入历史。 */
     cancel(): void {

@@ -103,6 +103,9 @@ const {
   cycle: cycleTheme,
 } = useThemePreference();
 
+/** 键盘缩放的步进百分比，与工具栏按钮保持一致。 */
+const ZOOM_STEP = 10;
+
 const isBottomPanelExpanded = ref(true);
 
 function toggleBottomPanel(): void {
@@ -151,10 +154,20 @@ function onEditorKeydown(event: KeyboardEvent): void {
     return;
   }
   if (editorState.value?.confirmation) return;
-  if (shortcut === "undo") void undo();
-  else if (shortcut === "redo") void redo();
-  else if (shortcut === "duplicate-selection") void duplicateSelection();
-  else void deleteSelection();
+  switch (shortcut) {
+    case "undo": void undo(); break;
+    case "redo": void redo(); break;
+    case "duplicate-selection": void duplicateSelection(); break;
+    case "zoom-in": adjustZoom(ZOOM_STEP); break;
+    case "zoom-out": adjustZoom(-ZOOM_STEP); break;
+    case "zoom-fit": fitViewport(); break;
+    case "delete-selection": void deleteSelection(); break;
+    default: {
+      // 新增 EditorShortcut 成员时这里会编译失败，避免静默落到删除分支。
+      const unhandled: never = shortcut;
+      void unhandled;
+    }
+  }
 }
 
 onMounted(() => {

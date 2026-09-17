@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain } = require("electron");
+const { app, BrowserWindow, Menu, ipcMain } = require("electron");
 const path = require("node:path");
 const { EngineClient } = require("./engine-client.cjs");
 const { requirePositiveId } = require("./request-validation.cjs");
@@ -45,6 +45,17 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
     },
+  });
+
+  // 画布自己处理 Ctrl/Cmd + 0/=/−（视图缩放）与 Alt + 方向键（移动聚焦元件）。
+  // Electron 的默认菜单会用同一组加速键缩放整个页面，而且 Windows 上裸按 Alt 会先聚焦菜单栏，
+  // 后者即使 autoHideMenuBar 也挡不住。移除菜单是唯一可靠的做法；DevTools 用 before-input-event 补回。
+  Menu.setApplicationMenu(null);
+  window.webContents.on("before-input-event", (event, input) => {
+    if (input.type === "keyDown" && input.control && input.shift && input.key.toLowerCase() === "i") {
+      window.webContents.toggleDevTools();
+      event.preventDefault();
+    }
   });
 
   if (app.isPackaged || process.env.CIRCUIT_PLATFORM_PRODUCTION === "1") {

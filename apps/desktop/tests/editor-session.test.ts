@@ -74,8 +74,16 @@ test("maps editor keyboard shortcuts while preserving editable targets", () => {
   assert.equal(key({ key: "z", metaKey: true, shiftKey: true }), "redo");
   assert.equal(key({ key: "d", ctrlKey: true }), "duplicate-selection");
   assert.equal(key({ key: "Escape" }), "cancel");
+  assert.equal(key({ key: "=", ctrlKey: true }), "zoom-in");
+  assert.equal(key({ key: "+", ctrlKey: true, shiftKey: true }), "zoom-in");
+  assert.equal(key({ key: "-", ctrlKey: true }), "zoom-out");
+  assert.equal(key({ key: "_", metaKey: true, shiftKey: true }), "zoom-out");
+  assert.equal(key({ key: "0", ctrlKey: true }), "zoom-fit");
+  assert.equal(key({ key: "0", metaKey: true }), "zoom-fit");
   assert.equal(key({ key: "Delete", editableTarget: true }), null);
   assert.equal(key({ key: "a" }), null);
+  assert.equal(key({ key: "=" }), null);
+  assert.equal(key({ key: "0" }), null);
 });
 
 test("maps canvas keyboard navigation, menu access, and draft editing", () => {
@@ -95,6 +103,29 @@ test("maps canvas keyboard navigation, menu access, and draft editing", () => {
   assert.deepEqual(input({ key: "Enter", hasDraft: true }), { type: "finish-draft" });
   assert.deepEqual(input({ key: "Escape", hasDraft: true }), { type: "cancel" });
   assert.equal(input({ key: "ArrowRight", targetIsEditable: true }), null);
+});
+
+test("maps keyboard nudging for the focused component and route handle", () => {
+  const input = (overrides: Partial<Parameters<typeof resolveCanvasKeyboardAction>[0]>) =>
+    resolveCanvasKeyboardAction({ key: "", shiftKey: false, altKey: false, ctrlKey: false, metaKey: false, hasDraft: false, targetIsEditable: false, focusedKind: null, ...overrides });
+
+  // Alt + 方向键移动聚焦的 Component。
+  assert.deepEqual(input({ key: "ArrowRight", altKey: true, focusedKind: "component" }), { type: "nudge-component", dx: 1, dy: 0 });
+  assert.deepEqual(input({ key: "ArrowUp", altKey: true, focusedKind: "component" }), { type: "nudge-component", dx: 0, dy: -1 });
+  // 没有 Alt 时方向键仍然只移动焦点。
+  assert.deepEqual(input({ key: "ArrowRight", focusedKind: "component" }), { type: "next-focus", delta: 1 });
+  // Alt 只对 Component 生效，端口与 Wire 上的焦点不受影响。
+  assert.deepEqual(input({ key: "ArrowRight", altKey: true, focusedKind: "port" }), { type: "next-focus", delta: 1 });
+
+  // 聚焦 Route 手柄时方向键直接微调手柄。
+  assert.deepEqual(input({ key: "ArrowDown", focusedKind: "route-waypoint" }), { type: "nudge-route", dx: 0, dy: 1 });
+  assert.deepEqual(input({ key: "ArrowLeft", focusedKind: "route-segment" }), { type: "nudge-route", dx: -1, dy: 0 });
+
+  // Shift 保持固定为平移，在两个微调分支之前判定。
+  assert.deepEqual(input({ key: "ArrowRight", shiftKey: true, focusedKind: "route-waypoint" }), { type: "pan", dx: 1, dy: 0 });
+  assert.deepEqual(input({ key: "ArrowRight", shiftKey: true, altKey: true, focusedKind: "component" }), { type: "pan", dx: 1, dy: 0 });
+  // 布线中的方向键语义优先于微调。
+  assert.deepEqual(input({ key: "ArrowRight", hasDraft: true, altKey: true, focusedKind: "component" }), { type: "move-draft", dx: 1, dy: 0, waypoint: false });
 });
 
 function createSession(engine: FakeEngine) {

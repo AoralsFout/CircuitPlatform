@@ -19,7 +19,7 @@ import type { ComponentDefinition } from "../canvas";
 import type { ComponentKindName } from "@circuit-platform/protocol";
 import { isConnectionDraftTarget, resolveConnectionPortPointerAction, type ConnectionDraftPort } from "../editor/connection-draft.ts";
 import type { Point } from "../editor";
-import { resolveCanvasKeyboardAction, isEditableKeyboardTarget } from "../editor/keyboard.ts";
+import { resolveCanvasKeyboardAction, isEditableKeyboardTarget, type CanvasFocusKind } from "../editor/keyboard.ts";
 import {
   positionComponentMenu,
 } from "../editor/component-menu";
@@ -78,6 +78,19 @@ const emit = defineEmits<{
 
 const canvasElement = ref<HTMLElement | null>(null);
 let resizeObserver: ResizeObserver | null = null;
+
+/**
+ * 请求指针捕获，失败时保持交互继续。
+ * 捕获只在指针已释放或事件来自合成指针时失败；此时后续事件仍会冒泡到画布，
+ * 交互不应因为捕获失败而被静默吞掉。
+ */
+function capturePointer(pointerId: number): void {
+  try {
+    canvasElement.value?.setPointerCapture(pointerId);
+  } catch {
+    // 忽略：没有活动指针可捕获，交互继续依赖冒泡的 pointermove。
+  }
+}
 let spacePressed = false;
 let panPointer: { pointerId: number; x: number; y: number } | null = null;
 const isPanning = ref(false);
@@ -106,6 +119,27 @@ let connectionDraftOrigin: ConnectionDraftPort | null = null;
 let allowSameDirectionDraftTarget = false;
 const hoveredConnectionTarget = ref<string | null>(null);
 let lastPointerAnchor: { x: number; y: number } | null = null;
+
+/** 键盘微调的一格世界坐标步长；与编辑器网格一致。 */
+const NUDGE_STEP = 16;
+
+/**
+ * 方向键导航环 = Tab 环的全部成员 + 不占用 Tab 序的 Route 手柄。
+ * 一条折点较多的 Wire 会有很多手柄，放进 Tab 序会让 Tab 浏览变得冗长。
+ */
+const ARROW_FOCUS_SELECTOR = "[data-canvas-focus], [data-canvas-arrow-focus]";
+
+type RouteHandleTarget = { kind: "waypoint" | "segment"; index: number };
+
+type NudgeTarget =
+  | { kind: "component"; componentId: string }
+  | { kind: "route"; connectionId: string; route: readonly Point[]; target: RouteHandleTarget };
+
+/** 一次键盘微调手势；起点只在建立时读取一次，之后只累加位移。 */
+let nudgeSession: { target: NudgeTarget; origin: Point; offset: Point } | null = null;
+
+/** 当前聚焦的 Route 手柄；手柄不在 Tab 序里，因此单独记录它的归属。 */
+let focusedRouteHandle: { connectionId: string; target: RouteHandleTarget } | null = null;
 
 function keyboardMenuAnchor(target: EventTarget | null): { x: number; y: number } {
   const element = target instanceof Element ? target : null;
@@ -156,7 +190,7 @@ function nodeStyle(node: CanvasNode): Record<string, string> {
 function focusByOffset(delta: number): void {
   const targets = [...(canvasElement.value?.querySelectorAll<HTMLElement>("[data-canvas-focus]") ?? [])];
   if (targets.length === 0) return;
-  const current = targets.indexOf(document.activeElement as HTMLElement);
+  const current = targets.indexOf(offsetAnchor(targets) as HTMLElement);
   const next = (current < 0 ? (delta > 0 ? -1 : 0) : current) + delta;
   const element = targets[(next + targets.length) % targets.length];
   if (!element) return;
@@ -164,9 +198,9 @@ function focusByOffset(delta: number): void {
   emit("focusChange", element.dataset.focusId ?? null);
 }
 
-/** 按空间方向在节点、Wire 和 Port 之间移动焦点，避免把选择状态当作焦点状态。 */
+/** 按空间方向在节点、Wire、Port 和 Route 手柄之间移动焦点，避免把选择状态当作焦点状态。 */
 function focusByDirection(dx: number, dy: number): void {
-  const targets = [...(canvasElement.value?.querySelectorAll<HTMLElement>("[data-canvas-focus]") ?? [])];
+  const targets = [...(canvasElement.value?.querySelectorAll<HTMLElement>(ARROW_FOCUS_SELECTOR) ?? [])];
   const current = document.activeElement as HTMLElement | null;
   if (!current || !targets.includes(current)) {
     focusByOffset(dx || dy || 1);
@@ -190,6 +224,86 @@ function focusByDirection(dx: number, dy: number): void {
   if (!next) return;
   next.focus();
   emit("focusChange", next.dataset.focusId ?? null);
+}
+
+/** 把当前焦点映射到 Tab 环里的锚点；焦点在手柄上时改用其所属的 Wire。 */
+function offsetAnchor(targets: readonly HTMLElement[]): HTMLElement | null {
+  const active = document.activeElement as HTMLElement | null;
+  if (active && targets.includes(active)) return active;
+  const connectionId = focusedRouteHandle?.connectionId;
+  if (!connectionId) return null;
+  return targets.find((element) => element.dataset.focusKind === "connection" && element.dataset.focusId === connectionId) ?? null;
+}
+
+function focusedComponentId(): string | undefined {
+  const active = document.activeElement;
+  if (!(active instanceof HTMLElement) && !(active instanceof SVGElement)) return undefined;
+  return active.dataset.focusKind === "component" ? active.dataset.focusId : undefined;
+}
+
+function componentNudgeTarget(): { target: NudgeTarget; origin: Point } | null {
+  const componentId = focusedComponentId();
+  if (!componentId) return null;
+  const node = props.scene.nodes.find((candidate) => candidate.id === componentId);
+  return node ? { target: { kind: "component", componentId }, origin: { ...node.position } } : null;
+}
+
+function routeNudgeTarget(): { target: NudgeTarget; origin: Point } | null {
+  const handle = focusedRouteHandle;
+  if (!handle) return null;
+  const wire = props.scene.wires.find((candidate) => candidate.id === handle.connectionId);
+  const origin = wire?.route[handle.target.index];
+  if (!wire || !origin) return null;
+  return { target: { kind: "route", connectionId: wire.id, route: wire.route, target: handle.target }, origin: { ...origin } };
+}
+
+function beginNudge(target: NudgeTarget, origin: Point): void {
+  nudgeSession = { target, origin: { ...origin }, offset: { x: 0, y: 0 } };
+  // 键盘微调复用指针拖动的同一组事件与控制器，从而自然获得「一次手势 = 一条历史命令」。
+  if (target.kind === "component") emit("nodeDragStart", { nodeId: target.componentId, pointerWorld: { ...origin } });
+  else emit("routeEditStart", { connectionId: target.connectionId, route: target.route, target: target.target, pointerWorld: { ...origin } });
+}
+
+/** 累加一格微调；首次调用会建立手势并读取起点。 */
+function nudge(step: { dx: number; dy: number }, kind: "component" | "route"): void {
+  if (!nudgeSession) {
+    const created = kind === "component" ? componentNudgeTarget() : routeNudgeTarget();
+    if (!created) return;
+    beginNudge(created.target, created.origin);
+  }
+  if (!nudgeSession || (nudgeSession.target.kind === "component") !== (kind === "component")) return;
+  const offset = { x: nudgeSession.offset.x + step.dx * NUDGE_STEP, y: nudgeSession.offset.y + step.dy * NUDGE_STEP };
+  nudgeSession.offset = offset;
+  const pointerWorld = { x: nudgeSession.origin.x + offset.x, y: nudgeSession.origin.y + offset.y };
+  if (nudgeSession.target.kind === "component") emit("nodeDragMove", { pointerWorld, altKey: false });
+  else emit("routeEditMove", { pointerWorld, altKey: false });
+}
+
+/** 结束微调手势；控制器提交一条历史命令，没有实际变化时回收预览。 */
+function endNudge(): void {
+  const session = nudgeSession;
+  nudgeSession = null;
+  if (!session) return;
+  if (session.target.kind === "component") emit("nodeDragEnd");
+  else emit("routeEditEnd");
+}
+
+/** 放弃微调手势；不产生历史命令。 */
+function cancelNudge(): void {
+  const session = nudgeSession;
+  nudgeSession = null;
+  if (!session) return;
+  if (session.target.kind === "component") emit("nodeDragCancel");
+  else emit("routeEditCancel");
+}
+
+function focusRouteHandle(connectionId: string, target: RouteHandleTarget, focusId: string): void {
+  focusedRouteHandle = { connectionId, target };
+  emit("focusChange", focusId);
+}
+
+function blurRouteHandle(): void {
+  focusedRouteHandle = null;
 }
 
 function viewportStyle(): Record<string, string> {
@@ -423,7 +537,7 @@ function onNodePointerDown(event: PointerEvent, node: CanvasNode): void {
   }
   nodeDragPointer = { pointerId: event.pointerId, nodeId: node.id };
   nodeDidMove = false;
-  canvasElement.value?.setPointerCapture(event.pointerId);
+  capturePointer(event.pointerId);
   emit("nodeDragStart", { nodeId: node.id, pointerWorld: pointerInWorld(event) });
   event.preventDefault();
   event.stopPropagation();
@@ -432,7 +546,7 @@ function onNodePointerDown(event: PointerEvent, node: CanvasNode): void {
 function onRouteWaypointPointerDown(event: PointerEvent, wire: CanvasWire, pointIndex: number): void {
   if (event.button !== 0 || props.interaction.connectionDraft) return;
   routeEditPointer = { pointerId: event.pointerId, connectionId: wire.id, route: wire.route, target: { kind: "waypoint", index: pointIndex } };
-  canvasElement.value?.setPointerCapture(event.pointerId);
+  capturePointer(event.pointerId);
   emit("routeEditStart", { connectionId: wire.id, route: wire.route, target: { kind: "waypoint", index: pointIndex }, pointerWorld: pointerInWorld(event) });
   event.preventDefault();
   event.stopPropagation();
@@ -441,7 +555,7 @@ function onRouteWaypointPointerDown(event: PointerEvent, wire: CanvasWire, point
 function onRouteSegmentPointerDown(event: PointerEvent, wire: CanvasWire, segmentIndex: number): void {
   if (event.button !== 0 || !wire.selected || props.interaction.connectionDraft) return;
   routeEditPointer = { pointerId: event.pointerId, connectionId: wire.id, route: wire.route, target: { kind: "segment", index: segmentIndex } };
-  canvasElement.value?.setPointerCapture(event.pointerId);
+  capturePointer(event.pointerId);
   emit("routeEditStart", { connectionId: wire.id, route: wire.route, target: { kind: "segment", index: segmentIndex }, pointerWorld: pointerInWorld(event) });
   event.preventDefault();
   event.stopPropagation();
@@ -481,7 +595,7 @@ function onPointerDown(event: PointerEvent): void {
   if (!isViewportPanPointer(event.button, spacePressed, hit?.kind === "background")) return;
   panPointer = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
   isPanning.value = true;
-  canvasElement.value?.setPointerCapture(event.pointerId);
+  capturePointer(event.pointerId);
   event.preventDefault();
   event.stopPropagation();
 }
@@ -591,6 +705,8 @@ function onCanvasKeyboard(event: KeyboardEvent): void {
     event.stopPropagation();
     return;
   }
+  const target = event.target instanceof Element ? event.target : canvasElement.value;
+  const focusDataset = target instanceof HTMLElement || target instanceof SVGElement ? target.dataset : undefined;
   const action = resolveCanvasKeyboardAction({
     key: event.key,
     shiftKey: event.shiftKey,
@@ -599,10 +715,10 @@ function onCanvasKeyboard(event: KeyboardEvent): void {
     metaKey: event.metaKey,
     hasDraft: Boolean(props.interaction.connectionDraft),
     targetIsEditable: false,
+    // 焦点落在 Route 手柄上时，keydown 的目标就是该手柄。
+    focusedKind: focusDataset?.focusKind as CanvasFocusKind | undefined,
   });
   if (!action) return;
-  const target = event.target instanceof Element ? event.target : canvasElement.value;
-  const focusDataset = target instanceof HTMLElement || target instanceof SVGElement ? target.dataset : undefined;
   const port = target?.matches("[data-port-id]") && target instanceof HTMLElement ? focusPortTarget(target) : null;
   if (action.type === "open-menu") {
     if (!props.interaction.connectionDraft) {
@@ -610,6 +726,10 @@ function onCanvasKeyboard(event: KeyboardEvent): void {
     }
   } else if (action.type === "pan") {
     emit("viewportChange", panViewport(props.viewport, { x: action.dx * 48, y: action.dy * 48 }));
+  } else if (action.type === "nudge-component") {
+    nudge(action, "component");
+  } else if (action.type === "nudge-route") {
+    nudge(action, "route");
   } else if (action.type === "move-draft") {
     const cursor = draftCursor();
     if (cursor) {
@@ -639,7 +759,9 @@ function onCanvasKeyboard(event: KeyboardEvent): void {
     else if (focusDataset?.focusKind === "component") emit("selectComponent", focusDataset.focusId ?? "");
     else if (focusDataset?.focusKind === "connection") emit("selectConnection", focusDataset.focusId ?? "");
   } else if (action.type === "cancel") {
-    if (props.interaction.connectionDraft) emit("connectionCancel");
+    // 键盘微调的手势状态只存在本组件，必须先于其它分支清理。
+    if (nudgeSession) cancelNudge();
+    else if (props.interaction.connectionDraft) emit("connectionCancel");
     else if (props.interaction.routeEditPreview) emit("routeEditCancel");
     else if (props.interaction.draggingComponentId) emit("nodeDragCancel");
     else return;
@@ -649,6 +771,8 @@ function onCanvasKeyboard(event: KeyboardEvent): void {
 }
 
 function onKeydown(event: KeyboardEvent): void {
+  // 撤销会让微调手势记录的起点失效，先结束当前手势再做历史操作。
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z" && nudgeSession) cancelNudge();
   if (event.key === " ") {
     if (props.interaction.connectionDraft) {
       emit("connectionAxisToggle");
@@ -673,7 +797,7 @@ function onPortPointerDown(event: PointerEvent, node: CanvasNode, port: CanvasNo
   connectionDraftOrigin = draftPort;
   allowSameDirectionDraftTarget = false;
   connectionPointer = { pointerId: event.pointerId, ended: false };
-  canvasElement.value?.setPointerCapture(event.pointerId);
+  capturePointer(event.pointerId);
   emit("connectionStart", draftPort);
   emit("connectionMove", { point: pointerInWorld(event), altKey: event.altKey });
   event.preventDefault();
@@ -717,7 +841,7 @@ function onPortClick(event: MouseEvent): void {
 function onDanglingEndpointPointerDown(event: PointerEvent, wire: CanvasWire, side: "source" | "target"): void {
   if (event.button !== 0 || spacePressed || props.interaction.pendingPlacement) return;
   connectionPointer = { pointerId: event.pointerId, ended: false };
-  canvasElement.value?.setPointerCapture(event.pointerId);
+  capturePointer(event.pointerId);
   const endpoint = side === "source" ? wire.source : wire.target;
   const draftPort: ConnectionDraftPort = {
     componentId: endpoint.componentId,
@@ -736,6 +860,13 @@ function onDanglingEndpointPointerDown(event: PointerEvent, wire: CanvasWire, si
 
 function onKeyup(event: KeyboardEvent): void {
   if (event.key === " ") spacePressed = false;
+  // 松开方向键即结束一次微调手势，控制器据此提交单条历史命令。
+  if (event.key.startsWith("Arrow")) endNudge();
+}
+
+/** 窗口失焦或页面隐藏时不会再有 keyup，必须主动结束手势，避免残留卡死。 */
+function onWindowBlur(): void {
+  cancelNudge();
 }
 
 function onCanvasKeydown(event: KeyboardEvent): void {
@@ -755,6 +886,8 @@ onMounted(() => {
   }
   window.addEventListener("keydown", onKeydown);
   window.addEventListener("keyup", onKeyup);
+  window.addEventListener("blur", onWindowBlur);
+  document.addEventListener("visibilitychange", onWindowBlur);
 });
 
 onBeforeUnmount(() => {
@@ -763,6 +896,8 @@ onBeforeUnmount(() => {
   resizeObserver?.disconnect();
   window.removeEventListener("keydown", onKeydown);
   window.removeEventListener("keyup", onKeyup);
+  window.removeEventListener("blur", onWindowBlur);
+  document.removeEventListener("visibilitychange", onWindowBlur);
 });
 
 watch(() => props.interaction.connectionDraft, (draft) => {
@@ -771,11 +906,34 @@ watch(() => props.interaction.connectionDraft, (draft) => {
   allowSameDirectionDraftTarget = false;
   hoveredConnectionTarget.value = null;
 });
+
+/**
+ * 手柄只在所属 Wire 选中时渲染；取消选中，或微调把折点规范化掉之后，
+ * 被移除的焦点元素会让 activeElement 静默落到 body，画布的 keydown 从此不再触发。
+ * 这里把焦点交还给所属 Wire，保住整条键盘路径。
+ */
+watch(() => props.scene.wires, async () => {
+  const handle = focusedRouteHandle;
+  if (!handle) return;
+  await nextTick();
+  if (!canvasElement.value) return;
+  const active = document.activeElement;
+  if (active && canvasElement.value.contains(active)) return;
+  focusedRouteHandle = null;
+  const owner = [...canvasElement.value.querySelectorAll<HTMLElement>('[data-focus-kind="connection"]')]
+    .find((element) => element.dataset.focusId === handle.connectionId);
+  if (!owner) {
+    emit("focusChange", null);
+    return;
+  }
+  owner.focus();
+  emit("focusChange", handle.connectionId);
+});
 </script>
 
 <template>
   <div class="editor-canvas-wrap">
-    <div class="canvas-info"><span class="canvas-mode"><span class="mode-dot" aria-hidden="true"></span>场景模式</span><span>Delete 删除 · Ctrl/Cmd+D 复制 · Ctrl/Cmd+Z 撤销 · Esc 取消</span></div>
+    <div class="canvas-info"><span class="canvas-mode"><span class="mode-dot" aria-hidden="true"></span>场景模式</span><span>Delete 删除 · Ctrl/Cmd+D 复制 · Ctrl/Cmd+Z 撤销 · Alt+方向键 移动元件 · 方向键（聚焦折点）微调 · Ctrl/Cmd+0/=/− 缩放 · Esc 取消</span></div>
     <div ref="canvasElement" class="circuit-canvas" :class="{ 'circuit-canvas--dense': isDenseCanvasScene(scene), 'circuit-canvas--panning': isPanning, 'circuit-canvas--connecting': interaction.connectionDraft }" role="application" tabindex="0" aria-label="电路画布" @wheel="onWheel" @contextmenu="onContextMenu" @keydown="onCanvasKeydown" @dragover="onDragOver" @drop="onDrop" @pointerdown="onPointerDown" @pointermove="onPointerMove" @pointerup="onPointerUp" @pointercancel="onPointerUp">
       <div class="canvas-grid" :style="gridStyle()" aria-hidden="true"></div>
       <div class="canvas-viewport" :style="viewportStyle()">
@@ -783,10 +941,10 @@ watch(() => props.interaction.connectionDraft, (draft) => {
           <template v-for="wire in scene.wires" :key="wire.id">
             <path class="signal-wire-hit" :d="pathFor(wire.route)" role="button" tabindex="0" data-canvas-focus data-focus-kind="connection" :data-focus-id="wire.id" :class="{ 'signal-wire-hit--focused': interaction.focusedId === wire.id }" :aria-label="`${wire.danglingEndpoints.length > 0 ? '悬空' : '正常'}连线 ${wire.id}，信号 ${wire.signal}`" @focus="emit('focusChange', wire.id)" @click.stop="emit('selectConnection', wire.id)" />
             <template v-if="wire.selected" v-for="(_, segmentIndex) in wire.route.slice(0, -1)" :key="`${wire.id}-segment-${segmentIndex}`">
-              <path v-if="segmentIndex > 0 && segmentIndex < wire.route.length - 2" class="route-segment-hit" :d="segmentPath(wire.route, segmentIndex)" :aria-label="`移动连线 ${wire.id} 线段 ${segmentIndex + 1}`" @pointerdown.stop="onRouteSegmentPointerDown($event, wire, segmentIndex)" />
+              <path v-if="segmentIndex > 0 && segmentIndex < wire.route.length - 2" class="route-segment-hit" :d="segmentPath(wire.route, segmentIndex)" role="button" tabindex="0" data-canvas-arrow-focus data-focus-kind="route-segment" :data-focus-id="`route:${wire.id}:segment:${segmentIndex}`" :aria-label="`移动连线 ${wire.id} 线段 ${segmentIndex + 1}，方向键微调`" @focus="focusRouteHandle(wire.id, { kind: 'segment', index: segmentIndex }, `route:${wire.id}:segment:${segmentIndex}`)" @blur="blurRouteHandle" @pointerdown.stop="onRouteSegmentPointerDown($event, wire, segmentIndex)" />
             </template>
             <template v-if="wire.selected" v-for="(point, pointIndex) in wire.route.slice(1, -1)" :key="`${wire.id}-waypoint-${pointIndex}`">
-              <circle class="route-waypoint-handle" :cx="point.x" :cy="point.y" r="7" role="button" tabindex="0" :aria-label="`编辑连线 ${wire.id} 折点 ${pointIndex + 1}`" @pointerdown.stop="onRouteWaypointPointerDown($event, wire, pointIndex + 1)" />
+              <circle class="route-waypoint-handle" :cx="point.x" :cy="point.y" r="7" role="button" tabindex="0" data-canvas-arrow-focus data-focus-kind="route-waypoint" :data-focus-id="`route:${wire.id}:waypoint:${pointIndex + 1}`" :aria-label="`编辑连线 ${wire.id} 折点 ${pointIndex + 1}，方向键微调`" @focus="focusRouteHandle(wire.id, { kind: 'waypoint', index: pointIndex + 1 }, `route:${wire.id}:waypoint:${pointIndex + 1}`)" @blur="blurRouteHandle" @pointerdown.stop="onRouteWaypointPointerDown($event, wire, pointIndex + 1)" />
             </template>
             <path v-if="wire.selected" class="signal-wire-outline" :d="pathFor(wire.route)" aria-hidden="true" />
             <path :id="wirePathId(wire.id)" class="signal-wire" :class="[wireColorClass(wire.color), { 'signal-wire--dangling': wire.danglingEndpoints.length > 0 }]" :data-signal="wire.signal" :data-wire-color="wire.color ?? DEFAULT_WIRE_COLOR" :data-dangling="wire.danglingEndpoints.length > 0 ? 'true' : 'false'" :d="pathFor(wire.route)" />
