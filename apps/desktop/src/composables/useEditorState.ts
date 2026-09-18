@@ -9,8 +9,8 @@ import {
   type EditorSnapshot,
   type Point,
   type WireColorId,
-} from "../editor";
-import type { InputKey, WorkspaceSnapshot } from "../workspace";
+} from "../editor/index.ts";
+import { coerceInputValue, inputBitsOf, type InputBit, type InputKey, type InputValue, type WorkspaceSnapshot } from "../workspace/index.ts";
 import {
   componentGeometryFor,
   createComponentDefinitionRegistry,
@@ -25,13 +25,13 @@ import {
   setViewportZoomAt,
   type InteractionState,
   type ViewportState,
-} from "../canvas";
+} from "../canvas/index.ts";
 import { createInspectorModel, type InspectorModel } from "../editor/inspector.ts";
 import { defaultPortsFor, portsWithBitRanges } from "../editor/bus-ports.ts";
 import {
   readRecentComponentKinds,
   writeRecentComponentKind,
-} from "../editor/component-menu";
+} from "../editor/component-menu.ts";
 import { positionFromPlacementCenter } from "../editor/placement.ts";
 import {
   connectionDraftRoute,
@@ -49,6 +49,29 @@ export type WaveformKey = "a" | "b" | "output";
 export interface WaveformRow {
   label: string;
   key: WaveformKey;
+}
+
+/** 位按钮组里的一位：它属于哪个 Input、在取值文本里的位置，以及当前取值。 */
+export interface InputBitControl {
+  /** 该位在取值文本里的下标：0 是最左、也是最高位；组内按它排序与导航。 */
+  index: number;
+  /** 该位的位号（`[N-1:0]` 记法）；用于无障碍标签，用户据此知道自己在拨哪一位。 */
+  place: number;
+  value: InputBit;
+}
+
+/** 输入设置里的一个 Input 元件：元件标签、完整多位读数，以及它按位展开的方形按钮。 */
+export interface InputControl {
+  key: InputKey;
+  index: number;
+  label: string;
+  /** 该 Input 当前的完整多位取值，长度等于 `width`；按钮组与读数共用同一个值。 */
+  value: InputValue;
+  /** 端口声明的位宽；1 位与多位共用同一套视觉，只有按钮个数不同。 */
+  width: number;
+  /** 按位展开的按钮，从最高位到最低位排列，渲染时每行八列。 */
+  bits: readonly InputBitControl[];
+  componentId: string | null;
 }
 
 const waveformRows: readonly WaveformRow[] = [
@@ -292,13 +315,28 @@ export function useEditorState(
     const selection = editorState.value?.selection;
     return selection?.kind === "connection" ? selection.id : null;
   });
-  const inputControls = computed(() => canvasScene.value.nodes.filter((node) => node.kind === "input").map((node, index) => ({
-    key: node.id as InputKey,
-    index: index + 1,
-    label: node.displayName,
-    value: workspaceState.value.inputValues[node.id] ?? (index === 0 ? workspaceState.value.inputA : index === 1 ? workspaceState.value.inputB : "0"),
-    componentId: node.id,
-  })));
+  /**
+   * 输入设置的展示模型：每个 Input 元件一个条目，取值按端口位宽展开成逐位按钮。
+   *
+   * 位宽来自画布节点的端口清单（也就是引擎回传的那一份），不来自任何前端内置定义。取值先按
+   * 该位宽对齐再展开，因此改宽之后、下一次求值之前，这里也不会出现长度对不上的读数或按钮数。
+   */
+  const inputControls = computed<readonly InputControl[]>(() => canvasScene.value.nodes.filter((node) => node.kind === "input").map((node, index) => {
+    const width = node.ports.find((port) => port.direction === "output")?.width ?? 1;
+    const value = coerceInputValue(
+      workspaceState.value.inputValues[node.id] ?? (index === 0 ? workspaceState.value.inputA : index === 1 ? workspaceState.value.inputB : undefined),
+      width,
+    );
+    return {
+      key: node.id as InputKey,
+      index: index + 1,
+      label: node.displayName,
+      value,
+      width,
+      bits: inputBitsOf(value).map((bit, bitIndex) => ({ index: bitIndex, place: width - 1 - bitIndex, value: bit })),
+      componentId: node.id,
+    };
+  }));
   // 输出面板读取文档中全部 Output 元件，每个元件显示自己求值后的信号。
   const outputs = computed(() => canvasScene.value.nodes.filter((node) => node.kind === "output").map((node) => ({
     key: node.id,

@@ -16,6 +16,7 @@ import type { ConnectionDraftPort } from "../editor/connection-draft.ts";
 import {
   createWorkspace,
   type EngineAdapter,
+  type InputBit,
   type InputKey,
   type SimulationBindings,
   type WorkspaceSnapshot,
@@ -38,7 +39,8 @@ interface WorkspaceBinding {
   step(): Promise<void>;
   /** 把仿真恢复到初始状态；Circuit 结构不变，运行状态回到已停止。 */
   reset(): Promise<void>;
-  toggleInput(key: InputKey): Promise<void>;
+  /** 设置某个 Input 某一位的取值；运行中只提交 `set_input`，停止或暂停时提交后立刻求值。 */
+  setInputBit(key: InputKey, index: number, bit: InputBit): Promise<void>;
   select(selection: EditorSelection): Promise<void>;
   moveComponent(componentId: EditorComponentId, position: Point): Promise<void>;
   editRoute(connectionId: string, route: readonly Point[]): Promise<void>;
@@ -176,8 +178,8 @@ export function useWorkspace(): WorkspaceBinding {
     await reflect(() => workspace.reset());
   }
 
-  async function toggleInput(key: InputKey): Promise<void> {
-    await reflect(() => workspace.toggleInput(key));
+  async function setInputBit(key: InputKey, index: number, bit: InputBit): Promise<void> {
+    await reflect(() => workspace.setInputBit(key, index, bit));
   }
 
   async function dispatch(command: Parameters<EditorSession["dispatch"]>[0]): Promise<void> {
@@ -269,7 +271,7 @@ export function useWorkspace(): WorkspaceBinding {
     resume,
     step,
     reset,
-    toggleInput,
+    setInputBit,
     select: (selection) => dispatch({ type: "select", selection }),
     moveComponent: (componentId, position) => dispatch({ type: "move-component", componentId, position }),
     editRoute: (connectionId, route) => dispatch({ type: "edit-route", connectionId, route }),

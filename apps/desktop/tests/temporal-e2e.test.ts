@@ -168,7 +168,7 @@ test("runs, pauses, resumes, and resets a clock-driven flip-flop on the real eng
   assert.equal(signalOf(afterThird, "flop:q"), "1");
 
   // 运行中切换 Input：只提交 set_input，由下一次推进带上新值。
-  const toggled = await workspace.toggleInput("data");
+  const toggled = await workspace.setInputBit("data", 0, "0");
   assert.equal(toggled.inputValues.data, "0");
   assert.equal(toggled.simulationState, "running", "运行中切换输入不该打断连续运行");
 

@@ -2,13 +2,13 @@ import type { Signal } from "@circuit-platform/protocol";
 import type { EditorSnapshot } from "./index.ts";
 import type { SimulationSnapshot } from "../canvas/index.ts";
 import { isProjectedDangling } from "./port-width.ts";
-import type { BinarySignal } from "../workspace/index.ts";
+import { coerceInputValue, type InputValue } from "../workspace/index.ts";
 
 export interface SimulationDisplayInputs {
   /** 兼容投影：按文档顺序的前两个 Input 元件；已求值的输入优先取自 `inputValues`。 */
-  inputA: BinarySignal;
-  inputB: BinarySignal;
-  inputValues?: Readonly<Record<string, BinarySignal>>;
+  inputA: InputValue;
+  inputB: InputValue;
+  inputValues?: Readonly<Record<string, InputValue>>;
   /**
    * 工作区最近一次稳定求值后读取到的端口信号，键为 `${componentId}:${portId}`。
    * 每个 Output 元件从自己的接收端读取，不回退到其它 Output 的值。
@@ -39,10 +39,12 @@ export function createSimulationSnapshot(
     for (const port of component.ports ?? []) {
       const key = `${component.id}:${port.name}`;
       if (component.kind === "input" && port.direction === "output") {
-        const bit = values.inputValues?.[component.id] ?? (inputIndex === 0 ? values.inputA : inputIndex === 1 ? values.inputB : "0");
-        // Input 的取值在按位设置进来之前仍是整值 0/1；提交给展示时按端口位宽展开，
-        // 因此宽 Input 不会显示成一个长度对不上的值。
-        signals[key] = bit.repeat(port.width);
+        // Input 的取值是逐位文本；对齐到端口位宽后直接展示，因此宽 Input 既不会显示成长度
+        // 对不上的值，也不会被压成单一的 0/1。
+        signals[key] = coerceInputValue(
+          values.inputValues?.[component.id] ?? (inputIndex === 0 ? values.inputA : inputIndex === 1 ? values.inputB : undefined),
+          port.width,
+        );
         observedKeys.add(key);
       } else if (component.kind === "output" && port.direction === "input") {
         // 文档中的每个 Output 各自读取自己的信号；未求值时保持未知。
