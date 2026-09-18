@@ -14,6 +14,12 @@ test("visual fixture covers the required state matrix and reduced motion mode", 
   for (const state of ["default", "empty", "selected-component", "selected-wire", "draft", "dangling", "pending", "error", "running", "paused"]) {
     assert.match(script, new RegExp(state.replace("-", "\\-")));
   }
+  // 多位电路的状态必须同时出现在脚本的状态表和夹具的 `prepare()` 里：只进状态表会在准备阶段
+  // 什么都不做，截出来的是一张与 `default` 无异的画面，而断言仍然全绿。
+  for (const state of ["bus-canvas", "bus-inspector", "bus-ranges", "bus-bits-expanded", "bus-bits-collapsed", "bus-bit-single"]) {
+    assert.match(script, new RegExp(state.replace("-", "\\-")), `截图脚本的状态表里没有 ${state}`);
+    assert.match(fixture, new RegExp(`state === "${state}"`), `视觉夹具的 prepare() 里没有 ${state}`);
+  }
   assert.match(script, /regular: \{ width: 1440, height: 900 \}/);
   assert.match(script, /narrow: \{ width: 720, height: 560 \}/);
   assert.match(fixture, /data-motion="reduced"/);

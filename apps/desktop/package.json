@@ -11,7 +11,8 @@
     "test:temporal-e2e": "node --test --experimental-strip-types tests/temporal-e2e.test.ts",
     "test:canvas-selection": "electron scripts/canvas-selection-regression.mjs",
     "performance:benchmark": "node scripts/performance-benchmark.mjs",
-    "visual:test": "electron scripts/visual-regression.mjs"
+    "visual:test": "electron scripts/visual-regression.mjs",
+    "visual:probe": "electron scripts/visual-state-probe.mjs"
   },
   "dependencies": {
     "@circuit-platform/protocol": "workspace:*",
