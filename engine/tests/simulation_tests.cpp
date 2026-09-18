@@ -596,6 +596,121 @@ void rejects_a_tick_that_cannot_settle() {
     assert(simulation.step() == 0);
 }
 
+// 结构变更不再是「重建仿真」：删掉一个与读数路径无关的元件，已提交的输入值必须还在。
+// 旧实现（结构一变就重建整个 Simulation）会在这里把输入连同 AND 的结果一起清成 X。
+void keeps_committed_input_values_across_a_structure_change() {
+    circuit::Circuit circuit;
+    const auto firstInputId = circuit.addComponent(circuit::ComponentKind::Input);
+    const auto secondInputId = circuit.addComponent(circuit::ComponentKind::Input);
+    const auto andId = circuit.addComponent(circuit::ComponentKind::AndGate);
+    const auto outputId = circuit.addComponent(circuit::ComponentKind::Output);
+    const auto unrelatedId = circuit.addComponent(circuit::ComponentKind::NotGate);
+
+    assert(circuit.addConnection({firstInputId, "out"}, {andId, "in1"}).succeeded());
+    assert(circuit.addConnection({secondInputId, "out"}, {andId, "in2"}).succeeded());
+    assert(circuit.addConnection({andId, "out"}, {outputId, "in"}).succeeded());
+
+    circuit::Simulation simulation(circuit);
+    assert(simulation.setInput(firstInputId, circuit::SignalValue::One));
+    assert(simulation.setInput(secondInputId, circuit::SignalValue::One));
+    assert(simulation.settle().succeeded());
+    assert(simulation.signal({outputId, "in"}) == circuit::SignalValue::One);
+    // 两个 Input 的 out、AND 的 out、以及那个无关 NOT 的 out。
+    assert(simulation.outputSignals().size() == 4);
+
+    assert(circuit.removeComponent(unrelatedId));
+    simulation.reconcile();
+
+    // 消失的端口连同它的值一起丢弃：状态表不再保留那个 NOT 的输出。
+    assert(simulation.outputSignals().size() == 3);
+    // 仍然存在的端口保留当前值，下游读数因此不变。
+    assert(simulation.signal({firstInputId, "out"}) == circuit::SignalValue::One);
+    assert(simulation.signal({secondInputId, "out"}) == circuit::SignalValue::One);
+    assert(simulation.settle().succeeded());
+    assert(simulation.signal({outputId, "in"}) == circuit::SignalValue::One);
+}
+
+// 结构变更新增的端口按初始值建立：Clock 的 out 是 0，其余输出是 X。
+void initializes_ports_that_appear_after_a_structure_change() {
+    circuit::Circuit circuit;
+    const auto inputId = circuit.addComponent(circuit::ComponentKind::Input);
+
+    circuit::Simulation simulation(circuit);
+    assert(simulation.setInput(inputId, circuit::SignalValue::One));
+
+    const auto clockId = circuit.addComponent(circuit::ComponentKind::Clock);
+    const auto notId = circuit.addComponent(circuit::ComponentKind::NotGate);
+    simulation.reconcile();
+
+    assert(simulation.signal({inputId, "out"}) == circuit::SignalValue::One);
+    assert(simulation.signal({clockId, "out"}) == circuit::SignalValue::Zero);
+    assert(simulation.signal({notId, "out"}) == circuit::SignalValue::Unknown);
+    assert(simulation.outputSignals().size() == 3);
+}
+
+// 删除时序元件本身：它保存的状态与它的时钟前值一起被丢弃，其余元件的状态不受影响。
+void drops_tracked_clock_values_of_removed_flip_flops() {
+    circuit::Circuit circuit;
+    const auto clockId = circuit.addComponent(circuit::ComponentKind::Clock);
+    const auto firstFlopId = circuit.addComponent(circuit::ComponentKind::DFlipFlop);
+    const auto secondFlopId = circuit.addComponent(circuit::ComponentKind::DFlipFlop);
+
+    assert(circuit.addConnection({clockId, "out"}, {firstFlopId, "clock"}).succeeded());
+    assert(circuit.addConnection({clockId, "out"}, {secondFlopId, "clock"}).succeeded());
+
+    circuit::Simulation simulation(circuit);
+    assert(simulation.tick().succeeded());
+    assert(simulation.trackedClockCount() == 2);
+
+    assert(circuit.removeComponent(firstFlopId));
+    simulation.reconcile();
+
+    // 已删除的 DFlipFlop 不在状态表里留任何残留，也不再占着时钟前值表。
+    assert(simulation.trackedClockCount() == 1);
+    assert(simulation.outputSignals().size() == 2);
+    assert(!simulation.signal({firstFlopId, "q"}).has_value());
+    // 另一个 DFlipFlop 仍然被跟踪，后续推进照常。
+    assert(simulation.tick().succeeded());
+    assert(simulation.trackedClockCount() == 1);
+    assert(simulation.signal({secondFlopId, "q"}).has_value());
+}
+
+// 保留下来的不只是端口值，还有触发器保存的位与它 clock 端口上的前值。
+void keeps_the_sampled_bit_and_its_previous_clock_across_a_structure_change() {
+    circuit::Circuit circuit;
+    const auto clockInputId = circuit.addComponent(circuit::ComponentKind::Input);
+    const auto dataInputId = circuit.addComponent(circuit::ComponentKind::Input);
+    const auto flipFlopId = circuit.addComponent(circuit::ComponentKind::DFlipFlop);
+
+    assert(circuit.addConnection({clockInputId, "out"}, {flipFlopId, "clock"}).succeeded());
+    assert(circuit.addConnection({dataInputId, "out"}, {flipFlopId, "d"}).succeeded());
+
+    circuit::Simulation simulation(circuit);
+    assert(simulation.setInput(dataInputId, circuit::SignalValue::One));
+    assert(simulation.setInput(clockInputId, circuit::SignalValue::Zero));
+    assert(simulation.tick().succeeded());
+    assert(simulation.signal({flipFlopId, "q"}) == circuit::SignalValue::Unknown);
+
+    // 0 → 1 的电平变化发生在两次 tick 之间：只有跨 tick 保留的前值才认得这次上升沿。
+    assert(simulation.setInput(clockInputId, circuit::SignalValue::One));
+    const auto unrelatedId = circuit.addComponent(circuit::ComponentKind::NotGate);
+    simulation.reconcile();
+
+    assert(simulation.tick().succeeded());
+    // 前值若被结构变更丢掉，本次会以「当前值 1」当作前值，判不出边沿，q 会停在 X。
+    assert(simulation.signal({flipFlopId, "q"}) == circuit::SignalValue::One);
+
+    // 再删掉一个无关元件，采样得到的位仍然是 1。
+    assert(circuit.removeComponent(unrelatedId));
+    simulation.reconcile();
+    assert(simulation.signal({flipFlopId, "q"}) == circuit::SignalValue::One);
+
+    // 下一次推进是下降沿：q 按住不动，保留的前值继续参与边沿判定。
+    assert(simulation.setInput(clockInputId, circuit::SignalValue::Zero));
+    assert(simulation.tick().succeeded());
+    assert(simulation.signal({flipFlopId, "q"}) == circuit::SignalValue::One);
+}
+
 int main() {
     initializes_the_clock_output_to_zero();
     flips_the_clock_once_per_tick();
@@ -610,6 +725,10 @@ int main() {
     keeps_q_under_settle();
     carries_output_receivers_in_the_signal_snapshot();
     rejects_a_tick_that_cannot_settle();
+    keeps_committed_input_values_across_a_structure_change();
+    initializes_ports_that_appear_after_a_structure_change();
+    drops_tracked_clock_values_of_removed_flip_flops();
+    keeps_the_sampled_bit_and_its_previous_clock_across_a_structure_change();
     evaluates_input_not_and_output();
     updates_the_output_when_the_input_changes();
     propagates_unknown_when_a_not_input_is_unconnected();

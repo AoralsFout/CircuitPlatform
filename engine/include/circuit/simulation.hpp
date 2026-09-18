@@ -2,6 +2,7 @@
 
 #include "circuit/circuit.hpp"
 
+#include <cstddef>
 #include <optional>
 #include <vector>
 
@@ -39,10 +40,26 @@ public:
     };
 
     /**
-     * 从一份 Circuit 创建独立的组合逻辑仿真。
-     * @param circuit 要仿真的电路；Simulation 会保存自己的电路副本。
+     * 在一份 Circuit 上建立仿真状态。
+     * @param circuit 要仿真的电路。Simulation 只持有引用而不复制结构，结构变更因此不需要重建
+     *   仿真；代价是这个 Circuit 必须比 Simulation 活得久。结构变了以后调用 `reconcile`。
      */
-    explicit Simulation(Circuit circuit);
+    explicit Simulation(const Circuit& circuit);
+
+    /** 禁止绑定临时 Circuit：状态表会跨结构变更持续引用它，绑定一个临时值必然悬空。 */
+    explicit Simulation(Circuit&& circuit) = delete;
+
+    /**
+     * 结构变更后按元件身份重新推导仿真状态。
+     *
+     * 仍然存在的 PortId 保留当前值，消失的端口连同它的值一起丢弃，新出现的端口按初始值建立
+     * （Clock 的 `out` 为 `0`，其余输出为 `X`）；仍然存在的 DFlipFlop 保留它的 `q` 与它在
+     * `clock` 端口上记录的前值，已经消失的 DFlipFlop 不再留下任何残留。已推进的步数不归零——
+     * 结构变更不是重置。
+     *
+     * 调用方必须在修改 Circuit 之后、下一次求值之前调用它；不调用的话状态表会缺掉新元件。
+     */
+    void reconcile();
 
     /**
      * 设置 Input 元件的输出值。
@@ -87,6 +104,16 @@ public:
     [[nodiscard]] std::vector<PortSignal> signalSnapshot() const;
 
     /**
+     * 返回仍在跟踪时钟前值的 DFlipFlop 数量。
+     *
+     * 这条读数不对协议暴露，也不参与求值：它的用处是让测试能断言「删除元件之后不留残留」。
+     * 表中若有已删除元件的条目，那是一条永远不可达、也永远不会释放的残留——元件身份单调递增、
+     * 永不重用，所以残留既不会误触发边沿，也不会被后续任何一次推进清掉。
+     * @return `previousClockValues_` 当前的条目数。
+     */
+    [[nodiscard]] std::size_t trackedClockCount() const noexcept;
+
+    /**
      * 读取指定端口当前的信号值。
      * @param portId 要读取的端口身份。
      * @return 端口存在时返回信号值；不存在时返回空值。未连接输入返回 Unknown。
@@ -97,13 +124,15 @@ private:
     bool setOutputSignal(const PortId& portId, SignalValue value);
     [[nodiscard]] SignalValue outputSignal(const PortId& portId) const;
 
-    Circuit circuit_;
+    /** 被仿真的电路；Simulation 不拥有它，因此不能复制、不能绑定临时值。 */
+    const Circuit& circuit_;
     std::vector<PortSignal> signals_;
     std::uint64_t step_{0};
     /**
      * 每个 DFlipFlop 在 clock 端口上最近一次观测到的值，即边沿判定的前值。
      * 快照跨 tick 保留，只在上一 tick 结束时更新；驱动 clock 端口的可能是 Input 元件，
      * 它的电平变化发生在两次 tick 之间，重新读取当前值会漏掉这类边沿。
+     * 结构变更后由 `reconcile` 裁剪掉已删除 DFlipFlop 的条目，其余原样保留。
      */
     std::vector<PortSignal> previousClockValues_;
 };

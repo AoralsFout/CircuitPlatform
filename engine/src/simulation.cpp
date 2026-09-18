@@ -127,8 +127,8 @@ SignalValue initialOutputValue(ComponentKind kind) {
     return kind == ComponentKind::Clock ? SignalValue::Zero : SignalValue::Unknown;
 }
 
-// 建立仿真快照，并把每个输出端初始化为该元件类型的初值。
-Simulation::Simulation(Circuit circuit) : circuit_(std::move(circuit)) {
+// 建立仿真状态，并把每个输出端初始化为该元件类型的初值。
+Simulation::Simulation(const Circuit& circuit) : circuit_(circuit) {
     for (const auto& component : circuit_.components_) {
         for (const auto& port : component.ports) {
             if (port.direction == PortDirection::Output) {
@@ -136,6 +136,45 @@ Simulation::Simulation(Circuit circuit) : circuit_(std::move(circuit)) {
             }
         }
     }
+}
+
+// 结构变更后按元件身份重新推导状态：PortId 没变的端口留着当前值，消失的丢掉，新出现的按初值建立。
+// 按身份保留之所以安全，是因为元件身份单调递增、永不重用——同一个 id 不会换一个元件回来。
+void Simulation::reconcile() {
+    std::vector<PortSignal> reconciled;
+    reconciled.reserve(signals_.size());
+
+    for (const auto& component : circuit_.components_) {
+        for (const auto& port : component.ports) {
+            if (port.direction != PortDirection::Output) {
+                continue;
+            }
+
+            const PortId portId{component.id, port.name};
+            const auto kept = std::find_if(
+                signals_.begin(), signals_.end(),
+                [&portId](const PortSignal& signal) { return samePort(signal.port, portId); });
+            reconciled.push_back(kept == signals_.end()
+                                     ? PortSignal{portId, initialOutputValue(component.kind)}
+                                     : *kept);
+        }
+    }
+
+    signals_ = std::move(reconciled);
+
+    // 已删除的 DFlipFlop 不能把它的时钟前值留在表里。残留既不可达也不会自行释放，
+    // 因此这里主动裁剪，让这张表的规模始终与当前电路里实际存在的 DFlipFlop 一致。
+    previousClockValues_.erase(
+        std::remove_if(
+            previousClockValues_.begin(), previousClockValues_.end(),
+            [this](const PortSignal& previous) {
+                const auto* component = findComponent(circuit_.components_, previous.port.component);
+                if (component == nullptr || component->kind != ComponentKind::DFlipFlop) {
+                    return true;
+                }
+                return findPort(circuit_.components_, previous.port) == nullptr;
+            }),
+        previousClockValues_.end());
 }
 
 // Input 是仿真外部的驱动源，因此只能通过元件身份修改它的输出值。
@@ -275,6 +314,10 @@ SimulationResult Simulation::tick() {
 
 std::uint64_t Simulation::step() const noexcept {
     return step_;
+}
+
+std::size_t Simulation::trackedClockCount() const noexcept {
+    return previousClockValues_.size();
 }
 
 const std::vector<Simulation::PortSignal>& Simulation::outputSignals() const noexcept {

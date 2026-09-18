@@ -268,5 +268,146 @@ int main() {
     assert(dispatch(R"({"type":"tick","requestId":"tick-loop"})", loopCircuit, loopSimulation)
                .find("\"code\":\"combinational_loop\"") != std::string::npos);
 
+    // 结构变更按元件身份保留运行时状态。下面两组断言专门区分「保留」与「重建」：
+    // 读数不再来自「端口被删了」这个结构事实，而是来自仍然存在的元件上的当前值。
+    circuit::Circuit keepCircuit;
+    const auto keepFirstInput = keepCircuit.addComponent(circuit::ComponentKind::Input);
+    const auto keepSecondInput = keepCircuit.addComponent(circuit::ComponentKind::Input);
+    const auto keepAnd = keepCircuit.addComponent(circuit::ComponentKind::AndGate);
+    const auto keepOutput = keepCircuit.addComponent(circuit::ComponentKind::Output);
+    const auto keepUnrelatedOutput = keepCircuit.addComponent(circuit::ComponentKind::Output);
+    assert(keepCircuit.addConnection({keepFirstInput, "out"}, {keepAnd, "in1"}).succeeded());
+    assert(keepCircuit.addConnection({keepSecondInput, "out"}, {keepAnd, "in2"}).succeeded());
+    assert(keepCircuit.addConnection({keepAnd, "out"}, {keepOutput, "in"}).succeeded());
+    std::optional<circuit::Simulation> keepSimulation;
+
+    assert(dispatch(
+               R"({"type":"set_input","requestId":"keep-a","componentId":1,"value":1})",
+               keepCircuit, keepSimulation)
+               .find("\"type\":\"input_set\"") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"set_input","requestId":"keep-b","componentId":2,"value":1})",
+               keepCircuit, keepSimulation)
+               .find("\"type\":\"input_set\"") != std::string::npos);
+    assert(dispatch(R"({"type":"settle","requestId":"keep-settle"})", keepCircuit, keepSimulation)
+               .find("\"type\":\"settled\"") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"get_signal","requestId":"keep-read-before","componentId":4,"port":"in"})",
+               keepCircuit, keepSimulation)
+               .find("\"value\":1") != std::string::npos);
+
+    // 删掉一个与读数路径无关的 Output：它不参与求值，也不是任何状态的载体。
+    assert(dispatch(
+               R"({"type":"remove_component","requestId":"keep-remove","componentId":5})",
+               keepCircuit, keepSimulation)
+               .find("\"type\":\"component_removed\"") != std::string::npos);
+
+    // 两个 Input 都没有被删，它们的已提交值必须原样保留：旧实现会在这里把状态整体重建，
+    // 两个读数都会变成 X。这两条断言才是「不出现删掉一个无关元件导致全部时序状态丢失」的直接测试形态。
+    assert(dispatch(
+               R"({"type":"get_signal","requestId":"keep-read-a","componentId":1,"port":"out"})",
+               keepCircuit, keepSimulation)
+               .find("\"value\":1") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"get_signal","requestId":"keep-read-b","componentId":2,"port":"out"})",
+               keepCircuit, keepSimulation)
+               .find("\"value\":1") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"get_signal","requestId":"keep-read-after","componentId":4,"port":"in"})",
+               keepCircuit, keepSimulation)
+               .find("\"value\":1") != std::string::npos);
+
+    // 添加元件同样按身份保留：新增元件的输出按初始值建立，不碰既有 Input 的当前值。
+    assert(dispatch(
+               R"({"type":"add_component","requestId":"keep-add","kind":"not"})",
+               keepCircuit, keepSimulation)
+               .find("\"componentId\":6") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"get_signal","requestId":"keep-read-a-after-add","componentId":1,"port":"out"})",
+               keepCircuit, keepSimulation)
+               .find("\"value\":1") != std::string::npos);
+
+    // 时序元件保存的位与它 clock 端口上的前值同样按身份保留。
+    circuit::Circuit holdCircuit;
+    const auto holdClock = holdCircuit.addComponent(circuit::ComponentKind::Input);
+    const auto holdData = holdCircuit.addComponent(circuit::ComponentKind::Input);
+    const auto holdFlop = holdCircuit.addComponent(circuit::ComponentKind::DFlipFlop);
+    const auto holdUnrelated = holdCircuit.addComponent(circuit::ComponentKind::Output);
+    assert(holdCircuit.addConnection({holdClock, "out"}, {holdFlop, "clock"}).succeeded());
+    assert(holdCircuit.addConnection({holdData, "out"}, {holdFlop, "d"}).succeeded());
+    std::optional<circuit::Simulation> holdSimulation;
+
+    assert(dispatch(
+               R"({"type":"set_input","requestId":"hold-data","componentId":2,"value":1})",
+               holdCircuit, holdSimulation)
+               .find("\"type\":\"input_set\"") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"set_input","requestId":"hold-clock-low","componentId":1,"value":0})",
+               holdCircuit, holdSimulation)
+               .find("\"type\":\"input_set\"") != std::string::npos);
+    assert(dispatch(R"({"type":"tick","requestId":"hold-tick-idle"})", holdCircuit, holdSimulation)
+               .find("\"type\":\"ticked\"") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"get_signal","requestId":"hold-q-before","componentId":3,"port":"q"})",
+               holdCircuit, holdSimulation)
+               .find("\"value\":\"X\"") != std::string::npos);
+
+    // 时钟电平在两次 tick 之间抬起来。这一次 0 → 1 只有靠跨 tick 保留的时钟前值才认得出来，
+    // 因此下面的断言同时守住「q 被保留」与「clock 端口的前值被保留」。
+    assert(dispatch(
+               R"({"type":"set_input","requestId":"hold-clock-high","componentId":1,"value":1})",
+               holdCircuit, holdSimulation)
+               .find("\"type\":\"input_set\"") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"remove_component","requestId":"hold-remove","componentId":4})",
+               holdCircuit, holdSimulation)
+               .find("\"type\":\"component_removed\"") != std::string::npos);
+    assert(dispatch(R"({"type":"tick","requestId":"hold-tick-rising"})", holdCircuit, holdSimulation)
+               .find("\"type\":\"ticked\"") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"get_signal","requestId":"hold-q-after","componentId":3,"port":"q"})",
+               holdCircuit, holdSimulation)
+               .find("\"value\":1") != std::string::npos);
+
+    // 再添加一个元件：已积累的时序状态同样不受影响。
+    assert(dispatch(
+               R"({"type":"add_component","requestId":"hold-add","kind":"and"})",
+               holdCircuit, holdSimulation)
+               .find("\"componentId\":5") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"get_signal","requestId":"hold-q-after-add","componentId":3,"port":"q"})",
+               holdCircuit, holdSimulation)
+               .find("\"value\":1") != std::string::npos);
+
+    // 下一次推进是下降沿：q 按住不动，保留下来的前值继续参与边沿判定。
+    assert(dispatch(
+               R"({"type":"set_input","requestId":"hold-clock-low-again","componentId":1,"value":0})",
+               holdCircuit, holdSimulation)
+               .find("\"type\":\"input_set\"") != std::string::npos);
+    assert(dispatch(R"({"type":"tick","requestId":"hold-tick-falling"})", holdCircuit, holdSimulation)
+               .find("\"type\":\"ticked\"") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"get_signal","requestId":"hold-q-falling","componentId":3,"port":"q"})",
+               holdCircuit, holdSimulation)
+               .find("\"value\":1") != std::string::npos);
+
+    // 删除时序元件本身：它保存的状态被丢弃，其余元件的状态不受影响。
+    assert(dispatch(
+               R"({"type":"remove_component","requestId":"hold-remove-flop","componentId":3})",
+               holdCircuit, holdSimulation)
+               .find("\"type\":\"component_removed\"") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"get_signal","requestId":"hold-q-dropped","componentId":3,"port":"q"})",
+               holdCircuit, holdSimulation)
+               .find("\"code\":\"port_not_found\"") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"get_signal","requestId":"hold-clock-value","componentId":1,"port":"out"})",
+               holdCircuit, holdSimulation)
+               .find("\"value\":0") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"get_signal","requestId":"hold-data-value","componentId":2,"port":"out"})",
+               holdCircuit, holdSimulation)
+               .find("\"value\":1") != std::string::npos);
+
     return 0;
 }

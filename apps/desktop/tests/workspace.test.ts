@@ -598,6 +598,60 @@ test("pauses continuous running when the circuit structure changes", async () =>
   assert.equal(rebound.canResume, true);
 });
 
+test("keeps the accumulated readings when the circuit structure changes", async () => {
+  const engine = new FakeEngine();
+  const scheduler = new FakeScheduler();
+  const workspace = createWorkspace(engine, { scheduler });
+  await workspace.checkEngine();
+  await workspace.loadCircuit(clockDocument());
+  await workspace.start();
+  scheduler.fire();
+  await drain();
+  assert.equal(workspace.snapshot().signals["clock:out"], 1);
+
+  // 删掉一个与 Clock 无关的元件：拓扑变了，但 Clock 与那条 Wire 都还在。
+  const rebound = workspace.rebindSimulation({
+    components: { clock: 1 },
+    connections: { wire: 1 },
+    componentKinds: { clock: "clock" },
+  });
+
+  assert.equal(rebound.simulationState, "paused");
+  assert.equal(rebound.canResume, true);
+  // 旧实现把 signals 整体清空、outputValue 置 X，这两条会分别读到 undefined 与 "X"。
+  assert.equal(rebound.signals["clock:out"], 1);
+  assert.equal(rebound.outputValue, 1);
+  // 消失的元件连同它的读数一起被丢弃，不留下已经无从展示的键。
+  assert.equal(rebound.signals["monitor:in"], undefined);
+});
+
+test("distinguishes a real topology change from a geometry-only update", async () => {
+  const engine = new FakeEngine();
+  const scheduler = new FakeScheduler();
+  const workspace = createWorkspace(engine, { scheduler });
+  await workspace.checkEngine();
+  const loaded = await workspace.loadCircuit(clockDocument());
+  assert.ok(loaded.bindings);
+  await workspace.start();
+  scheduler.fire();
+  await drain();
+
+  // 只移动元件或改 Route 的编辑不会分配新的引擎身份，publishBindings 也不会为它们触发。
+  // 即使收到一份内容相同的绑定，拓扑没变就不该停掉运行，也不该动到已积累的读数。
+  const unchanged = workspace.rebindSimulation({ ...loaded.bindings });
+  assert.equal(unchanged.simulationState, "running");
+  assert.equal(scheduler.cancelled, 0);
+  assert.equal(unchanged.signals["clock:out"], 1);
+
+  // 连接不参与运行时身份，却是实打实的拓扑：把它从绑定里去掉必须停下来。
+  const rebound = workspace.rebindSimulation({
+    components: { clock: 1, monitor: 2 },
+    componentKinds: { clock: "clock", monitor: "output" },
+  });
+  assert.equal(rebound.simulationState, "paused");
+  assert.equal(scheduler.cancelled, 1);
+});
+
 test("notifies subscribers about each advance the run loop makes on its own", async () => {
   const engine = new FakeEngine();
   const scheduler = new FakeScheduler();
