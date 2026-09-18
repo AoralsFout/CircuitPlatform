@@ -422,7 +422,9 @@ test("sets a single bit of a multi-bit Input and submits the whole value", async
   assert.equal(state.outputValue, "0100");
   // 停止态下切换立即求值，并且是一次推进。
   assert.equal(state.simulationStep, 1);
-  assert.deepEqual(state.waveform, [{ step: 1, a: "0100", b: "1", output: "0100" }]);
+  // 波形点按 `${editorComponentId}:${portId}` 索引，因此记的是这一拍端口自己的读数，
+  // 而不是「输入 A / 输入 B / 输出」三个写死的字段。
+  assert.deepEqual(state.waveform, [{ step: 1, signals: { "input:out": "0100", "result:in": "0100" } }]);
 });
 
 test("sets one bit to X without disturbing the other bits of the same value", async () => {
@@ -476,7 +478,11 @@ test("commits a whole multi-bit value while running without settling", async () 
 
 /**
  * 波形记录的是这一拍**全部**可读信号，而不是写死的三行；多位值原样保留逐位文本，
- * 因此每一位都读得出来（`1111` 而不是整条未知或单个数字）。
+ * 因此每一位都读得出来（长度等于端口位宽的 `0000`，而不是整条未知或单个数字）。
+ *
+ * 这里读到的是一串 0：位宽大于 1 的 Input 默认取值就是全 0，而不是把兼容投影的
+ * `inputA` 整值重复到位宽那么多位——后者是切片 5 之前的旧语义。断言的是「记了哪些
+ * 端口、值是不是完整的逐位文本」，与默认值取哪一串无关。
  */
 test("records every Input and every Output, with a widened signal kept as binary text", async () => {
   const engine = new FakeEngine();
@@ -502,7 +508,7 @@ test("records every Input and every Output, with a widened signal kept as binary
 
   assert.deepEqual(point, {
     step: 1,
-    signals: { "operand:out": "1111", "direct:in": "1111", "second:in": "1111" },
+    signals: { "operand:out": "0000", "direct:in": "0000", "second:in": "0000" },
   });
 });
 
