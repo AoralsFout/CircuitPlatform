@@ -342,6 +342,9 @@ SimulationResult Simulation::tick() {
     //    判定只读端口的前后值，与元件类型无关：Clock、Input 或组合逻辑的输出都一样。
     for (auto& previous : previousClockValues_) {
         const auto current = signal(previous.port).value_or(SignalValue::unknown());
+        // 这是「整值从全 0 变成全 1」的比较，在 1 位端口上是「该位 0 → 1」的特例：
+        // 每一位独立判定（哪一位出现上升沿就采哪一位的 d）要等位宽进来、端口能声明位宽之后
+        // 才有意义，那时这里的整值比较会因 `"0"` 与 `"00"` 这类长度差异静默失效。
         if (previous.value == SignalValue::zero() && current == SignalValue::one()) {
             // 采样的是第 ③ 步求值稳定之后的 d：时钟可以经组合逻辑到达 clock 端口，
             // 数据同样可能经组合逻辑到达 d，两者都必须在采样那一刻处在稳定值上。
@@ -387,6 +390,8 @@ std::vector<Simulation::PortSignal> Simulation::signalSnapshot() const {
 }
 
 // 输出端直接读取保存值；输入端沿 Connection 读取来源输出值。
+// 下面两处「读不到来源」返回的都是按 1 位构造的全 X：所有端口的位宽目前都是 1，
+// 位宽成为 Port 的属性后，这里与各处 `value_or` 兜底都要换成按端口声明的位宽构造。
 std::optional<SignalValue> Simulation::signal(PortId portId) const {
     const auto* port = findPort(circuit_.components_, portId);
     if (port == nullptr) {
