@@ -637,7 +637,6 @@ test("starts, pauses, and resumes continuous running without losing accumulated 
   const workspace = createWorkspace(engine, { scheduler });
   await workspace.checkEngine();
   const loaded = await workspace.loadCircuit(clockDocument());
-  const waveformPoints = loaded.snapshot.waveform.length;
   // 加载时的稳定求值不计步，连续运行从第 0 步往上走。
   const baseStep = loaded.snapshot.simulationStep;
   assert.equal(baseStep, 0);
@@ -656,22 +655,33 @@ test("starts, pauses, and resumes continuous running without losing accumulated 
   assert.deepEqual(engine.calls.map((call) => call.type), ["tick"]);
   assert.equal(workspace.snapshot().simulationStep, baseStep + 1);
   assert.equal(workspace.snapshot().signals["clock:out"], "1");
+  // 连续运行的每一拍都追加一个波形点：自动 tick 与用户单步走同一条「计数 + 记录」路径。
+  assert.deepEqual(
+    workspace.snapshot().waveform.map((point) => point.step),
+    [baseStep + 1],
+  );
+  assert.equal(workspace.snapshot().waveform.at(-1)?.signals["clock:out"], "1");
 
   scheduler.fire();
   await drain();
   assert.equal(workspace.snapshot().simulationStep, baseStep + 2);
   assert.equal(workspace.snapshot().signals["clock:out"], "0");
+  assert.deepEqual(
+    workspace.snapshot().waveform.map((point) => point.step),
+    [baseStep + 1, baseStep + 2],
+  );
 
   const paused = await workspace.pause();
   assert.equal(paused.simulationState, "paused");
   assert.equal(paused.canResume, true);
   assert.equal(paused.canPause, false);
   assert.equal(paused.canStep, true);
-  // 暂停取消了已经排定的下一次推进：暂停期间不再前进。
+  // 暂停取消了已经排定的下一次推进：暂停期间不再前进，波形历史也停在暂停前的那一拍。
   assert.equal(scheduler.fire(), false);
   await drain();
   assert.equal(engine.calls.length, 2);
   assert.equal(workspace.snapshot().simulationStep, baseStep + 2);
+  assert.equal(workspace.snapshot().waveform.length, 2);
   assert.equal(workspace.snapshot().message, `已暂停在第 ${baseStep + 2} 步。`);
 
   const resumed = await workspace.resume();
@@ -681,9 +691,58 @@ test("starts, pauses, and resumes continuous running without losing accumulated 
   // 继续从暂停处接着跑：步数与时钟相位都接上，不从头开始。
   assert.equal(workspace.snapshot().simulationStep, baseStep + 3);
   assert.equal(workspace.snapshot().signals["clock:out"], "1");
+  // 继续后接着记：波形点接在暂停前的历史之后，步数不重来。
+  assert.deepEqual(
+    workspace.snapshot().waveform.map((point) => point.step),
+    [baseStep + 1, baseStep + 2, baseStep + 3],
+  );
+  assert.equal(workspace.snapshot().waveform.at(-1)?.signals["clock:out"], "1");
+});
 
-  // 自动推进不追加波形记录：波形历史只记录用户发起的推进。
-  assert.equal(workspace.snapshot().waveform.length, waveformPoints);
+test("caps the waveform history at 1,000 points and drops the oldest ones", async () => {
+  const engine = new FakeEngine();
+  const scheduler = new FakeScheduler();
+  const workspace = createWorkspace(engine, { scheduler });
+  await workspace.checkEngine();
+  await workspace.loadCircuit(clockDocument());
+
+  // 先用用户单步填到距上限 3 个点：单步与自动 tick 走同一条「计数 + 记录」路径，
+  // 让连续运行跨过上限的那几拍真的执行裁剪，不必为此跑一千多次宏任务。
+  for (let i = 0; i < 997; i += 1) {
+    await workspace.step();
+  }
+  assert.equal(workspace.snapshot().waveform.length, 997);
+
+  await workspace.start();
+  for (let i = 0; i < 4; i += 1) {
+    scheduler.fire();
+    await drain();
+  }
+  await workspace.pause();
+
+  const waveform = workspace.snapshot().waveform;
+  // 1,001 个点被裁成 1,000 个，长时间运行的历史总量不再增长。
+  assert.equal(waveform.length, 1000);
+  // 丢弃的是最旧的点：留下的步区间从第 2 步开始，最新的一拍仍然完整。
+  assert.equal(waveform[0]?.step, 2);
+  assert.equal(waveform.at(-1)?.step, 1001);
+  assert.equal(waveform.at(-1)?.signals["clock:out"], "1");
+});
+
+test("keeps the waveform history unchanged when readings are refreshed", async () => {
+  const engine = new FakeEngine();
+  const workspace = createWorkspace(engine);
+  await workspace.checkEngine();
+  await workspace.loadCircuit(clockDocument());
+  await workspace.step();
+  assert.equal(workspace.snapshot().waveform.length, 1);
+
+  const state = await workspace.refreshReadings();
+
+  // 结构变更后的读数刷新不是推进：步数不动，波形历史也不追加——它只是把读数求值到稳定。
+  assert.equal(state.simulationStep, 1);
+  assert.equal(state.waveform.length, 1);
+  assert.equal(state.waveform[0]?.step, 1);
 });
 
 test("schedules the next advance only after the previous response arrives", async () => {
@@ -1001,6 +1060,14 @@ test("resets the simulation back to its initial state", async () => {
   assert.equal(state.message, "已重置到初始状态。");
   assert.equal(state.canReset, true);
   assert.equal(state.canStart, true);
+
+  // 重置清空了波形历史：下一次推进从第 0 步重新记录，波形里的步数与当前仿真的步数空间一致。
+  const afterReset = await workspace.step();
+  assert.deepEqual(afterReset.waveform, [{
+    step: 1,
+    signals: { "clock:out": "1", "monitor:in": "1" },
+  }]);
+  assert.equal(afterReset.simulationStep, 1);
 });
 
 test("resets from the running state and cancels the scheduled advance", async () => {
