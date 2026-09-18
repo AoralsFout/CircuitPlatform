@@ -10,6 +10,10 @@ Phase 4.5 让 Port 携带位宽后，一条 N 位输出接到 M 位输入时必�
 
 另外，前端 `ComponentDefinitionRegistry` 和引擎 `portsFor` 现在各写一份端口定义且互不校验，这个分歧已经导致前端给 D Flip-Flop 声明了 `clk` 而引擎期望 `clock`，只因为该元件被标为不可用而没暴露。位宽进来后，如果仍保留两份互不校验的副本，分歧面会翻倍。
 
+## 后续变更
+
+2026-09-18 在 Phase 4 切片 1 落地了一处前置修正：启用 D Flip-Flop 前，展示定义一侧的时钟端口 id 从 `clk` 改为 `clock`，与引擎的 `DFlipFlop` 端口和 `CONTEXT.md` 的领域语言统一，`CLK` 保留为显示标签。这消除了「背景」一节举出的那个具体分歧，但**不改变本决策**：前端 `ComponentDefinitionRegistry` 与引擎 `portsFor` 仍是两份互不校验的端口定义，位宽进来后必须按本决策收敛为单一权威来源。
+
 ## 决策
 
 - 每个 Port 的位宽在元件定义里显式声明，不由连接推导；
