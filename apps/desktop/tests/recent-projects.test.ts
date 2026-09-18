@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  forgetRecentProject,
   projectDisplayName,
   readRecentProjects,
   rememberRecentProject,
@@ -149,4 +150,57 @@ test("derives the display name from the last path segment in both spellings", ()
   assert.equal(projectDisplayName("E:\\demo\\a.circuit.json"), "a.circuit.json");
   assert.equal(projectDisplayName("/home/demo/a.circuit.json"), "a.circuit.json");
   assert.equal(projectDisplayName("a.circuit.json"), "a.circuit.json");
+});
+
+test("forget removes an entry by its folded identity and persists the result", () => {
+  const storage = memoryStorage();
+  const recent = [
+    entry("E:\\gone.circuit.json", "gone.circuit.json", 20),
+    entry("E:\\demo.circuit.json", "demo.circuit.json", 10),
+  ];
+  storage.setItem("circuit-platform.recent-projects", JSON.stringify(recent));
+
+  // 传入的路径与记录的写法不同（大小写、分隔符）：按规范化身份识别为同一条。
+  const next = forgetRecentProject(storage, recent, "e:/GONE.CIRCUIT.JSON", { platform: "windows" });
+
+  assert.deepEqual(next, [entry("E:\\demo.circuit.json", "demo.circuit.json", 10)]);
+  assert.deepEqual(readRecentProjects(storage), next);
+});
+
+test("forget keeps the order of the remaining entries", () => {
+  const recent = [
+    entry("E:\\a.circuit.json", "a.circuit.json", 30),
+    entry("E:\\b.circuit.json", "b.circuit.json", 20),
+    entry("E:\\c.circuit.json", "c.circuit.json", 10),
+  ];
+
+  const next = forgetRecentProject(null, recent, "E:\\b.circuit.json", { platform: "windows" });
+
+  assert.deepEqual(next.map((item) => item.path), ["E:\\a.circuit.json", "E:\\c.circuit.json"]);
+});
+
+test("forget changes nothing when no entry matches and writes no storage", () => {
+  const storage = memoryStorage();
+  const recent = [entry("E:\\demo.circuit.json", "demo.circuit.json", 10)];
+
+  assert.deepEqual(forgetRecentProject(storage, recent, "E:\\other.circuit.json", { platform: "windows" }), recent);
+  assert.deepEqual(forgetRecentProject(storage, recent, "", { platform: "windows" }), recent);
+  assert.equal(storage.data.size, 0, "没有条目被移除时不写存储");
+});
+
+test("forget keeps the in-memory result when the storage rejects writes", () => {
+  const failingStorage: KeyValueStorage = {
+    getItem: () => null,
+    setItem: () => {
+      throw new Error("quota exceeded");
+    },
+  };
+  const recent = [
+    entry("E:\\gone.circuit.json", "gone.circuit.json", 20),
+    entry("E:\\demo.circuit.json", "demo.circuit.json", 10),
+  ];
+
+  const next = forgetRecentProject(failingStorage, recent, "E:\\gone.circuit.json", { platform: "windows" });
+
+  assert.deepEqual(next.map((item) => item.path), ["E:\\demo.circuit.json"]);
 });

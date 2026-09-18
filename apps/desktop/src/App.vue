@@ -59,6 +59,8 @@ const {
   requestNew,
   confirmPendingFileAction,
   cancelPendingFileAction,
+  recentProjects,
+  requestOpenRecent,
 } = useWorkspace();
 const {
   selectedConnection,
@@ -225,10 +227,12 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
       :save-state="saveState"
       :save-error="saveError"
       :can-save="canSave"
+      :recent-projects="recentProjects"
       @cycle-theme="cycleTheme"
       @check-engine="checkEngine"
       @new-document="requestNew"
       @open-document="requestOpen"
+      @open-recent-project="requestOpenRecent"
       @save="saveProject"
       @save-as="saveProjectAs"
     />
