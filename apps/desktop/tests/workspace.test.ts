@@ -660,6 +660,58 @@ test("queues a structural commit behind an in-flight advance while running", asy
   assert.equal(workspace.snapshot().signals["clock:out"], "1");
 });
 
+/** 改位宽与其它结构提交走同一条队列，因此不会插进一次正在飞的推进中间。 */
+test("queues a port width change behind an in-flight advance while running", async () => {
+  const engine = new FakeEngine();
+  const scheduler = new FakeScheduler();
+  const queue = createEngineCallQueue();
+  const workspace = createWorkspace(engine, { scheduler, queue });
+  await workspace.checkEngine();
+  const document = withBuiltInPorts(clockDocument());
+  const loaded = await workspace.loadCircuit(document);
+  assert.ok(loaded.bindings);
+  const session = createEditorSession(
+    { document, bindings: bindingsFrom(loaded.bindings) },
+    createProtocolEnginePort(engine, queue),
+    {
+      onBindingsChanged(bindings) {
+        workspace.rebindSimulation(bindings);
+      },
+    },
+  );
+
+  await workspace.start();
+  let release: () => void = () => {};
+  engine.holdTick = () => new Promise<void>((resolve) => { release = resolve; });
+  engine.calls.length = 0;
+
+  scheduler.fire();
+  await drain();
+  const widening = session.dispatch({
+    type: "set-port-width",
+    componentId: "clock",
+    ports: [{ name: "out", direction: "output", width: 4 }],
+  });
+  await drain();
+
+  // 推进还在飞，改宽因此排在它之后。
+  assert.deepEqual(engine.calls.map((call) => call.type), ["tick"]);
+
+  release();
+  await drain();
+  const result = await widening;
+
+  assert.equal(result.ok, true);
+  const types = engine.calls.map((call) => call.type);
+  assert.equal(types[0], "tick", "那一拍先完成");
+  assert.equal(types[1], "setPortWidth", "改宽紧随其后，不与之交错");
+  // 端口清单换成了新的那一份，元件身份不变。
+  assert.deepEqual(
+    result.snapshot.document.components.find((component) => component.id === "clock")?.ports,
+    [{ name: "out", direction: "output", width: 4 }],
+  );
+});
+
 test("pauses continuous running when the circuit structure changes", async () => {
   const engine = new FakeEngine();
   const scheduler = new FakeScheduler();

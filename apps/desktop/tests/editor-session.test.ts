@@ -9,7 +9,7 @@ import {
   type EngineResult,
 } from "../src/editor/index.ts";
 import { resolveCanvasKeyboardAction, resolveEditorShortcut } from "../src/editor/keyboard.ts";
-import { BUILT_IN_PORTS, portsForAddComponent } from "./fake-ports.ts";
+import { BUILT_IN_PORTS, builtInPortsById, portsForAddComponent } from "./fake-ports.ts";
 
 class FakeEngine implements CircuitEnginePort {
   nextComponentId = 100;
@@ -451,6 +451,60 @@ test("clear requires confirmation and does not reopen confirmation for an empty 
   assert.equal(empty.ok, false);
   assert.equal(empty.error.code, "nothing_to_clear");
   assert.equal(empty.snapshot.confirmation, null);
+});
+
+/** 会话的端口清单来自 `component_added`，因此这里的绑定要先带上它。 */
+function createSessionWithPorts(engine: FakeEngine) {
+  return createEditorSession({
+    document: createAndDemoDocument(),
+    bindings: {
+      components: { "input-a": 1, "input-b": 2, "and-gate": 3, output: 4 },
+      connections: { "wire-a": 10, "wire-b": 11, "wire-output": 12 },
+      ports: builtInPortsById({ "input-a": "input", "input-b": "input", "and-gate": "and", output: "output" }),
+    },
+  }, engine);
+}
+
+const WIDE_INPUT_PORTS = [{ name: "out", direction: "output" as const, width: 4 }];
+
+test("a port width change is one undoable structure frame", async () => {
+  const engine = new FakeEngine();
+  const session = createSessionWithPorts(engine);
+  const portsOf = (id: string) => session.snapshot().document.components.find((component) => component.id === id)?.ports;
+
+  assert.deepEqual(portsOf("input-a"), BUILT_IN_PORTS.input);
+
+  const widened = await session.dispatch({ type: "set-port-width", componentId: "input-a", ports: WIDE_INPUT_PORTS });
+
+  assert.equal(widened.ok, true);
+  assert.deepEqual(portsOf("input-a"), WIDE_INPUT_PORTS);
+  assert.deepEqual(engine.calls, ["setPortWidth:1"]);
+
+  const undone = await session.dispatch({ type: "undo" });
+  assert.equal(undone.ok, true);
+  assert.deepEqual(portsOf("input-a"), BUILT_IN_PORTS.input);
+  assert.deepEqual(engine.calls, ["setPortWidth:1", "setPortWidth:1"]);
+
+  const redone = await session.dispatch({ type: "redo" });
+  assert.equal(redone.ok, true);
+  assert.deepEqual(portsOf("input-a"), WIDE_INPUT_PORTS);
+});
+
+test("a rejected port width change keeps the original port list and creates no history", async () => {
+  const engine = new FakeEngine();
+  engine.failOn = "setPortWidth:1";
+  const session = createSessionWithPorts(engine);
+
+  const rejected = await session.dispatch({ type: "set-port-width", componentId: "input-a", ports: WIDE_INPUT_PORTS });
+
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.error.code, "setPortWidth:1_failed");
+  // 提交失败时保留原端口清单：模型从文档投影，而文档没有被改动。
+  assert.deepEqual(
+    rejected.snapshot.document.components.find((component) => component.id === "input-a")?.ports,
+    BUILT_IN_PORTS.input,
+  );
+  assert.equal(rejected.snapshot.canUndo, false);
 });
 
 test("undo and redo treat clear as one recoverable command with refreshed engine IDs", async () => {
