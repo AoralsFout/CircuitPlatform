@@ -28,24 +28,36 @@ import {
   type WorkspaceSnapshot,
 } from "../workspace/index.ts";
 import { createEngineCallQueue } from "../workspace/engineQueue.ts";
-import { parseProjectFile, serializeProjectFile } from "../project-file/index.ts";
+import {
+  parseProjectFile,
+  serializeProjectFile,
+  type ParsedProjectFile,
+} from "../project-file/index.ts";
 import {
   projectDisplayName,
   readRecentProjects,
   rememberRecentProject,
   type KeyValueStorage,
 } from "../project-file/recent-projects.ts";
+import {
+  defaultComponentDefinitionRegistry,
+  rebuildLoadedDocumentGeometry,
+} from "../canvas/index.ts";
 import type { ComponentKindName, PortSpec } from "@circuit-platform/protocol";
 
 /**
  * 项目文件保存的主进程桥接；与引擎 adapter 一样来自 `window.circuitPlatform`。
- * 序列化与校验留在渲染层，桥接只负责保存对话框与原子写文件。
+ * 序列化与校验留在渲染层，桥接只负责对话框与文件读写。
  */
 interface ProjectFileBridge {
   /** 保存对话框；用户取消时返回 `reason: "canceled"`，调用方按静默放弃处理。 */
   pickSavePath(options?: { defaultPath?: string }): Promise<{ ok: true; path: string } | { ok: false; reason: string }>;
   /** 原子写入项目文件；文件系统失败以 `reason` 带回可展示原因。 */
   writeProjectFile(filePath: string, content: string): Promise<{ ok: true } | { ok: false; reason: string }>;
+  /** 打开对话框；用户取消时返回 `reason: "canceled"`，调用方按静默放弃处理。 */
+  pickOpenPath(): Promise<{ ok: true; path: string } | { ok: false; reason: string }>;
+  /** 读取项目文件文本；文件不存在或读取失败以 `reason` 带回可展示原因。 */
+  readProjectFile(filePath: string): Promise<{ ok: true; content: string } | { ok: false; reason: string }>;
 }
 
 /** 顶栏保存状态的三个可见语义：已保存、有未保存改动、最近一次保存失败。 */
@@ -130,6 +142,34 @@ interface WorkspaceBinding {
    * @returns 保存成功返回 true；用户取消对话框或保存失败返回 false。
    */
   saveAs(): Promise<boolean>;
+  /** 最近一次打开或新建失败的可展示原因；没有失败时为 null，成功的打开/新建会清除它。 */
+  openError: DeepReadonly<Ref<string | null>>;
+  /**
+   * 待确认的文件操作（`"open"` / `"new"`）：文档置脏时先确认再执行。
+   * 确认对话框由界面层渲染；Esc 与取消按钮都走 `cancelPendingFileAction`。
+   */
+  pendingFileAction: DeepReadonly<Ref<"open" | "new" | null>>;
+  /**
+   * 请求打开项目文件：文档置脏时先挂起待确认动作，否则直接进入打开流程。
+   * 打开流程本身见 `openProjectFromPath`。
+   */
+  requestOpen(): Promise<void>;
+  /**
+   * 请求新建空文档：文档置脏时先挂起待确认动作，否则直接新建。
+   */
+  requestNew(): Promise<void>;
+  /** 确认当前待确认的文件动作（放弃未保存改动）并执行它。 */
+  confirmPendingFileAction(): Promise<void>;
+  /** 取消当前待确认的文件动作；文档保持原样。 */
+  cancelPendingFileAction(): void;
+  /**
+   * 从指定路径打开项目文件：读文件 → 渲染层校验 → 整体替换推送到引擎。
+   * 任何一步失败都给出可展示原因，当前编辑器状态原样保留；成功后切换文档身份、
+   * 重置脏标记基线并记录最近项目。
+   * @param path 项目文件的路径；存在性由主进程读取时检查。
+   * @returns 打开成功返回 true；任何一步失败返回 false。
+   */
+  openProjectFromPath(path: string): Promise<boolean>;
 }
 
 function toEditorBindings(bindings: SimulationBindings): EditorBindings {
@@ -213,6 +253,9 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   const projectPath = shallowRef<string | null>(null);
   const isDirty = shallowRef(false);
   const saveError = shallowRef<string | null>(null);
+  const openError = shallowRef<string | null>(null);
+  /** 待确认的文件动作；置脏文档的打开/新建必须先经过确认。 */
+  const pendingFileAction = shallowRef<"open" | "new" | null>(null);
   // 上一次落盘内容（序列化后的项目文件文本）；置脏就是拿当前内容与它比较。
   let savedFileSnapshot: string | null = null;
   const canSave = computed(() => editorState.value !== null);
@@ -297,20 +340,30 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     const snapshot = editor?.snapshot();
     const components = snapshot?.document.components ?? [];
     const present = new Set(components.map((component) => component.id));
+    return circuitDocumentFrom({
+      components,
+      connections: (snapshot?.document.connections ?? []).filter((connection) =>
+        present.has(connection.source.componentId) && present.has(connection.target.componentId)),
+    });
+  }
+
+  /**
+   * 把一份编辑器文档投影成工作区推送所需的结构子集。
+   * @param document 只含活动元件与可见连接的编辑器文档投影。
+   * @returns 可直接交给 `Workspace.loadCircuit` / `openCircuit` 的电路文档。
+   */
+  function circuitDocumentFrom(document: EditorDocument): CircuitDocument {
     return {
-      components: components.map((component) => ({
+      components: document.components.map((component) => ({
         id: component.id,
         kind: component.kind,
         ...(component.ports ? { ports: component.ports } : {}),
       })),
-      connections: (snapshot?.document.connections ?? [])
-        .filter((connection) =>
-          present.has(connection.source.componentId) && present.has(connection.target.componentId))
-        .map((connection) => ({
-          id: connection.id,
-          source: { componentId: connection.source.componentId, port: connection.source.port },
-          target: { componentId: connection.target.componentId, port: connection.target.port },
-        })),
+      connections: document.connections.map((connection) => ({
+        id: connection.id,
+        source: { componentId: connection.source.componentId, port: connection.source.port },
+        target: { componentId: connection.target.componentId, port: connection.target.port },
+      })),
     };
   }
 
@@ -405,15 +458,21 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     isDirty.value = false;
   }
 
+  /** 启动示例是否已经加载过：它只属于启动，新建空文档之后不得被引擎检查悄悄带回来。 */
+  let exampleLoaded = false;
+
   /** 把启动示例当作普通文档推送到引擎；示例不占用任何专用代码路径。 */
   async function loadExampleWhenReady(): Promise<void> {
-    if (state.value.engineState !== "ready" || state.value.hasCircuit) return;
+    if (exampleLoaded || state.value.engineState !== "ready" || state.value.hasCircuit) return;
     const document = createAndDemoDocument();
     const pending = workspace.loadCircuit(document);
     state.value = workspace.snapshot();
     const loaded = await pending;
     state.value = loaded.snapshot;
-    if (loaded.bindings) attachEditor(document, loaded.bindings);
+    if (loaded.bindings) {
+      attachEditor(document, loaded.bindings);
+      exampleLoaded = true;
+    }
   }
 
   async function checkEngine(): Promise<void> {
@@ -555,6 +614,138 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     return commitSave(projectPath.value);
   }
 
+  /**
+   * 从解析成功的项目文件数据完成打开：整体替换推送到引擎，成功后重建端点几何并接入
+   * 编辑器会话。任何一步失败都给出可展示原因，当前编辑器状态原样保留。
+   * @param path 项目文件的路径；打开成功后成为文档身份并记入最近项目。
+   * @param parsed 校验通过的项目文件数据。
+   * @returns 打开成功返回 true。
+   */
+  async function pushParsedProject(
+    path: string,
+    parsed: ParsedProjectFile,
+  ): Promise<boolean> {
+    // 引擎不在线时推送必然是空操作：先给出可展示的原因，而不是等推送悄悄返回。
+    if (state.value.engineState !== "ready") {
+      openError.value = "仿真引擎不可用，无法打开项目。";
+      return false;
+    }
+    const loaded = await workspace.openCircuit(circuitDocumentFrom(parsed.document), {
+      inputValues: parsed.inputValues,
+    });
+    if (loaded.bindings === null) {
+      openError.value = loaded.snapshot.operationError ?? "打开项目失败。";
+      return false;
+    }
+    // 解析出的端点 point 是占位零点（#35 契约）：端口清单此刻已由引擎回传，先用元件位置
+    // 与端口几何重建端点与 Route，再把文档交给会话；占位值不能带进后续编辑。
+    const document = rebuildLoadedDocumentGeometry(
+      {
+        components: parsed.document.components.map((component) => ({
+          ...component,
+          ...(loaded.ports[component.id] !== undefined ? { ports: loaded.ports[component.id] } : {}),
+        })),
+        connections: parsed.document.connections,
+      },
+      defaultComponentDefinitionRegistry,
+    );
+    state.value = loaded.snapshot;
+    attachEditor(document, loaded.bindings);
+    projectPath.value = path;
+    saveError.value = null;
+    openError.value = null;
+    recordRecentProject(path);
+    return true;
+  }
+
+  async function openProjectFromPath(path: string): Promise<boolean> {
+    if (!editor) return false;
+    const file = await adapter.readProjectFile(path);
+    if (!file.ok) {
+      openError.value = file.reason;
+      return false;
+    }
+    let raw: unknown;
+    try {
+      raw = JSON.parse(file.content);
+    } catch (error) {
+      openError.value = `项目文件不是合法的 JSON：${error instanceof Error ? error.message : "解析失败"}`;
+      return false;
+    }
+    const parsed = parseProjectFile(raw);
+    if (!parsed.ok) {
+      // 校验失败整体拒绝：只展示第一条原因，完整清单属于调试信息而非界面文案。
+      openError.value = `项目文件校验失败：${parsed.errors[0]?.message ?? "未知原因"}`;
+      return false;
+    }
+    return pushParsedProject(path, parsed.value);
+  }
+
+  async function performOpen(): Promise<void> {
+    if (!editor) return;
+    openError.value = null;
+    const dialog = await adapter.pickOpenPath();
+    if (!dialog.ok) {
+      // 取消不是失败：不打断用户，也不清掉上一次的错误提示。
+      if (dialog.reason !== "canceled") openError.value = dialog.reason;
+      return;
+    }
+    await openProjectFromPath(dialog.path);
+  }
+
+  /**
+   * 新建空文档：空文档走与打开同一条整体替换推送路径——成功后旧电路从引擎移除、
+   * 工作区回到无电路状态、时间线归零；脏基线由 attachEditor 重置为空文档本身。
+   */
+  async function performNew(): Promise<void> {
+    if (!editor) return;
+    openError.value = null;
+    if (state.value.engineState !== "ready") {
+      openError.value = "仿真引擎不可用，无法新建文档。";
+      return;
+    }
+    const loaded = await workspace.openCircuit({ components: [], connections: [] });
+    if (loaded.bindings === null) {
+      openError.value = loaded.snapshot.operationError ?? "新建文档失败。";
+      return;
+    }
+    state.value = loaded.snapshot;
+    attachEditor({ components: [], connections: [] }, loaded.bindings);
+    projectPath.value = null;
+    saveError.value = null;
+    openError.value = null;
+  }
+
+  /** 文件操作的入口：文档置脏时先确认，否则直接执行。 */
+  async function requestOpen(): Promise<void> {
+    if (pendingFileAction.value !== null) return;
+    if (isDirty.value) {
+      pendingFileAction.value = "open";
+      return;
+    }
+    await performOpen();
+  }
+
+  async function requestNew(): Promise<void> {
+    if (pendingFileAction.value !== null) return;
+    if (isDirty.value) {
+      pendingFileAction.value = "new";
+      return;
+    }
+    await performNew();
+  }
+
+  async function confirmPendingFileAction(): Promise<void> {
+    const action = pendingFileAction.value;
+    pendingFileAction.value = null;
+    if (action === "open") await performOpen();
+    else if (action === "new") await performNew();
+  }
+
+  function cancelPendingFileAction(): void {
+    pendingFileAction.value = null;
+  }
+
   /** 创建或安全重接连接；失败只返回错误，草稿由画布交互层继续保留。 */
   async function createConnection(left: Parameters<WorkspaceBinding["createConnection"]>[0], right: Parameters<WorkspaceBinding["createConnection"]>[1], route?: readonly Point[], connectionId?: string, color?: WireColorId): Promise<{ ok: boolean; error?: string }> {
     const command = connectionId
@@ -611,5 +802,12 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     saveState,
     save,
     saveAs,
+    openError: readonly(openError),
+    pendingFileAction: readonly(pendingFileAction),
+    requestOpen,
+    requestNew,
+    confirmPendingFileAction,
+    cancelPendingFileAction,
+    openProjectFromPath,
   };
 }

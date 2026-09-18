@@ -103,6 +103,13 @@ test("maps editor keyboard shortcuts while preserving editable targets", () => {
   assert.equal(key({ key: "F7" }), "step-simulation");
   assert.equal(key({ key: "F8" }), "reset-simulation");
   assert.equal(key({ key: "F5", ctrlKey: true }), "start-or-resume-simulation");
+  // 文件操作键位与保存同一条取舍：焦点在输入控件里时同样生效。
+  assert.equal(key({ key: "n", ctrlKey: true }), "new-document");
+  assert.equal(key({ key: "o", ctrlKey: true }), "open-document");
+  assert.equal(key({ key: "n", metaKey: true }), "new-document");
+  assert.equal(key({ key: "o", metaKey: true }), "open-document");
+  assert.equal(key({ key: "n", ctrlKey: true, editableTarget: true }), "new-document");
+  assert.equal(key({ key: "o", ctrlKey: true, editableTarget: true }), "open-document");
   // 功能键簇之外仍然不绑定：F9 没有对应意图。
   assert.equal(key({ key: "F9" }), null);
   assert.equal(key({ key: "Delete", editableTarget: true }), null);

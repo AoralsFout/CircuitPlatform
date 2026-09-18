@@ -270,10 +270,29 @@ export function coerceInputValue(value: InputValue | undefined, width: number): 
  * 工作区领域行为的窄接口：负责引擎检查、文档推送、求值、输入切换和展示快照。
  * 操作失败不会抛给 UI；错误会被记录到返回快照的 message，且保留此前可用状态。
  */
+export interface OpenCircuitOptions {
+  /**
+   * 打开的文档里每个 Input 的初始取值（来自项目文件），键为编辑器元件 ID。
+   * 提交前按引擎回传的端口位宽对齐；文件没有给出取值的输入按既有规则回退到默认值。
+   */
+  inputValues?: Readonly<Record<InputKey, InputValue>>;
+}
+
 export interface Workspace {
   checkEngine(): Promise<WorkspaceSnapshot>;
   /** 把一份电路文档整体推送到引擎，并返回本次会话的编辑器 ID → 引擎 ID 绑定。 */
   loadCircuit(document: CircuitDocument): Promise<CircuitLoadResult>;
+  /**
+   * 打开（或新建）入口：把一份文档整体替换到当前工作区，可恢复的整体替换语义。
+   *
+   * 与 `loadCircuit` 的区别：工作区已有电路时它不拒绝，而是先推送新文档（引擎身份单调递增，
+   * 两份电路在引擎里短暂共存不冲突），全部成功后才移除旧电路的结构（旧绑定里的引擎 ID）并
+   * 整体替换绑定；推送失败则按创建顺序反向补偿移除新建结构、恢复旧绑定——旧文档在引擎里的
+   * 结构从头到尾没被碰过。成功后时间线清回「刚加载完」的第 0 步基线（步数与波形历史随旧文档
+   * 一并清空，连续运行停回 stopped）；失败则恢复打开前的运行时状态，正在运行时停回 paused。
+   * 与 `rebuildCircuit` 的区别：重建推的是空的新进程，这里推的是还留着旧电路的进程。
+   */
+  openCircuit(document: CircuitDocument, options?: OpenCircuitOptions): Promise<CircuitLoadResult>;
   /**
    * 引擎重启后的重建入口：把整份文档重新推送到（新的）引擎进程，整体替换引擎身份映射。
    *
@@ -832,8 +851,16 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
   /**
    * 把一份文档按顺序推送到引擎：先建全部 Component，再建全部 Connection。
    * 任何一步失败都按创建顺序反向补偿，不留下半成品结构。
+   * 整体替换的恢复语义（恢复旧绑定、移除旧电路、时间线归零）由 `openCircuit` 在外层处理，
+   * 这里只负责推送与新建结构的补偿，加载与重建共用同一条路径。
+   * @param document 要推送的电路文档。
+   * @param options `initialInputValues` 为打开路径提供的初始输入值（来自项目文件）；
+   *   省略时沿用工作区当前值（示例加载与引擎重建都是这条路径）。
    */
-  async function loadCircuitInternal(document: CircuitDocument): Promise<CircuitLoadResult> {
+  async function loadCircuitInternal(
+    document: CircuitDocument,
+    options: { initialInputValues?: Readonly<Record<InputKey, InputValue>> } = {},
+  ): Promise<CircuitLoadResult> {
     state.isBusy = true;
     state.message = "正在把电路结构推送到仿真引擎…";
     state.operationError = null;
@@ -866,11 +893,13 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
       const runtimeBindings = runtimeBindingsFrom(bindings);
       state.runtimeBindings = runtimeBindings;
       state.lastBindings = bindings;
-      if (runtimeBindings) {
-        state.inputValues = valuesForBindings(runtimeBindings, state.inputValues, state.inputA, state.inputB);
-      }
-      state.hasCircuit = true;
-      state.message = "电路已就绪，试着切换输入。";
+      // 文档里没有 Input 时输入值没有载体：清空而不是留下上一份文档的旧值。
+      state.inputValues = runtimeBindings
+        ? valuesForBindings(runtimeBindings, options.initialInputValues ?? state.inputValues, state.inputA, state.inputB)
+        : {};
+      // 「有没有电路」由文档决定：新建的空文档即使推送成功也不是一份电路。
+      state.hasCircuit = document.components.length > 0;
+      state.message = document.components.length > 0 ? "电路已就绪，试着切换输入。" : "已进入空文档。";
       // 加载后的首次稳定求值不是一次推进：它把电路求值到稳定并填满读数，但不加步数、
       // 不追加波形记录。重置之后的重新求值走同一条规则，两者因此都停在「第 0 步」。
       await submitInputsAndSettle(state.runtimeBindings, state.inputValues, { countAsAdvance: false });
@@ -922,6 +951,73 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
       state.signals = {};
       state.outputValue = "X";
       return loadCircuitInternal(document);
+    });
+  }
+
+  /**
+   * 移除旧电路在引擎里的全部结构：连接先于元件（引擎的连接是独立生命周期，删元件不会
+   * 级联删连接，留下悬空连接会在引擎里越积越多），两者都按创建顺序反向移除。
+   * 移除失败只尽力而为：打开已经成功，旧结构残留不属于打开的失败原因。
+   * @param bindings 打开前那份电路的引擎绑定。
+   */
+  async function removePreviousCircuit(bindings: SimulationBindings): Promise<void> {
+    const connectionIds = Object.values(bindings.connections ?? {}).filter(
+      (id): id is number => id !== undefined,
+    );
+    for (const connectionId of connectionIds.reverse()) {
+      try { await adapter.removeConnection(connectionId); } catch { /* 尽力而为，不阻塞打开。 */ }
+    }
+    const componentIds = Object.values(bindings.components).filter(
+      (id): id is number => id !== undefined,
+    );
+    for (const componentId of componentIds.reverse()) {
+      try { await adapter.removeComponent(componentId); } catch { /* 尽力而为，不阻塞打开。 */ }
+    }
+  }
+
+  function openCircuit(
+    document: CircuitDocument,
+    options?: OpenCircuitOptions,
+  ): Promise<CircuitLoadResult> {
+    if (state.isBusy || state.engineState !== "ready") {
+      return Promise.resolve({ snapshot: createWorkspaceSnapshot(state), bindings: null, ports: {} });
+    }
+    return queue.enqueue(async () => {
+      // 替换开始前先停掉连续运行：排定中的推进不能再落到正在替换的绑定上。
+      cancelTick();
+      const wasRunning = state.simulationState === "running";
+      const previousSimulationState = state.simulationState;
+      state.simulationState = "stopped";
+      // 打开前的运行时状态是失败时的恢复基线：旧的引擎结构从头到尾没被碰过，
+      // 因此恢复绑定就等于恢复原状；步数与波形历史在失败路径上根本不会被触到。
+      const previous = {
+        runtimeBindings: state.runtimeBindings,
+        lastBindings: state.lastBindings,
+        inputValues: { ...state.inputValues },
+        hasCircuit: state.hasCircuit,
+        simulationState: previousSimulationState,
+      };
+      if (options?.inputValues) state.inputValues = { ...options.inputValues };
+      const result = await loadCircuitInternal(document, { initialInputValues: options?.inputValues });
+      if (result.bindings === null) {
+        // 推送失败：新建结构已由推送路径补偿移除，这里恢复打开前的绑定与输入值。
+        state.runtimeBindings = previous.runtimeBindings;
+        state.lastBindings = previous.lastBindings;
+        state.inputValues = previous.inputValues;
+        state.hasCircuit = previous.hasCircuit;
+        // 运行循环已停且不会自动重启，恢复成 running 会留下一个假运行态：停回 paused。
+        state.simulationState = wasRunning ? "paused" : previous.simulationState;
+        // 推送路径带回的快照产生于恢复之前，这里必须按恢复后的状态重新生成。
+        return { snapshot: createWorkspaceSnapshot(state), bindings: null, ports: {} };
+      }
+      // 全部推送成功后才移除旧电路：此刻新旧绑定已经整体替换，旧引擎 ID 只存在于快照里。
+      if (previous.hasCircuit && previous.lastBindings !== null) {
+        await removePreviousCircuit(previous.lastBindings);
+      }
+      // 打开的是一份新文档：旧文档推进出来的时间线一并结束，从第 0 步重新开始。
+      state.simulationStep = 0;
+      state.waveform = [];
+      return { snapshot: createWorkspaceSnapshot(state), bindings: result.bindings, ports: result.ports };
     });
   }
 
@@ -1155,6 +1251,7 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
   return {
     checkEngine,
     loadCircuit,
+    openCircuit,
     rebuildCircuit,
     rebindSimulation,
     refreshReadings,

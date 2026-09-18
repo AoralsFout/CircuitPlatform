@@ -14,13 +14,17 @@ const props = defineProps<{
   saveState: ProjectSaveState;
   /** 最近一次保存失败的原因；作为指示器的悬停提示展示。 */
   saveError: string | null;
-  /** 编辑器就绪时可以保存；保存不依赖引擎在线。 */
+  /** 编辑器会话就绪；新建、打开与保存都以它为前提。 */
   canSave: boolean;
 }>();
 
 const emit = defineEmits<{
   cycleTheme: [];
   checkEngine: [];
+  /** 新建空文档；文档置脏时先确认。 */
+  newDocument: [];
+  /** 打开项目文件；文档置脏时先确认。 */
+  openDocument: [];
   /** 保存当前文档；已有路径直接覆写，没有路径转入另存为。 */
   save: [];
   /** 另存为：总是询问位置，成功后文档身份切换为新路径。 */
@@ -48,6 +52,8 @@ const saveStateLabel = computed(() => saveStateLabels[props.saveState]);
     </div>
 
     <div class="topbar-actions">
+      <button class="topbar-button topbar-button--text" type="button" :disabled="!canSave" title="新建 (Ctrl/Cmd+N)" @click="emit('newDocument')">新建</button>
+      <button class="topbar-button topbar-button--text" type="button" :disabled="!canSave" title="打开 (Ctrl/Cmd+O)" @click="emit('openDocument')">打开</button>
       <button class="topbar-button topbar-button--text" type="button" :disabled="!canSave" title="保存 (Ctrl/Cmd+S)" @click="emit('save')">保存</button>
       <button class="topbar-button topbar-button--text" type="button" :disabled="!canSave" title="另存为 (Ctrl/Cmd+Shift+S)" @click="emit('saveAs')">另存为</button>
       <span class="engine-chip" :class="`engine-chip--${engineState}`" aria-live="polite"><span class="pulse-dot" aria-hidden="true"></span>{{ engineStateLabel }}</span>

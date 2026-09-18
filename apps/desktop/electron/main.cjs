@@ -3,7 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { EngineClient } = require("./engine-client.cjs");
 const { requirePositiveId, requireNonEmptyString, requireSaveDialogOptions } = require("./request-validation.cjs");
-const { writeTextFileAtomically } = require("./project-file-io.cjs");
+const { writeTextFileAtomically, readTextFile } = require("./project-file-io.cjs");
 
 const engineFileName = process.platform === "win32" ? "circuit-engine.exe" : "circuit-engine";
 
@@ -135,6 +135,24 @@ app.whenReady().then(() => {
       return { ok: true };
     } catch (error) {
       return { ok: false, reason: error instanceof Error ? error.message : "写入项目文件失败。" };
+    }
+  });
+  // 打开通道与保存通道同一个分工：对话框与读文件在这里，解析与校验全在渲染层。
+  ipcMain.handle("project:pick-open-path", async (event) => {
+    const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), {
+      title: "打开项目文件",
+      filters: [{ name: "CircuitPlatform 项目", extensions: ["circuit.json"] }],
+      properties: ["openFile"],
+    });
+    if (result.canceled || result.filePaths.length === 0) return { ok: false, reason: "canceled" };
+    return { ok: true, path: result.filePaths[0] };
+  });
+  ipcMain.handle("project:read-file", (_event, filePath) => {
+    try {
+      requireNonEmptyString(filePath, "filePath");
+      return { ok: true, content: readTextFile(fs, filePath) };
+    } catch (error) {
+      return { ok: false, reason: error instanceof Error ? error.message : "读取项目文件失败。" };
     }
   });
   createWindow();

@@ -7,6 +7,7 @@ import EditorToolbar from "./components/EditorToolbar.vue";
 import SettingsPage from "./components/SettingsPage.vue";
 import ToolRail from "./components/ToolRail.vue";
 import TopBar from "./components/TopBar.vue";
+import UnsavedChangesDialog from "./components/UnsavedChangesDialog.vue";
 import WorkspaceSidebar from "./components/WorkspaceSidebar.vue";
 import { useEditorState } from "./composables/useEditorState";
 import { useThemePreference } from "./composables/useThemePreference";
@@ -52,6 +53,12 @@ const {
   canSave,
   save: saveProject,
   saveAs: saveProjectAs,
+  openError,
+  pendingFileAction,
+  requestOpen,
+  requestNew,
+  confirmPendingFileAction,
+  cancelPendingFileAction,
 } = useWorkspace();
 const {
   selectedConnection,
@@ -162,8 +169,9 @@ function onEditorKeydown(event: KeyboardEvent): void {
   if (!shortcut) return;
   event.preventDefault();
   if (shortcut === "cancel") {
-    // Esc 只取消当前最上层状态：确认框 → 恢复提示 → 草稿 → 拖动预览 → 选择。
-    if (editorState.value?.confirmation) void cancelCurrentOperation();
+    // Esc 只取消当前最上层状态：文件操作确认 → 清空确认框 → 恢复提示 → 草稿 → 拖动预览 → 选择。
+    if (pendingFileAction.value) cancelPendingFileAction();
+    else if (editorState.value?.confirmation) void cancelCurrentOperation();
     else if (editorState.value?.operation === "recovery-required") return;
     else if (interaction.value.connectionDraft) cancelConnection();
     else if (interaction.value.routeEditPreview) cancelRouteEdit();
@@ -172,7 +180,7 @@ function onEditorKeydown(event: KeyboardEvent): void {
     else if (editorState.value?.selection) void cancelCurrentOperation();
     return;
   }
-  if (editorState.value?.confirmation) return;
+  if (editorState.value?.confirmation || pendingFileAction.value) return;
   switch (shortcut) {
     case "undo": void undo(); break;
     case "redo": void redo(); break;
@@ -185,6 +193,8 @@ function onEditorKeydown(event: KeyboardEvent): void {
     case "step-simulation": void step(); break;
     case "reset-simulation": void reset(); break;
     case "delete-selection": void deleteSelection(); break;
+    case "new-document": void requestNew(); break;
+    case "open-document": void requestOpen(); break;
     case "save": void saveProject(); break;
     case "save-as": void saveProjectAs(); break;
     default: {
@@ -217,6 +227,8 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
       :can-save="canSave"
       @cycle-theme="cycleTheme"
       @check-engine="checkEngine"
+      @new-document="requestNew"
+      @open-document="requestOpen"
       @save="saveProject"
       @save-as="saveProjectAs"
     />
@@ -243,6 +255,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
 
       <section v-if="activeRailPage !== 'settings'" class="editor-main" :class="{ 'editor-main--bottom-panel-collapsed': !isBottomPanelExpanded }" aria-label="电路编辑器">
         <p v-if="editorState?.operation === 'recovery-required'" class="bottom-error" role="alert">编辑器与仿真引擎的结构状态可能不一致。请关闭并重新打开应用后再继续编辑。</p>
+        <p v-else-if="openError" class="bottom-error" role="alert" :title="openError">{{ openError }}</p>
         <EditorToolbar
           :zoom-label="zoomLabel"
           :can-start="state.canStart"
@@ -348,6 +361,13 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
       :connection-count="editorState.confirmation.connectionCount"
       @confirm="confirmClear"
       @cancel="cancelCurrentOperation"
+    />
+
+    <UnsavedChangesDialog
+      v-if="pendingFileAction"
+      :action="pendingFileAction"
+      @confirm="confirmPendingFileAction"
+      @cancel="cancelPendingFileAction"
     />
   </main>
 </template>

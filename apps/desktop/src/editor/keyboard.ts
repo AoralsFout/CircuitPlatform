@@ -11,6 +11,8 @@ export type EditorShortcut =
   | "pause-simulation"
   | "step-simulation"
   | "reset-simulation"
+  | "new-document"
+  | "open-document"
   | "save"
   | "save-as";
 
@@ -146,10 +148,13 @@ export function isNativeActivationTarget(target: EventTarget | null): boolean {
  * @returns 匹配到的编辑器快捷键；普通按键返回 null。
  */
 export function resolveEditorShortcut(input: EditorKeyInput): EditorShortcut | null {
-  // 保存键位先于输入控件判定：文件操作在控件内没有本地含义，而应用菜单已移除，
-  // 没有其它处理器会接住这个组合键，焦点在哪都应当能保存。
-  if ((input.ctrlKey || input.metaKey) && input.key.toLowerCase() === "s") {
-    return input.shiftKey ? "save-as" : "save";
+  // 文件操作键位先于输入控件判定（与保存键位同一条取舍）：文件操作在控件内没有本地含义，
+  // 而应用菜单已移除，没有其它处理器会接住这些组合键，焦点在哪都应当能到达文件操作。
+  if (input.ctrlKey || input.metaKey) {
+    const key = input.key.toLowerCase();
+    if (key === "s") return input.shiftKey ? "save-as" : "save";
+    if (key === "n") return "new-document";
+    if (key === "o") return "open-document";
   }
   if (input.editableTarget) return null;
   // 运行控制占用功能键簇：开始与继续是同一个「运行」意图，由调用方按当前运行态分派。
