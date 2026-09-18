@@ -19,7 +19,7 @@ import type { ComponentDefinition } from "../canvas";
 import type { ComponentKindName } from "@circuit-platform/protocol";
 import { isConnectionDraftTarget, resolveConnectionPortPointerAction, type ConnectionDraftPort } from "../editor/connection-draft.ts";
 import type { Point } from "../editor";
-import { resolveCanvasKeyboardAction, isEditableKeyboardTarget, type CanvasFocusKind } from "../editor/keyboard.ts";
+import { resolveCanvasKeyboardAction, isEditableKeyboardTarget, isNativeActivationTarget, type CanvasFocusKind } from "../editor/keyboard.ts";
 import {
   positionComponentMenu,
 } from "../editor/component-menu";
@@ -794,6 +794,12 @@ function onKeydown(event: KeyboardEvent): void {
   // 撤销会让微调手势记录的起点失效，先结束当前手势再做历史操作。
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z" && nudgeSession) cancelNudge();
   if (event.key === " ") {
+    // 按焦点所在的作用域分派（ADR 0012）：Space 在输入设置里是「切换聚焦位的 0 / 1」，在画布里
+    // 才是草稿轴向与平移修饰。这个处理器挂在 window 上，事件从侧栏位按钮冒泡到这里时默认动作
+    // 还没发生，无条件 preventDefault 会把原生按钮的激活语义整个吃掉——位按钮的 Space 切换
+    // 因此彻底失效。焦点落在原生可激活控件上时让路即可；画布自己的 Space 由 canvas 元素上的
+    // `onCanvasKeyboard` 负责，走的是另一条路径，不受这里影响。
+    if (isNativeActivationTarget(event.target)) return;
     if (props.interaction.connectionDraft) {
       emit("connectionAxisToggle");
       event.preventDefault();

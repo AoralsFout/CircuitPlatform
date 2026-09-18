@@ -1,6 +1,6 @@
 # 视觉状态截图回归
 
-页面位于 `apps/desktop/visual-regression.html`，直接挂载正式 Vue `App` 与 `CircuitCanvas`，只用内存 Engine adapter 替代 Electron IPC。状态通过真实 DOM 交互产生，不包含手写静态节点、SVG path 或百分比定位：默认、空画布、选中 Component、选中 Wire、ConnectionDraft、Dangling、pending、error、连续运行中、已暂停，以及 Phase 4.5 新增的六个多位电路状态。
+页面位于 `apps/desktop/visual-regression.html`，直接挂载正式 Vue `App` 与 `CircuitCanvas`，只用内存 Engine adapter 替代 Electron IPC。状态通过真实 DOM 交互产生，不包含手写静态节点、SVG path 或百分比定位：默认、空画布、选中 Component、选中 Wire、ConnectionDraft、Dangling、pending、error、连续运行中、已暂停，以及 Phase 4.5 新增的七个多位电路状态。
 
 `running` 与 `paused` 两个状态（issue #24）沿用同一条约束：先点「清空画布」并确认，再从元件库把 Clock、D Flip-Flop、输入拖到画布上，拉出 `out → clock` 与 `out → d` 两条连线，最后按工具栏的「开始连续运行」。暂停态在开始之后再按「暂停」。因此画面上是一条 Clock 驱动 D Flip-Flop 的时序电路，加上工具栏的运行态与已推进步数。
 
@@ -8,7 +8,7 @@
 
 ## 多位电路状态（Phase 4.5）
 
-六个状态同样由真实 DOM 交互产生，覆盖多位 Port 在界面上的三处落点：
+七个状态同样由真实 DOM 交互产生，覆盖多位 Port 在界面上的三处落点：
 
 | 状态 | 产生方式 | 画面上的重点 |
 | --- | --- | --- |
@@ -18,6 +18,7 @@
 | `bus-bits-expanded` | 搭出多位通路，切到「输入设置」，左键拨一位、右键把另一位设为 `X` | 8 位输入按位展开成方形按钮，每行八列 |
 | `bus-bits-collapsed` | 同上，再点一次展开按钮 | 收起后的形态：按钮组消失，取值仍显示在标题行上 |
 | `bus-bit-single` | 直接用启动示例里的 1 位输入 | 1 位与 8 位共用同一套视觉，只是每组只有一个方形按钮 |
+| `bus-bit-space` | 搭出多位通路，切到「输入设置」；那一击由 `visual:probe` 用真实输入发出 | 画面与 `bus-bits-expanded` 相同；这个状态是为探针准备的，不是为截图准备的 |
 
 夹具在这条路径上必须与真实引擎同规则，否则画面会静默失真：`addComponent` 记下它回传的端口清单（拆线器与合线器的清单是数据驱动的，必须由调用方给出），`getSignal` 返回的读数长度等于端口位宽（位宽为 1 时仍返回 `X`，既有状态的画面因此不受影响）。位按钮在引擎绑定就绪之前是禁用的，夹具因此要等按钮可用再点——直接点下去会落在禁用按钮上，静默什么都不做。
 
@@ -66,6 +67,17 @@ pnpm --filter @circuit-platform/desktop visual:probe
 ```
 
 取的是端口的位区间标签与 `data-signal`、`signal-state--*` 类名、位按钮的 `data-value` 与档位、检查器里可编辑属性的当前值与端口行的位宽文案，以及连线上的信号文本。断言因此是逐条可证伪的：位区间标注没画出来、总线文本退化成整条 `X`、位按钮少了一个、收起之后按钮组还在，都会让脚本以非零状态退出并打印是哪一条。
+
+### 需要真实输入的断言
+
+有一类缺陷在源码层与结构层都看不出来，只能靠真实输入复现：**原生控件的默认动作被全局处理器 `preventDefault()` 掉。** 挂在 `window` 上的键盘处理器会看到从任何控件冒泡上来的按键，如果它无条件地把某个键当成自己的，那个控件的原生激活就静默失效了——DOM 结构、类名、属性全都没变，只有「按下去没反应」。
+
+`bus-bit-space` 就是为这一类准备的状态。探针在收集事实之前做两件事：
+
+- **问一句默认动作还在不在。** 原生按钮的 Space 激活只在 `keydown` 没有被 `preventDefault()` 时发生，因此可以在焦点落到位按钮上之后派发一个可取消、会冒泡的合成 `keydown` 并读 `dispatchEvent` 的返回值——返回 `false` 就是有人取消了它。派发合成事件不会触发原生激活，所以这一步测的是「取消与否」，不是取值变化；
+- **发一次真实输入。** `webContents.sendInputEvent` 走浏览器自己的输入管线，默认动作会被执行，因此它测的是端到端的那一击：0 位应当翻成 1。
+
+同一个状态里还顺手测了画布作用域的同名按键：同样的合成 Space 落在画布元素上必须**被** `preventDefault`（画布的 Space 是草稿轴向与平移修饰），否则这次修复就把画布的行为一起带走了。两半合起来才是「同一按键按焦点所在的作用域分派」（ADR 0012）。
 
 这条脚本与 `visual:test` 一样不在 `pnpm verify` 里，要单独跑。
 

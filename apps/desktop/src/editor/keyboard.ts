@@ -104,6 +104,40 @@ export function isEditableKeyboardTarget(target: EventTarget | null): boolean {
   );
 }
 
+/** Space 与 Enter 会触发元素默认动作的那几类元素；与 `isNativeActivationTarget` 配套。 */
+const NATIVE_ACTIVATION_SELECTOR = [
+  "button",
+  "a[href]",
+  "summary",
+  // 勾选类与按钮类 input 的激活同样发生在默认动作里；纯文本输入框由
+  // `isEditableKeyboardTarget` 负责，不在这里。
+  "input[type=checkbox]",
+  "input[type=radio]",
+  "input[type=button]",
+  "input[type=submit]",
+  "input[type=reset]",
+].join(",");
+
+/**
+ * 判断事件目标是不是一个「Space / Enter 由浏览器完成激活」的控件。
+ *
+ * 原生可激活控件的 Space 与 Enter 不需要任何脚本：浏览器自己完成激活，而这一步只在 `keydown`
+ * 没有被 `preventDefault()` 时发生。挂在 window 上的全局处理器会看到从这些控件冒泡上来的按键，
+ * 因此必须先问一句「这个键在这个作用域里是谁的」——ADR 0012 的规则是同一按键在不同作用域下
+ * 含义不同时按焦点所在的作用域分派。画布把 Space 用作草稿轴向与平移修饰，那是**画布**作用域里
+ * 的含义；焦点在位按钮、元件库条目或运行控制上时，这个键属于那个控件。
+ *
+ * 用 `closest` 而不是直接比较 `target`：点在按钮内的文字或图标上时事件目标是子节点，浏览器
+ * 激活的仍然是那个按钮。
+ * @param target 键盘事件的目标。
+ * @returns 目标是原生可激活控件（或它的子节点）时返回 true。
+ */
+export function isNativeActivationTarget(target: EventTarget | null): boolean {
+  if (typeof HTMLElement === "undefined" || !(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable) return false;
+  return target.closest(NATIVE_ACTIVATION_SELECTOR) !== null;
+}
+
 /**
  * 把键盘事件归一为编辑器意图；输入控件中的编辑快捷键始终留给控件自身。
  * @param input 与平台修饰键和目标可编辑状态有关的最小事件数据。

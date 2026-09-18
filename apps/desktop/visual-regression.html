@@ -301,6 +301,14 @@
           await settle(60);
           await setInputBitByClick(0, false);
         }
+        if (state === "bus-bit-space") {
+          // 焦点落在位按钮上的 Space。这是**输入设置**作用域里的按键（ADR 0012 的键位表把它
+          // 登记为「切换聚焦位的 0 / 1」），与画布的「布线草稿中切换轴向」同名不同义，因此
+          // 必须按焦点所在的作用域分派。夹具只把状态摆好，那一击由探针用真实输入发出。
+          await buildBusCircuit();
+          click(railButton("输入设置"));
+          await settle(60);
+        }
         if (state === "running" || state === "paused") {
           // 先清空画布，再从元件库搭出 Clock 驱动 D Flip-Flop，最后按「开始」。
           click(document.querySelector('[aria-label="清空画布"]'));

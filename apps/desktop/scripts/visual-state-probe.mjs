@@ -79,6 +79,88 @@ function check(failures, condition, message) {
   if (!condition) failures.push(message);
 }
 
+/** 探针在收集事实之前发出的真实输入，结果按状态名挂在这里，随后并进 facts。 */
+const measurements = {};
+
+/**
+ * 焦点落在位按钮上按 Space。
+ *
+ * 这里做两件事，各自钉住一半：
+ *
+ * 1. **默认动作有没有被取消。** 原生按钮的 Space 激活只在 `keydown` 没有被 `preventDefault()`
+ *    时发生，因此「按下去会不会切换」这件事可以精确地在 `dispatchEvent` 的返回值上读出来——
+ *    它返回 false 就说明有人把默认动作取消了。派发合成 `KeyboardEvent` 不会触发原生激活，
+ *    所以这一步测的是取消与否，而不是取值变化。
+ * 2. **真实输入。** `webContents.sendInputEvent` 走的是浏览器自己的输入管线，默认动作会被执行，
+ *    因此它测的是端到端的那一击。这是本缺陷当初漏掉的那一类验证：只读源码或只断言 DOM 结构，
+ *    都看不出「默认动作被窗口级处理器吃掉」。
+ *
+ * 顺带把画布作用域的同名按键也测一遍：同一个合成事件落在画布上必须被画布认领，否则修复会
+ * 把画布的 Space（草稿轴向、平移修饰）一起改掉。
+ */
+async function pressSpaceOnFocusedBit(window) {
+  const measured = await window.webContents.executeJavaScript(`(async () => {
+    const settle = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    let button = null;
+    // 位按钮由 canToggleInput 决定是否禁用，而它要求引擎绑定已经就绪。直接按在禁用按钮上
+    // 什么都不会发生，画面停在默认值上而探针不会报错。
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      const candidate = document.querySelectorAll(".input-bit")[0];
+      if (candidate && !candidate.disabled) { button = candidate; break; }
+      await settle(25);
+    }
+    if (!button) return { error: "位按钮一直不可用" };
+
+    button.focus();
+    if (document.activeElement !== button) return { error: "位按钮没有拿到焦点" };
+
+    const valueOf = () => document.querySelector(".input-setting-value")?.textContent?.trim() ?? null;
+    const before = valueOf();
+
+    // dispatchEvent 返回 !event.defaultPrevented：false 就是默认动作被取消了。
+    const defaultActionSurvives = button.dispatchEvent(
+      new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true }),
+    );
+
+    // 画布作用域：同一个合成 Space 落在画布上应当被画布认领（返回 false 即被 preventDefault）。
+    const canvas = document.querySelector(".circuit-canvas");
+    let canvasClaimsSpace = null;
+    if (canvas) {
+      canvasClaimsSpace = !canvas.dispatchEvent(
+        new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true }),
+      );
+      // 收尾：画布处理器会把 spacePressed 置真，补一个 keyup 让状态回位。
+      canvas.dispatchEvent(new KeyboardEvent("keyup", { key: " ", bubbles: true, cancelable: true }));
+    }
+
+    return { before, defaultActionSurvives, canvasClaimsSpace };
+  })()`);
+
+  // sendInputEvent 需要窗口处于聚焦状态；探针窗口是 show: true 的。
+  window.focus();
+  window.webContents.focus();
+  window.webContents.sendInputEvent({ type: "keyDown", keyCode: " " });
+  window.webContents.sendInputEvent({ type: "keyUp", keyCode: " " });
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  const afterReal = await window.webContents.executeJavaScript(
+    `(() => {
+      const setting = document.querySelector(".input-setting");
+      const bits = [...(setting?.querySelectorAll(".input-bit") ?? [])].map((bit) => bit.dataset.value);
+      return {
+        value: document.querySelector(".input-setting-value")?.textContent?.trim() ?? null,
+        bits: bits.join(""),
+      };
+    })()`,
+  );
+
+  measurements["bus-bit-space"] = { spaceProbe: { ...measured, afterReal: afterReal.value, afterRealBits: afterReal.bits } };
+}
+
+/** 需要真实输入才能验证的状态；其余状态由夹具自己的 DOM 交互摆好。 */
+const interactions = {
+  "bus-bit-space": pressSpaceOnFocusedBit,
+};
+
 /** 每个状态一条断言集：只断言「这个状态确实渲染成了它该有的样子」。 */
 const expectations = {
   "bus-canvas": (facts, failures) => {
@@ -153,6 +235,27 @@ const expectations = {
     check(failures, facts.bitGroups[0].bits[0]?.value === "0", "位按钮上的文本没有跟上取值");
     check(failures, facts.bitGroups[0].bits[0]?.state === "input-bit--low", "取 0 的位应落到低档位");
   },
+  "bus-bit-space": (facts, failures) => {
+    const probe = facts.spaceProbe;
+    check(failures, facts.railPage === "输入设置", `侧栏停在第 ${facts.railPage} 页，不是输入设置`);
+    check(failures, probe !== undefined, "探针没有拿到 Space 的测量结果");
+
+    // 焦点在位按钮上时，这个键属于输入设置作用域：默认动作必须活下来，原生按钮才能激活。
+    check(
+      failures,
+      probe?.defaultActionSurvives === true,
+      "焦点在位按钮上按 Space 时 keydown 被 preventDefault 了，原生按钮的激活语义因此失效",
+    );
+    // 真实输入那一击：0 位应当翻成 1。
+    check(failures, probe?.afterReal === "10000000", `真实 Space 没有切换聚焦位，整组取值是 ${probe?.afterReal}`);
+    check(failures, probe?.afterRealBits === "10000000", `位按钮上的文本没有跟上，实际是 ${probe?.afterRealBits}`);
+    // 画布作用域的同名按键没有被这次修复带走。
+    check(
+      failures,
+      probe?.canvasClaimsSpace === true,
+      "画布不再认领 Space：落焦在画布上的 Space 没有被 preventDefault，布线草稿的轴向切换会跟着失效",
+    );
+  },
 };
 
 async function main() {
@@ -185,7 +288,10 @@ async function main() {
         + " if (Date.now() - started > 20000) return reject(new Error('真实 Vue App 未完成准备'));"
         + " setTimeout(check, 50); }; check(); })",
       );
+      const interaction = interactions[state];
+      if (interaction) await interaction(window);
       const facts = await window.webContents.executeJavaScript(COLLECT);
+      Object.assign(facts, measurements[state] ?? {});
       const stateFailures = [];
       expect(facts, stateFailures);
       results.push({ state, ok: stateFailures.length === 0, failures: stateFailures });
