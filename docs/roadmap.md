@@ -256,7 +256,9 @@ issue #20 接上了 `tick` 的第 ④ 步：
 - [x] 断言一：某一位为 `X` 时其余位仍按值传播。`10X00001` 经拆线、逐位取反、合线之后是 `01X11110`——不是 `XXXXXXXX`，也不是被截断或被零扩展的值；
 - [x] 断言二：改位宽后不匹配的 Connection 悬空并可重接。8 位改成 4 位时 `danglingConnectionIds` 报出那条 Connection，接收端随后读到全 `X`；改成 8 位时同一条 Connection 身份原样复活；
 - [x] 截图回归新增六个多位电路状态，状态由真实 DOM 交互产生（`bus-canvas`、`bus-inspector`、`bus-ranges`、`bus-bits-expanded`、`bus-bits-collapsed`、`bus-bit-single`）；
-- [x] 五种既有性能交互模式全部重跑，多位电路帧耗时满足 Phase 3 的 20ms 预算，详见 [docs/testing/performance-benchmark.md](testing/performance-benchmark.md)。
+- [x] 五种既有性能交互模式全部重跑，无回归：P95 逐项持平或更低，DOM 元素数五项逐项相同；多位电路（`--width=8`）P95 全部 ≤ 5.9ms，满足 Phase 3 的 20ms 预算。详见 [docs/testing/performance-benchmark.md](testing/performance-benchmark.md)。
+
+本票同时修掉一处 #28 的遗漏：`benchmark.html` 仍在读已经被移除的 `ComponentDefinition.ports`，导致五种性能模式**全部挂死**（既不报错也不打印，一直等下去）。因为基准不在 `pnpm verify` 里，合并时没有任何一步会碰它。修法是让基准页复用它自己的引擎替身（`tests/fake-ports.ts` 的 `BUILT_IN_PORTS`），连线几何改走投影器自己的 `componentGeometryFor` + `portLayoutFor`，不在 `src/**` 里新增端口定义（ADR 0020）。
 
 已知限制，都是本阶段设计与既有工具链的直接结果，不是缺陷：
 
