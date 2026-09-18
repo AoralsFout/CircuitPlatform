@@ -11,6 +11,7 @@ import {
 } from "../src/editor/index.ts";
 import { createProtocolEnginePort } from "../src/editor/protocolEnginePort.ts";
 import { createSimulationSnapshot } from "../src/editor/simulation.ts";
+import { useEditorState } from "../src/composables/useEditorState.ts";
 import { useWorkspace } from "../src/composables/useWorkspace.ts";
 import { createEngineCallQueue } from "../src/workspace/engineQueue.ts";
 import {
@@ -297,7 +298,7 @@ test("toggles an input, runs the circuit, and appends a waveform point", async (
   await workspace.checkEngine();
   await workspace.loadCircuit(createAndDemoDocument());
 
-  const state = await workspace.toggleInput("input-a");
+  const state = await workspace.setInputBit("input-a", 0, "0");
 
   assert.equal(state.inputA, "0");
   assert.equal(state.inputB, "1");
@@ -313,7 +314,7 @@ test("projects the settled AND result onto the gate output wire", async () => {
   await workspace.checkEngine();
   await workspace.loadCircuit(createAndDemoDocument());
 
-  const state = await workspace.toggleInput("input-b");
+  const state = await workspace.setInputBit("input-b", 0, "0");
   const registry = createComponentDefinitionRegistry();
   const editorSnapshot = editorSnapshotOf(withBuiltInPorts(createAndDemoDocument()));
   const simulation = createSimulationSnapshot(editorSnapshot, {
@@ -363,29 +364,104 @@ test("pushes a document that is not the AND example", async () => {
  * 位宽大于 1 的 Input 不能在提交时送出长度对不上的值：引擎会以 `invalid_width` 拒绝，
  * 整条求值路径都会失败。按位设置输入属于后续切片，这里只要求长度按端口位宽展开。
  */
-test("drives a widened Input with a value matching its declared width", async () => {
-  const engine = new FakeEngine();
-  const workspace = createWorkspace(engine);
-  await workspace.checkEngine();
-
-  const widePorts = [{ name: "out", direction: "output" as const, width: 4 }];
-  const document: EditorDocument = {
+/** 一条多位 Input 直连等宽 Output 的最小电路；用来观察逐位设置提交出去的完整值。 */
+function wideInputDocument(width = 4): EditorDocument {
+  return {
     components: [
-      { id: "input", kind: "input", displayName: "输入", position: { x: 0, y: 0 }, lifecycle: "active", ports: widePorts },
-      { id: "result", kind: "output", displayName: "结果", position: { x: 400, y: 0 }, lifecycle: "active", ports: [{ name: "in", direction: "input", width: 4 }] },
+      { id: "input", kind: "input", displayName: "输入", position: { x: 0, y: 0 }, lifecycle: "active", ports: [{ name: "out", direction: "output", width }] },
+      { id: "result", kind: "output", displayName: "结果", position: { x: 400, y: 0 }, lifecycle: "active", ports: [{ name: "in", direction: "input", width }] },
     ],
     connections: [
       { id: "wire", source: { componentId: "input", port: "out", point: { x: 100, y: 50 } }, target: { componentId: "result", port: "in", point: { x: 400, y: 50 } }, lifecycle: "visible", danglingEndpoints: [] },
     ],
   };
+}
 
-  const state = (await workspace.loadCircuit(document)).snapshot;
+test("drives a widened Input with a value matching its declared width", async () => {
+  const engine = new FakeEngine();
+  const workspace = createWorkspace(engine);
+  await workspace.checkEngine();
+
+  const state = (await workspace.loadCircuit(wideInputDocument())).snapshot;
 
   assert.equal(state.operationError, null);
-  assert.deepEqual(engine.calls.filter((call) => call.type === "setInput").at(-1), { type: "setInput", componentId: 1, value: "1111" });
+  // 位宽大于 1 的 Input 默认是一串 0：新增输入的默认取值是 0，按位宽展开就是这个长度，
+  // 而不是把兼容投影的 `inputA` 整值重复到位宽那么多位。
+  assert.deepEqual(engine.calls.filter((call) => call.type === "setInput").at(-1), { type: "setInput", componentId: 1, value: "0000" });
+  assert.equal(state.inputValues["input"], "0000");
   // 画布读数同样是逐位文本，长度等于端口位宽。
-  assert.equal(state.signals["input:out"], "1111");
-  assert.equal(state.signals["result:in"], "1111");
+  assert.equal(state.signals["input:out"], "0000");
+  assert.equal(state.signals["result:in"], "0000");
+});
+
+test("sets a single bit of a multi-bit Input and submits the whole value", async () => {
+  const engine = new FakeEngine();
+  const workspace = createWorkspace(engine);
+  await workspace.checkEngine();
+  await workspace.loadCircuit(wideInputDocument());
+
+  // 值是 MSB 在前，因此下标 1 是 `[3:0]` 里的第 2 位。
+  const state = await workspace.setInputBit("input", 1, "1");
+
+  // 提交的是**整个**多位值：这一位变了，其余三位保持 0，长度仍然等于端口位宽。
+  assert.deepEqual(engine.calls.filter((call) => call.type === "setInput").at(-1), { type: "setInput", componentId: 1, value: "0100" });
+  assert.equal(state.inputValues.input, "0100");
+  assert.equal(state.signals["input:out"], "0100");
+  // 读数沿 Connection 传到 Output，画布与波形读的是同一个值。
+  assert.equal(state.signals["result:in"], "0100");
+  assert.equal(state.outputValue, "0100");
+  // 停止态下切换立即求值，并且是一次推进。
+  assert.equal(state.simulationStep, 1);
+  assert.deepEqual(state.waveform, [{ step: 1, a: "0100", b: "1", output: "0100" }]);
+});
+
+test("sets one bit to X without disturbing the other bits of the same value", async () => {
+  const engine = new FakeEngine();
+  const workspace = createWorkspace(engine);
+  await workspace.checkEngine();
+  await workspace.loadCircuit(wideInputDocument());
+
+  // 下标 0 是最高位，下标 3 是最低位；两处各设一次，中间隔着两位没被动过。
+  await workspace.setInputBit("input", 0, "1");
+  const state = await workspace.setInputBit("input", 3, "X");
+
+  // `X` 只落在被设置的那一位上，其余位照旧——这正是「逐位三值」与「整条未知」的区别。
+  assert.equal(state.inputValues.input, "100X");
+  assert.equal(state.signals["input:out"], "100X");
+  assert.equal(state.signals["result:in"], "100X");
+});
+
+test("does not advance when a bit already holds the requested value", async () => {
+  const engine = new FakeEngine();
+  const workspace = createWorkspace(engine);
+  await workspace.checkEngine();
+  await workspace.loadCircuit(wideInputDocument());
+  engine.calls.length = 0;
+
+  // 全 0 的输入上把某一位再设成 0：没有变化，因此既不发请求，也不追加一个什么都没变的波形点。
+  const state = await workspace.setInputBit("input", 2, "0");
+
+  assert.deepEqual(engine.calls, []);
+  assert.equal(state.inputValues.input, "0000");
+  assert.equal(state.simulationStep, 0);
+  assert.deepEqual(state.waveform, []);
+});
+
+test("commits a whole multi-bit value while running without settling", async () => {
+  const engine = new FakeEngine();
+  const scheduler = new FakeScheduler();
+  const workspace = createWorkspace(engine, { scheduler });
+  await workspace.checkEngine();
+  await workspace.loadCircuit(wideInputDocument());
+  await workspace.start();
+  engine.calls.length = 0;
+
+  const state = await workspace.setInputBit("input", 2, "1");
+
+  // 连续运行中只提交 set_input，不额外 settle；新值由下一次推进带上。
+  assert.deepEqual(engine.calls, [{ type: "setInput", componentId: 1, value: "0010" }]);
+  assert.equal(state.inputValues.input, "0010");
+  assert.equal(state.simulationState, "running");
 });
 
 test("reads every Output component's own signal instead of reusing the first one", async () => {
@@ -600,7 +676,7 @@ test("queues an input commit behind an in-flight advance while running", async (
 
   scheduler.fire();
   await drain();
-  const toggling = workspace.toggleInput("input-a");
+  const toggling = workspace.setInputBit("input-a", 0, "0");
   await drain();
   // 推进还在飞，输入提交因此排在它之后，两条请求不交错。
   assert.deepEqual(engine.calls.map((call) => call.type), ["tick"]);
@@ -907,7 +983,7 @@ test("re-submits the current input values after a reset", async () => {
   const workspace = createWorkspace(engine);
   await workspace.checkEngine();
   await workspace.loadCircuit(createAndDemoDocument());
-  await workspace.toggleInput("input-a");
+  await workspace.setInputBit("input-a", 0, "0");
   assert.equal(workspace.snapshot().inputValues["input-a"], "0");
   engine.calls.length = 0;
 
@@ -1054,7 +1130,7 @@ test("keeps the committed input when the next simulation is rejected", async () 
   await workspace.loadCircuit(createAndDemoDocument());
   engine.errorOn = "setInput";
 
-  const state = await workspace.toggleInput("input-a");
+  const state = await workspace.setInputBit("input-a", 0, "0");
 
   assert.equal(state.inputA, "1");
   assert.equal(state.outputValue, "1");
@@ -1076,7 +1152,7 @@ test("recognizes every input component in generic editor bindings", async () => 
 
   assert.equal(workspace.snapshot().canStep, true);
   assert.equal(workspace.snapshot().inputValues["input-c"], "0");
-  const state = await workspace.toggleInput("input-c");
+  const state = await workspace.setInputBit("input-c", 0, "1");
 
   assert.equal(state.inputValues["input-c"], "1");
   assert.deepEqual(engine.calls.filter((call) => call.type === "setInput").slice(-3), [
@@ -1140,4 +1216,48 @@ test("disables simulation after clear and rebinds it after one undo", async () =
 
   await session.dispatch({ type: "undo" });
   assert.equal(workspace.snapshot().canStep, true);
+});
+
+test("expands every Input into one button per bit of its declared width", async () => {
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const engine = new FakeEngine();
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { circuitPlatform: engine },
+  });
+
+  try {
+    const binding = useWorkspace();
+    await binding.bootstrap();
+    const editor = useEditorState(binding.state, binding.editorState, binding.select);
+
+    // 1 位 Input 与多位 Input 走同一个模型：一位就是一个方形按钮，没有为 1 位单开一种样子。
+    const [first] = editor.inputControls.value;
+    assert.ok(first, "示例电路至少有一个 Input");
+    assert.equal(first.width, 1);
+    assert.deepEqual(first.bits.map((bit) => [bit.place, bit.index, bit.value]), [[0, 0, "1"]]);
+
+    // 位按钮组跟着端口清单长出来：改宽之后不需要第二份定义。
+    const inputId = first.key;
+    await binding.setPortWidthCommand(inputId, [{ name: "out", direction: "output", width: 4 }]);
+
+    const widened = editor.inputControls.value.find((control) => control.key === inputId);
+    assert.ok(widened);
+    assert.equal(widened.width, 4);
+    assert.equal(widened.value, "0000");
+    // 从最高位到最低位排列：位号与取值文本的下标一一对应，最左的按钮是最高位。
+    assert.deepEqual(
+      widened.bits.map((bit) => [bit.place, bit.index, bit.value]),
+      [[3, 0, "0"], [2, 1, "0"], [1, 2, "0"], [0, 3, "0"]],
+    );
+
+    await binding.setInputBit(inputId, 2, "1");
+
+    const driven = editor.inputControls.value.find((control) => control.key === inputId);
+    assert.equal(driven?.value, "0010");
+    assert.deepEqual(driven?.bits.map((bit) => bit.value), ["0", "0", "1", "0"]);
+  } finally {
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
 });

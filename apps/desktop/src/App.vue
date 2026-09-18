@@ -23,7 +23,7 @@ const {
   resume,
   step,
   reset,
-  toggleInput,
+  setInputBit,
   select,
   moveComponent,
   deleteSelection,
@@ -221,7 +221,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
         :default-wire-color="defaultWireColor"
         @close="showSidebar = false"
         @select-component="selectComponent"
-        @toggle-input="toggleInput"
+        @set-input-bit="setInputBit"
         @place-component="beginPlacementFromSidebar"
         @default-wire-color-change="setDefaultWireColor"
       />
