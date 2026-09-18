@@ -28,6 +28,7 @@ type Call =
   | { type: "setInput"; componentId: number; value: Signal }
   | { type: "settle" }
   | { type: "tick" }
+  | { type: "reset" }
   | { type: "getSignal"; componentId: number; port: string };
 
 /**
@@ -114,6 +115,17 @@ class FakeEngine implements EngineAdapter {
       return entries;
     });
     return { type: "ticked", requestId: "fake", step: this.step, signals };
+  }
+
+  async reset(): Promise<EngineResponse> {
+    this.calls.push({ type: "reset" });
+    if (this.errorOn === "reset") return this.error("重置失败");
+    // 只要「按连接求值」这个最小可观察语义：步数归零、Clock 回到 0、Input 回到初值。
+    // 真正的重置语义（q 回到 X、前值快照清空）由 C++ 测试负责，不在这里重新实现。
+    this.step = 0;
+    this.clocks.clear();
+    this.inputs.clear();
+    return { type: "reset_done", requestId: "fake", status: "ok" };
   }
 
   async getSignal(componentId: number, port: string): Promise<EngineResponse> {
@@ -653,6 +665,106 @@ test("surfaces a failed tick without leaving the workspace stuck", async () => {
   assert.equal(state.engineState, "ready");
   assert.equal(state.simulationState, "stopped");
   assert.equal(state.canStep, true);
+});
+
+test("resets the simulation back to its initial state", async () => {
+  const engine = new FakeEngine();
+  const workspace = createWorkspace(engine);
+  await workspace.checkEngine();
+  const loaded = await workspace.loadCircuit(clockDocument());
+  assert.equal(loaded.snapshot.canReset, true);
+
+  const advanced = await workspace.step();
+  assert.equal(advanced.signals["clock:out"], 1);
+  assert.equal(advanced.simulationStep, loaded.snapshot.simulationStep + 1);
+  assert.equal(advanced.waveform.length > loaded.snapshot.waveform.length, true);
+
+  engine.calls.length = 0;
+  const state = await workspace.reset();
+
+  // 重置后重新提交当前输入并求值到稳定：信号读数来自重置后的那次求值，而不是重置前的残留。
+  assert.deepEqual(
+    engine.calls.map((call) => call.type),
+    ["reset", "settle", "getSignal", "getSignal"],
+  );
+  assert.equal(state.simulationState, "stopped");
+  assert.equal(state.simulationStep, 0);
+  assert.deepEqual(state.waveform, []);
+  assert.equal(state.signals["clock:out"], 0);
+  assert.equal(state.signals["monitor:in"], 0);
+  assert.equal(state.outputValue, 0);
+  assert.equal(state.message, "已重置到初始状态。");
+  assert.equal(state.canReset, true);
+  assert.equal(state.canStart, true);
+});
+
+test("resets from the running state and cancels the scheduled advance", async () => {
+  const engine = new FakeEngine();
+  const scheduler = new FakeScheduler();
+  const workspace = createWorkspace(engine, { scheduler });
+  await workspace.checkEngine();
+  await workspace.loadCircuit(clockDocument());
+  await workspace.start();
+  scheduler.fire();
+  await drain();
+  assert.equal(workspace.snapshot().simulationState, "running");
+  assert.equal(workspace.snapshot().signals["clock:out"], 1);
+  engine.calls.length = 0;
+
+  const state = await workspace.reset();
+
+  assert.equal(state.simulationState, "stopped");
+  assert.equal(state.simulationStep, 0);
+  assert.equal(state.signals["clock:out"], 0);
+  // 重置取消了已经排定的下一次推进：重置之后不会再有推进自行落地。
+  assert.equal(scheduler.fire(), false);
+  await drain();
+  assert.equal(engine.calls.filter((call) => call.type === "tick").length, 0);
+});
+
+test("re-submits the current input values after a reset", async () => {
+  const engine = new FakeEngine();
+  const workspace = createWorkspace(engine);
+  await workspace.checkEngine();
+  await workspace.loadCircuit(createAndDemoDocument());
+  await workspace.toggleInput("input-a");
+  assert.equal(workspace.snapshot().inputValues["input-a"], 0);
+  engine.calls.length = 0;
+
+  const state = await workspace.reset();
+
+  // 重置把引擎里的 Input 也清回了初值，因此工作区必须重新提交当前输入，否则画面会停在全部 X 上。
+  assert.deepEqual(
+    engine.calls.map((call) => call.type),
+    ["reset", "setInput", "setInput", "settle", "getSignal", "getSignal"],
+  );
+  assert.deepEqual(engine.calls.slice(1, 3), [
+    { type: "setInput", componentId: 1, value: 0 },
+    { type: "setInput", componentId: 2, value: 1 },
+  ]);
+  assert.equal(state.inputValues["input-a"], 0);
+  assert.equal(state.inputValues["input-b"], 1);
+  assert.equal(state.outputValue, 0);
+  assert.equal(state.simulationStep, 0);
+  assert.deepEqual(state.waveform, []);
+});
+
+test("surfaces a failed reset without half-clearing the readings", async () => {
+  const engine = new FakeEngine();
+  const workspace = createWorkspace(engine);
+  await workspace.checkEngine();
+  await workspace.loadCircuit(clockDocument());
+  await workspace.step();
+  assert.equal(workspace.snapshot().signals["clock:out"], 1);
+  engine.errorOn = "reset";
+
+  const state = await workspace.reset();
+
+  assert.equal(state.operationError, "重置失败");
+  assert.equal(state.engineState, "ready");
+  // 引擎没有重置，因此已读到的读数与步数都不该被清掉。
+  assert.equal(state.signals["clock:out"], 1);
+  assert.equal(state.simulationStep, 2);
 });
 
 test("refreshes the AND output signal immediately after creating its output wire", async () => {

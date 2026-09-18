@@ -178,6 +178,15 @@ std::string handleRequest(
                ",\"step\":" + std::to_string(simulation->step()) + signals;
     }
 
+    if (request.type == "reset") {
+        // 重置是一条独立请求，不是推进的一个参数：用户要能在任何时候单独表达「从头来过」，
+        // 而不必借道某个带副作用的操作。它只清空运行时状态，Circuit 结构原样保留。
+        // 没有仿真时先按当前 Circuit 建立再重置，结果与「重建一份仿真」完全一致。
+        if (!simulation.has_value()) resetSimulation(circuit, simulation);
+        simulation->reset();
+        return responseWithId("reset_done", request.requestId) + ",\"status\":\"ok\"}";
+    }
+
     if (request.type == "get_signal") {
         if (!request.componentId.has_value()) return missingField(request, "componentId");
         if (!request.port.has_value()) return missingField(request, "port");

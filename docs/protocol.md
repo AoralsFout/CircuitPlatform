@@ -28,6 +28,7 @@ Electron 主进程与 C++ 引擎通过 stdin/stdout 建立一条长连接。双�
 | `set_input` | `componentId`、`value`：`0`、`1` 或 `X` | 设置 Input 元件的输出 |
 | `settle` | 无 | 求值到稳定状态 |
 | `tick` | 无 | 推进一个 tick，返回当前步数与全部输出端口、Output 接收端的值 |
+| `reset` | 无 | 把仿真恢复成刚建立时的状态，`Circuit` 结构不变 |
 | `get_signal` | `componentId`、`port` | 返回 `value`：`0`、`1` 或 `X` |
 
 示例：
@@ -41,6 +42,7 @@ Electron 主进程与 C++ 引擎通过 stdin/stdout 建立一条长连接。双�
 {"type":"remove_component","requestId":"r6","componentId":3}
 {"type":"remove_connection","requestId":"r7","connectionId":1}
 {"type":"tick","requestId":"r8"}
+{"type":"reset","requestId":"r9"}
 ```
 
 `tick` 是推进时间的唯一入口，响应是一次推进后的**全部输出端口**快照，外加**每个 `Output` 元件的接收端**：
@@ -52,6 +54,17 @@ Electron 主进程与 C++ 引擎通过 stdin/stdout 建立一条长连接。双�
 `signals` 的前半段直接来自仿真内部的输出信号表，覆盖每一个输出端口；后半段是每个 `Output` 元件 `in` 端口的当前值。带上接收端的原因是 `Output` 的读数来自它的 `in`——只带输出端口的话，调用方无法在一次往返内得到 Output 的展示值，只能逐端口 `get_signal` 或自己沿 Connection 推导。因此连续推进时每步只需一次跨进程往返，往返次数不随电路规模增长。
 
 `step` 是**引擎当前那份 `Simulation` 自建立以来**累计推进的 tick 次数，属于引擎侧的仿真状态，不是调用方的推进次数：结构变更重建 `Simulation` 会让它从头计数。调用方若要展示「已经推进了多少步」，应当维护自己的计数，不要把它和引擎侧的值混用。
+
+`reset` 把当前的 `Simulation` 恢复成刚建立时的样子：全部输出端口回到初值（`clock` 的 `out` 是 `0`，`d_flip_flop` 的 `q` 是 `X`，其余端口是 `X`），tick 计数归零，`Circuit` 结构与元件、连接的引擎身份原样保留。它**没有业务失败分支**：
+
+```json
+{"type":"reset","requestId":"r9"}
+{"type":"reset_done","requestId":"r9","status":"ok"}
+```
+
+`reset` 是与推进并列的一条独立请求，而不是 `tick` 或 `settle` 的一个参数：用户要能在任何时候单独表达「从头来过」，不必借道某个带副作用的操作。它和「结构变更保留运行时状态」是两件互相独立的事——reset 是用户显式要求的清空，结构变更则必须保住已积累的时序状态。
+
+reset 之后引擎里的 Input 也回到初值 `X`，因此调用方需要重新提交输入值再求值到稳定，否则会读到一片 `X`。
 
 ## 响应
 
@@ -65,6 +78,7 @@ Electron 主进程与 C++ 引擎通过 stdin/stdout 建立一条长连接。双�
 - `input_set`：表示输入已写入；
 - `settled`：`status` 为 `ok`；
 - `ticked`：`step` 为引擎当前 `Simulation` 的累计推进步数，`signals` 为每个输出端口与每个 `Output` 接收端的 `componentId`、`port` 与 `value`；
+- `reset_done`：`status` 为 `ok`，表示运行时状态已回到初始状态；
 - `signal_result`：`value` 为 `0`、`1` 或 `X`。
 
 失败响应统一为：
@@ -87,6 +101,7 @@ Electron 主进程与 C++ 引擎通过 stdin/stdout 建立一条长连接。双�
 - `clock` 元件的输出初值是 `0`，每推进一次在 `0` 与 `1` 之间翻转一次；`d_flip_flop` 在它 `clock` 端口出现 `0 → 1` 时把 `d` 采样进 `q`，其余推进保持不变。
 - 边沿判定只看 `clock` 端口的前值与当前值，不看元件类型：时钟可以来自 Clock 元件、`set_input` 驱动的 Input 元件，或经过组合逻辑的门控时钟。
 - `d_flip_flop` 的 `q` 初值是 `X`，表示还没有采过样；没有连接 `clock` 端口时它每步都不更新，这是结构问题而不是错误，引擎不报错。
+- `reset` 是清空全部运行时状态的唯一途径，与推进是两条独立请求：它把 `Simulation` 恢复成刚建立时的样子（这一点等价于「用同一份 `Circuit` 重新构造一个 `Simulation`」，包括清空边沿判定的前值快照），但不触碰 `Circuit`——元件与连接的引擎身份原样保留，`reset` 之后新建的元件仍拿到递增的身份。
 
 ## 规划中的变更（Phase 4.5）
 

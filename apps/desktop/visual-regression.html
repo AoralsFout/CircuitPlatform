@@ -43,6 +43,11 @@
           });
           return response({ type: "ticked", requestId: "visual", step: tickStep, signals });
         },
+        // 重置把步数归零；重置语义本身由引擎测试负责，这里只需要协议形状正确。
+        reset: () => {
+          tickStep = 0;
+          return response({ type: "reset_done", requestId: "visual", status: "ok" });
+        },
       };
       await import("/src/main.ts");
       const waitFor = async (selector) => {

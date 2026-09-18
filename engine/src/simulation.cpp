@@ -129,6 +129,12 @@ SignalValue initialOutputValue(ComponentKind kind) {
 
 // 建立仿真快照，并把每个输出端初始化为该元件类型的初值。
 Simulation::Simulation(Circuit circuit) : circuit_(std::move(circuit)) {
+    initializeOutputSignals();
+}
+
+// 按当前 Circuit 重建输出信号表；构造与重置共用同一段「初值长什么样」的规则。
+void Simulation::initializeOutputSignals() {
+    signals_.clear();
     for (const auto& component : circuit_.components_) {
         for (const auto& port : component.ports) {
             if (port.direction == PortDirection::Output) {
@@ -136,6 +142,16 @@ Simulation::Simulation(Circuit circuit) : circuit_(std::move(circuit)) {
             }
         }
     }
+}
+
+// 重置等价于「用同一份 Circuit 重新构造一个 Simulation」：唯一不重建的是 Circuit 本身，
+// 因为元件与连接的引擎身份属于 Circuit，不能随运行时状态一起丢掉。
+// 前值快照同样必须清空——新建的 Simulation 里它是空的；若留下重置前的值，重置后的第一次
+// 推进就会拿旧前值与新端口值比较，可能凭空造出一个边沿，也可能漏掉真正的 0 → 1。
+void Simulation::reset() {
+    initializeOutputSignals();
+    previousClockValues_.clear();
+    step_ = 0;
 }
 
 // Input 是仿真外部的驱动源，因此只能通过元件身份修改它的输出值。

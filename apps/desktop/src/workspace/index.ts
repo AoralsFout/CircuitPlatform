@@ -60,6 +60,7 @@ export interface EngineAdapter {
   setInput(componentId: number, value: Signal): Promise<EngineResponse>;
   settle(): Promise<EngineResponse>;
   tick(): Promise<EngineResponse>;
+  reset(): Promise<EngineResponse>;
   getSignal(componentId: number, port: string): Promise<EngineResponse>;
 }
 
@@ -131,6 +132,8 @@ export interface WorkspaceSnapshot {
   canResume: boolean;
   /** 可以精确推进一步；连续运行中不可用。 */
   canStep: boolean;
+  /** 可以把仿真恢复到初始状态：清空全部运行时状态，但保留 Circuit 结构。 */
+  canReset: boolean;
   /**
    * 可以切换 Input。运行中同样成立——那次切换只提交 `set_input`，由下一次推进带上新值。
    */
@@ -165,6 +168,12 @@ export interface Workspace {
   resume(): Promise<WorkspaceSnapshot>;
   /** 推进仿真一个 tick，并用响应带回的输出 Port 快照刷新信号。 */
   step(): Promise<WorkspaceSnapshot>;
+  /**
+   * 把仿真恢复到刚加载后的状态：全部输出回到初始值、Clock 回到 `0`、D Flip-Flop 的 `q` 回到 `X`、
+   * 步数归零、波形历史与信号读数清空、运行状态回到 `stopped`。Circuit 结构不变。
+   * @returns 重置之后的快照；不可重置时原样返回当前快照。
+   */
+  reset(): Promise<WorkspaceSnapshot>;
   /** 切换一个 Input；运行中只提交 `set_input`，停止或暂停时提交后立刻求值。 */
   toggleInput(key: InputKey): Promise<WorkspaceSnapshot>;
   snapshot(): WorkspaceSnapshot;
@@ -294,6 +303,8 @@ function createWorkspaceSnapshot(state: MutableState): WorkspaceSnapshot {
     canPause: state.simulationState === "running",
     canResume: runnable && state.simulationState === "paused",
     canStep: runnable && state.simulationState !== "running",
+    // 重置在任何运行态下都成立：运行中重置同样是「从现在回到初始状态」。
+    canReset: runnable,
     canToggleInput: state.engineState === "ready" && state.runtimeBindings !== null,
   };
 }
@@ -462,9 +473,17 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
     ).connectionId;
   }
 
+  /**
+   * 提交输入并求值到稳定。默认把这次求值计为一次推进并追加波形记录。
+   * @param bindings 本次会话的运行时身份绑定。
+   * @param nextInputValues 本次要提交的输入值；省略时提交当前值。
+   * @param options `countAsAdvance` 为假时既不加步数也不追加波形记录——重置后的重新求值
+   *                是「回到初始状态」的一部分，不是一次推进。
+   */
   async function runSimulationInternal(
     bindings: RuntimeSimulationBindings | null,
     nextInputValues: Readonly<Record<InputKey, BinarySignal>> = state.inputValues,
+    options: { countAsAdvance?: boolean } = {},
   ): Promise<boolean> {
     if (!bindings) return false;
     state.operationError = null;
@@ -502,13 +521,15 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
         ...observedSignals,
         ...outputSignals,
       };
-      state.simulationStep += 1;
-      state.waveform.push({
-        step: state.simulationStep,
-        a: state.inputA,
-        b: state.inputB,
-        output: state.outputValue,
-      });
+      if (options.countAsAdvance ?? true) {
+        state.simulationStep += 1;
+        state.waveform.push({
+          step: state.simulationStep,
+          a: state.inputA,
+          b: state.inputB,
+          output: state.outputValue,
+        });
+      }
       state.message = "仿真已稳定，信号已更新。";
       return true;
     } catch (error) {
@@ -695,6 +716,44 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
     });
   }
 
+  /**
+   * 把仿真恢复到刚加载后的状态。重置是用户显式要求的清空，与「结构变更保留运行时状态」是两件
+   * 互相独立的事：它只清运行时状态，不碰 `Circuit` 结构，因此元件与连接的引擎身份原样保留。
+   * 重置是一条独立请求，不是推进的一个参数。
+   */
+  function reset(): Promise<WorkspaceSnapshot> {
+    if (!createWorkspaceSnapshot(state).canReset) return Promise.resolve(createWorkspaceSnapshot(state));
+    // 同步取消已排定的推进：重置必须立刻把连续运行停下来，而不是等下一拍落地。
+    cancelTick();
+    state.simulationState = "stopped";
+    return enqueue(async () => {
+      const bindings = state.runtimeBindings;
+      state.isBusy = true;
+      try {
+        expectResponse(await adapter.reset(), "reset_done");
+        state.operationError = null;
+        // 运行时状态是整份清空的：步数、波形历史与信号读数都不再属于重置后的那份仿真。
+        state.simulationStep = 0;
+        state.waveform = [];
+        state.signals = {};
+        state.outputValue = "X";
+        // 重置把引擎里的 Input 也清回了初值，因此必须重新提交当前输入并求值到稳定，
+        // 否则画布会停在「全部 X」上。这次求值不计步数，也不追加波形记录。
+        if (bindings !== null) {
+          await runSimulationInternal(bindings, state.inputValues, { countAsAdvance: false });
+        }
+        if (state.operationError === null) state.message = "已重置到初始状态。";
+      } catch (error) {
+        state.message = errorMessage(error, "重置失败。");
+        state.operationError = state.message;
+        if (!(error instanceof ProtocolResponseError)) state.engineState = "error";
+      } finally {
+        state.isBusy = false;
+      }
+      return createWorkspaceSnapshot(state);
+    });
+  }
+
   function toggleInput(key: InputKey): Promise<WorkspaceSnapshot> {
     const bindings = state.runtimeBindings;
     if (bindings === null) return Promise.resolve(createWorkspaceSnapshot(state));
@@ -763,6 +822,7 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
     pause,
     resume,
     step,
+    reset,
     toggleInput,
     snapshot: () => createWorkspaceSnapshot(state),
     subscribe(listener) {

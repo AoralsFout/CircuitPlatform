@@ -93,6 +93,7 @@ app.whenReady().then(() => {
   ipcMain.handle("engine:settle", () => requestEngine({ type: "settle" }));
   // 推进是无参请求，与 settle 一样不需要走 requirePositiveId。
   ipcMain.handle("engine:tick", () => requestEngine({ type: "tick" }));
+  ipcMain.handle("engine:reset", () => requestEngine({ type: "reset" }));
   ipcMain.handle("engine:get-signal", (_event, componentId, port) =>
     requestEngine({ type: "get_signal", componentId, port }));
   createWindow();

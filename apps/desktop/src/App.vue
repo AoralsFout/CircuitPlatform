@@ -22,6 +22,7 @@ const {
   pause,
   resume,
   step,
+  reset,
   toggleInput,
   select,
   moveComponent,
@@ -173,6 +174,7 @@ function onEditorKeydown(event: KeyboardEvent): void {
     case "start-or-resume-simulation": void runSimulationFromKeyboard(); break;
     case "pause-simulation": void pause(); break;
     case "step-simulation": void step(); break;
+    case "reset-simulation": void reset(); break;
     case "delete-selection": void deleteSelection(); break;
     default: {
       // 新增 EditorShortcut 成员时这里会编译失败，避免静默落到删除分支。
@@ -230,6 +232,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           :can-pause="state.canPause"
           :can-resume="state.canResume"
           :can-step="state.canStep"
+          :can-reset="state.canReset"
           :can-undo="editorState?.operation === 'idle' && !editorState.confirmation && editorState.canUndo"
           :can-redo="editorState?.operation === 'idle' && !editorState.confirmation && editorState.canRedo"
           :can-delete="editorState?.operation === 'idle' && !editorState.confirmation && Boolean(editorState.selection)"
@@ -240,6 +243,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           @adjust-zoom="adjustZoom"
           @reset-zoom="fitViewport"
           @step-simulation="step"
+          @reset-simulation="reset"
           @start-simulation="start"
           @pause-simulation="pause"
           @resume-simulation="resume"

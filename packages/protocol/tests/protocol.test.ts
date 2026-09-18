@@ -4,11 +4,13 @@ import {
   createHealthCheck,
   createRemoveComponent,
   createRemoveConnection,
+  createReset,
   createTick,
   isComponentRemovedResponse,
   isConnectionRemovedResponse,
   isRemoveComponentRequest,
   isRemoveConnectionRequest,
+  isResetDoneResponse,
   isSignal,
   isTickedResponse,
 } from "../src/index.ts";
@@ -119,6 +121,25 @@ test("rejects malformed ticked responses", () => {
     false,
   );
   assert.equal(isTickedResponse({ type: "settled", requestId: "request-21", status: "ok" }), false);
+});
+
+test("creates a reset request without any payload", () => {
+  assert.equal(JSON.stringify(createReset("request-22")), '{"type":"reset","requestId":"request-22"}');
+});
+
+test("recognizes a reset_done response and rejects other shapes", () => {
+  assert.equal(
+    isResetDoneResponse({ type: "reset_done", requestId: "request-23", status: "ok" }),
+    true,
+  );
+  // 重置没有业务失败分支，因此只有成功状态才是合法响应。
+  assert.equal(
+    isResetDoneResponse({ type: "reset_done", requestId: "request-24", status: "failed" }),
+    false,
+  );
+  assert.equal(isResetDoneResponse({ type: "reset_done", requestId: "request-25" }), false);
+  assert.equal(isResetDoneResponse({ type: "reset", requestId: "request-26" }), false);
+  assert.equal(isResetDoneResponse({ type: "ticked", requestId: "request-27", step: 0, signals: [] }), false);
 });
 
 test("rejects malformed removal messages", () => {

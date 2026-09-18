@@ -259,6 +259,48 @@ int main() {
     assert(secondRisingEdge.find(
                "{\"componentId\":3,\"port\":\"q\",\"value\":0}") != std::string::npos);
 
+    // 重置把这份仿真恢复到刚建立时的状态；它是一条独立请求，没有业务失败分支。
+    const auto resetResponse = dispatch(
+        R"({"type":"reset","requestId":"reset-1"})", flipFlopCircuit, flipFlopSimulation);
+    assert(resetResponse == R"({"type":"reset_done","requestId":"reset-1","status":"ok"})");
+    assert(dispatch(
+               R"({"type":"get_signal","requestId":"read-q-after-reset","componentId":3,"port":"q"})",
+               flipFlopCircuit, flipFlopSimulation)
+               .find("\"value\":\"X\"") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"get_signal","requestId":"read-clock-after-reset","componentId":1,"port":"out"})",
+               flipFlopCircuit, flipFlopSimulation)
+               .find("\"value\":0") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"get_signal","requestId":"read-d-after-reset","componentId":2,"port":"out"})",
+               flipFlopCircuit, flipFlopSimulation)
+               .find("\"value\":\"X\"") != std::string::npos);
+
+    // Input 的值也回到初值，因此重置后要重新提交才能重现刚建立时的第一个上升沿。
+    assert(dispatch(
+               R"({"type":"set_input","requestId":"d-after-reset","componentId":2,"value":"1"})",
+               flipFlopCircuit, flipFlopSimulation)
+               .find("\"type\":\"input_set\"") != std::string::npos);
+    const auto tickAfterReset = dispatch(
+        R"({"type":"tick","requestId":"tick-after-reset"})", flipFlopCircuit, flipFlopSimulation);
+    // 步数从 0 重新计数，q 与刚建立时一样在第一个 0 → 1 上升沿采到 d = 1。
+    assert(tickAfterReset.find("\"step\":1") != std::string::npos);
+    assert(tickAfterReset.find("{\"componentId\":3,\"port\":\"q\",\"value\":1}") != std::string::npos);
+
+    // 重置不触碰 Circuit：元件、连接与它们的引擎身份原样保留，新元件仍拿到递增的身份。
+    assert(flipFlopCircuit.component(flipFlopClock).has_value());
+    assert(flipFlopCircuit.component(flipFlopOutput).has_value());
+    assert(flipFlopCircuit.connectionCount() == 3);
+    assert(flipFlopCircuit.addComponent(circuit::ComponentKind::NotGate) == 5);
+
+    // 没有仿真时重置先按当前 Circuit 建立再清空，因此空电路上也不会失败。
+    circuit::Circuit resetOnlyCircuit;
+    std::optional<circuit::Simulation> resetOnlySimulation;
+    assert(dispatch(R"({"type":"reset","requestId":"reset-lazy"})", resetOnlyCircuit, resetOnlySimulation) ==
+           R"({"type":"reset_done","requestId":"reset-lazy","status":"ok"})");
+    assert(resetOnlySimulation.has_value());
+    assert(resetOnlySimulation->step() == 0);
+
     circuit::Circuit loopCircuit;
     const auto loopFirst = loopCircuit.addComponent(circuit::ComponentKind::NotGate);
     const auto loopSecond = loopCircuit.addComponent(circuit::ComponentKind::NotGate);

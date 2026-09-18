@@ -74,15 +74,16 @@ Subcircuit 是 Project 与编辑器层的概念，在进入引擎之前就已经
 - `setInput`：设置 Input 元件的输出值；
 - `settle`：重复求值直到输出稳定，并返回 `SimulationResult`；
 - `tick`：推进一个 tick——记录 `clock` 端口前值、翻转全部 Clock、求值到稳定、让 DFlipFlop 在上升沿采样、再求值一次——并返回 `SimulationResult`；
-- `step`：返回从创建以来推进的 tick 次数；
+- `step`：返回从创建以来推进的 tick 次数；`reset` 之后归零；
+- `reset`：把仿真恢复成刚创建时的状态——全部输出端口回到初值、tick 计数归零、边沿判定的前值快照清空——但不触碰 Circuit 结构与其中的引擎身份；
 - `outputSignals`：返回电路中全部输出端口的当前信号，供一次响应带回整份读数；
 - `signal`：读取端口当前的 SignalValue。
 
-当前切片实现 `Input`、`NotGate`、`AndGate`、`OrGate`、`NandGate`、`NorGate`、`XorGate`、`XnorGate`、`Output`、`Clock` 和 `DFlipFlop` 的行为，并能报告组合逻辑环路。`Clock` 的输出初值是 `0`（`0 → 1` 才算上升沿，从 `X` 起步会永远判不出第一次边沿），每推进一次翻转一次；`DFlipFlop` 的 `q` 初值是 `Unknown`，只在 `clock` 端口出现 `0 → 1` 时把 `d` 采样进 `q`，下降沿与任何一端是 `X` 的跳变都不采样；其余元件的输出初值仍是 `Unknown`。判边沿所比较的前值跨 tick 保留，因此时钟来自 Input 元件或组合逻辑时同样成立。未连接输入的值为 `Unknown`；不存在的端口返回空值。更丰富的通用仿真错误将在后续切片中加入。
+当前切片实现 `Input`、`NotGate`、`AndGate`、`OrGate`、`NandGate`、`NorGate`、`XorGate`、`XnorGate`、`Output`、`Clock` 和 `DFlipFlop` 的行为，并能报告组合逻辑环路。`Clock` 的输出初值是 `0`（`0 → 1` 才算上升沿，从 `X` 起步会永远判不出第一次边沿），每推进一次翻转一次；`DFlipFlop` 的 `q` 初值是 `Unknown`，只在 `clock` 端口出现 `0 → 1` 时把 `d` 采样进 `q`，下降沿与任何一端是 `X` 的跳变都不采样；其余元件的输出初值仍是 `Unknown`。判边沿所比较的前值跨 tick 保留，因此时钟来自 Input 元件或组合逻辑时同样成立；`reset` 会把它连同其余运行时状态一起清空，重置后的第一次推进因此与刚创建时完全一致。未连接输入的值为 `Unknown`；不存在的端口返回空值。更丰富的通用仿真错误将在后续切片中加入。
 
 ## 当前外部接口
 
-Electron 主进程通过 JSON Lines 长连接调用引擎。当前协议提供 `health_check`、`add_component`、`add_connection`、`remove_component`、`remove_connection`、`set_input`、`settle`、`tick` 和 `get_signal` 九类请求，详细字段和错误格式见 [引擎 JSON Lines 协议](protocol.md)。
+Electron 主进程通过 JSON Lines 长连接调用引擎。当前协议提供 `health_check`、`add_component`、`add_connection`、`remove_component`、`remove_connection`、`set_input`、`settle`、`tick`、`reset` 和 `get_signal` 十类请求，详细字段和错误格式见 [引擎 JSON Lines 协议](protocol.md)。
 
 这是一个刻意偏小的垂直切片：先让“创建结构 → 设置输入 → 稳定求值 → 读取输出”跑通，目前已扩展删除协议，后续继续实现时钟、时序状态和持久化。当前桌面 UI 已通过业务 IPC 创建并运行 AND 示例、切换输入、稳定求值和读取输出；画布位置与视觉连线仍只属于编辑器模型，不会进入仿真引擎。后续图形编辑器切片和验收顺序见[项目路线图](roadmap.md)。
 

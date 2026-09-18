@@ -36,6 +36,8 @@ interface WorkspaceBinding {
   resume(): Promise<void>;
   /** 推进仿真一个 tick；单步是界面上唯一的推进原语。 */
   step(): Promise<void>;
+  /** 把仿真恢复到初始状态；Circuit 结构不变，运行状态回到已停止。 */
+  reset(): Promise<void>;
   toggleInput(key: InputKey): Promise<void>;
   select(selection: EditorSelection): Promise<void>;
   moveComponent(componentId: EditorComponentId, position: Point): Promise<void>;
@@ -165,6 +167,10 @@ export function useWorkspace(): WorkspaceBinding {
     await reflect(() => workspace.step());
   }
 
+  async function reset(): Promise<void> {
+    await reflect(() => workspace.reset());
+  }
+
   async function toggleInput(key: InputKey): Promise<void> {
     await reflect(() => workspace.toggleInput(key));
   }
@@ -253,6 +259,7 @@ export function useWorkspace(): WorkspaceBinding {
     pause,
     resume,
     step,
+    reset,
     toggleInput,
     select: (selection) => dispatch({ type: "select", selection }),
     moveComponent: (componentId, position) => dispatch({ type: "move-component", componentId, position }),

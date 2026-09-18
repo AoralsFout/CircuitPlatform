@@ -120,6 +120,17 @@ export interface TickRequest {
   requestId: string;
 }
 
+export interface ResetRequest {
+  type: "reset";
+  requestId: string;
+}
+
+export interface ResetDoneResponse {
+  type: "reset_done";
+  requestId: string;
+  status: "ok";
+}
+
 export interface GetSignalRequest {
   type: "get_signal";
   requestId: string;
@@ -136,6 +147,7 @@ export type EngineRequest =
   | SetInputRequest
   | SettleRequest
   | TickRequest
+  | ResetRequest
   | GetSignalRequest;
 
 export interface ErrorResponse {
@@ -160,6 +172,7 @@ export type EngineResponse =
   | InputSetResponse
   | SettledResponse
   | TickedResponse
+  | ResetDoneResponse
   | SignalResponse
   | ErrorResponse;
 
@@ -217,6 +230,18 @@ export function createRemoveConnection(
 export function createTick(requestId: string): TickRequest {
   return {
     type: "tick",
+    requestId,
+  };
+}
+
+/**
+ * 创建把仿真恢复到初始状态的重置请求。
+ * @param requestId 用于匹配请求和响应的调用方身份。
+ * @returns 一个可发送给 C++ 引擎的重置请求。
+ */
+export function createReset(requestId: string): ResetRequest {
+  return {
+    type: "reset",
     requestId,
   };
 }
@@ -301,4 +326,13 @@ export function isTickedResponse(value: unknown): value is TickedResponse {
     Array.isArray(value.signals) &&
     value.signals.every(isSignalSnapshot)
   );
+}
+
+/**
+ * 判断未知值是否为一次重置的成功响应。
+ * @param value 待检查的未知值。
+ * @returns 当 value 是带有成功状态的重置响应时返回 true。
+ */
+export function isResetDoneResponse(value: unknown): value is ResetDoneResponse {
+  return isRequestWithType(value, "reset_done") && value.status === "ok";
 }

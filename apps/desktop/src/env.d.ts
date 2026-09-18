@@ -20,6 +20,7 @@ declare global {
       setInput: (componentId: number, value: Signal) => Promise<EngineResponse>;
       settle: () => Promise<EngineResponse>;
       tick: () => Promise<EngineResponse>;
+      reset: () => Promise<EngineResponse>;
       getSignal: (componentId: number, port: string) => Promise<EngineResponse>;
     };
   }

@@ -121,10 +121,11 @@ test("keyboard equivalents for run control are wired end to end", async () => {
   const toolbar = await readFile(join(desktopRoot, "src", "components", "EditorToolbar.vue"), "utf8");
   const workspace = await readFile(join(desktopRoot, "src", "workspace", "index.ts"), "utf8");
 
-  // 三个动作都在 App 的快捷键分发里处理，而不是只存在于解析器里。
+  // 四个动作都在 App 的快捷键分发里处理，而不是只存在于解析器里。
   assert.match(app, /case "start-or-resume-simulation": void runSimulationFromKeyboard\(\)/);
   assert.match(app, /case "pause-simulation": void pause\(\)/);
   assert.match(app, /case "step-simulation": void step\(\)/);
+  assert.match(app, /case "reset-simulation": void reset\(\)/);
   // F5 是一个意图：已停止时开始，已暂停时继续。
   assert.match(app, /if \(state\.value\.simulationState === "stopped"\) await start\(\)/);
   assert.match(app, /else if \(state\.value\.simulationState === "paused"\) await resume\(\)/);
@@ -134,10 +135,12 @@ test("keyboard equivalents for run control are wired end to end", async () => {
   assert.match(toolbar, /emit\('pauseSimulation'\)/);
   assert.match(toolbar, /emit\('resumeSimulation'\)/);
   assert.match(toolbar, /emit\('stepSimulation'\)/);
+  assert.match(toolbar, /emit\('resetSimulation'\)/);
   assert.match(toolbar, /runStateLabel/);
   assert.match(app, /@start-simulation="start"/);
   assert.match(app, /@pause-simulation="pause"/);
   assert.match(app, /@resume-simulation="resume"/);
+  assert.match(app, /@reset-simulation="reset"/);
 
   // 运行循环排定下一次推进之前必须等上一次响应，且下一次推进只能由调度器排定。
   assert.match(workspace, /const advanced = await enqueue\(\(\) => stepInternal\(bindings, \{ record: false \}\)\)/);

@@ -10,5 +10,6 @@ contextBridge.exposeInMainWorld("circuitPlatform", {
   setInput: (componentId, value) => ipcRenderer.invoke("engine:set-input", componentId, value),
   settle: () => ipcRenderer.invoke("engine:settle"),
   tick: () => ipcRenderer.invoke("engine:tick"),
+  reset: () => ipcRenderer.invoke("engine:reset"),
   getSignal: (componentId, port) => ipcRenderer.invoke("engine:get-signal", componentId, port),
 });

@@ -581,6 +581,102 @@ void keeps_q_under_settle() {
     assert(simulation.step() == 1);
 }
 
+void resets_every_output_to_its_initial_value() {
+    circuit::Circuit circuit;
+    const auto clockId = circuit.addComponent(circuit::ComponentKind::Clock);
+    const auto inputId = circuit.addComponent(circuit::ComponentKind::Input);
+    const auto notId = circuit.addComponent(circuit::ComponentKind::NotGate);
+    const auto flipFlopId = circuit.addComponent(circuit::ComponentKind::DFlipFlop);
+
+    assert(circuit.addConnection({clockId, "out"}, {notId, "in"}).succeeded());
+    assert(circuit.addConnection({clockId, "out"}, {flipFlopId, "clock"}).succeeded());
+    assert(circuit.addConnection({inputId, "out"}, {flipFlopId, "d"}).succeeded());
+
+    circuit::Simulation simulation(circuit);
+    assert(simulation.setInput(inputId, circuit::SignalValue::One));
+    assert(simulation.tick().succeeded());
+    // 推进过后每个输出端口都不在初值上，重置才看得出区别。
+    assert(simulation.signal({clockId, "out"}) == circuit::SignalValue::One);
+    assert(simulation.signal({notId, "out"}) == circuit::SignalValue::Zero);
+    assert(simulation.signal({flipFlopId, "q"}) == circuit::SignalValue::One);
+    assert(simulation.step() == 1);
+
+    simulation.reset();
+
+    // 全部输出回到初始值：Clock 回到 0，其余端口回到 X；Input 的值同样回到初值。
+    assert(simulation.step() == 0);
+    assert(simulation.signal({clockId, "out"}) == circuit::SignalValue::Zero);
+    assert(simulation.signal({notId, "out"}) == circuit::SignalValue::Unknown);
+    assert(simulation.signal({flipFlopId, "q"}) == circuit::SignalValue::Unknown);
+    assert(simulation.signal({inputId, "out"}) == circuit::SignalValue::Unknown);
+    // 信号表是被重建而不是被增量清理：端口数量与刚构造时一致，没有残留条目。
+    assert(simulation.outputSignals().size() == 4);
+}
+
+void restarts_edge_detection_from_the_initial_state_after_reset() {
+    circuit::Circuit circuit;
+    const auto clockId = circuit.addComponent(circuit::ComponentKind::Clock);
+    const auto dataId = circuit.addComponent(circuit::ComponentKind::Input);
+    const auto flipFlopId = circuit.addComponent(circuit::ComponentKind::DFlipFlop);
+
+    assert(circuit.addConnection({clockId, "out"}, {flipFlopId, "clock"}).succeeded());
+    assert(circuit.addConnection({dataId, "out"}, {flipFlopId, "d"}).succeeded());
+
+    circuit::Simulation simulation(circuit);
+    assert(simulation.setInput(dataId, circuit::SignalValue::One));
+    assert(simulation.tick().succeeded());
+    assert(simulation.signal({flipFlopId, "q"}) == circuit::SignalValue::One);
+
+    simulation.reset();
+    assert(simulation.setInput(dataId, circuit::SignalValue::One));
+
+    // 重置后的第一次推进必须还是「Clock 从 0 翻到 1」这个上升沿。
+    // 若前值快照被留在重置前（上一 tick 结束时是 1），这一次比较就是 1 对 1，
+    // 既有的边沿会被吞掉，q 会停在 X。
+    assert(simulation.tick().succeeded());
+    assert(simulation.signal({flipFlopId, "q"}) == circuit::SignalValue::One);
+    assert(simulation.step() == 1);
+}
+
+// 重置的语义等价于「用同一份 Circuit 重新构造一个 Simulation」：把同一串请求分别作用在
+// 重置过的仿真与新建的仿真上，每一拍的输出快照与步数都必须一致。
+void reset_matches_a_freshly_constructed_simulation() {
+    circuit::Circuit circuit;
+    const auto clockId = circuit.addComponent(circuit::ComponentKind::Clock);
+    const auto dataId = circuit.addComponent(circuit::ComponentKind::Input);
+    const auto flipFlopId = circuit.addComponent(circuit::ComponentKind::DFlipFlop);
+    const auto outputId = circuit.addComponent(circuit::ComponentKind::Output);
+
+    assert(circuit.addConnection({clockId, "out"}, {flipFlopId, "clock"}).succeeded());
+    assert(circuit.addConnection({dataId, "out"}, {flipFlopId, "d"}).succeeded());
+    assert(circuit.addConnection({flipFlopId, "q"}, {outputId, "in"}).succeeded());
+
+    circuit::Simulation used(circuit);
+    assert(used.setInput(dataId, circuit::SignalValue::One));
+    assert(used.tick().succeeded());
+    assert(used.tick().succeeded());
+    used.reset();
+    assert(used.step() == 0);
+
+    circuit::Simulation fresh(circuit);
+    for (const auto value : {circuit::SignalValue::One, circuit::SignalValue::Zero}) {
+        assert(used.setInput(dataId, value));
+        assert(fresh.setInput(dataId, value));
+        assert(used.tick().succeeded());
+        assert(fresh.tick().succeeded());
+        assert(used.step() == fresh.step());
+
+        const auto usedSnapshot = used.signalSnapshot();
+        const auto freshSnapshot = fresh.signalSnapshot();
+        assert(usedSnapshot.size() == freshSnapshot.size());
+        for (std::size_t index = 0; index < usedSnapshot.size(); ++index) {
+            assert(usedSnapshot[index].port.component == freshSnapshot[index].port.component);
+            assert(usedSnapshot[index].port.name == freshSnapshot[index].port.name);
+            assert(usedSnapshot[index].value == freshSnapshot[index].value);
+        }
+    }
+}
+
 void rejects_a_tick_that_cannot_settle() {
     circuit::Circuit circuit;
     const auto firstNotId = circuit.addComponent(circuit::ComponentKind::NotGate);
@@ -609,6 +705,9 @@ int main() {
     leaves_a_flip_flop_without_a_clock_untouched();
     keeps_q_under_settle();
     carries_output_receivers_in_the_signal_snapshot();
+    resets_every_output_to_its_initial_value();
+    restarts_edge_detection_from_the_initial_state_after_reset();
+    reset_matches_a_freshly_constructed_simulation();
     rejects_a_tick_that_cannot_settle();
     evaluates_input_not_and_output();
     updates_the_output_when_the_input_changes();

@@ -9,7 +9,8 @@ export type EditorShortcut =
   | "zoom-fit"
   | "start-or-resume-simulation"
   | "pause-simulation"
-  | "step-simulation";
+  | "step-simulation"
+  | "reset-simulation";
 
 /** 画布键盘导航可执行的最小意图集合；组件只负责把意图映射为 DOM/编辑器动作。 */
 export type CanvasKeyboardAction =
@@ -66,6 +67,7 @@ export function resolveEditorShortcut(input: EditorKeyInput): EditorShortcut | n
   if (input.key === "F5") return "start-or-resume-simulation";
   if (input.key === "F6") return "pause-simulation";
   if (input.key === "F7") return "step-simulation";
+  if (input.key === "F8") return "reset-simulation";
   if ((input.ctrlKey || input.metaKey) && input.key.toLowerCase() === "z") {
     return input.shiftKey ? "redo" : "undo";
   }

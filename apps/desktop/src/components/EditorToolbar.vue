@@ -8,6 +8,7 @@ const props = defineProps<{
   canPause: boolean;
   canResume: boolean;
   canStep: boolean;
+  canReset: boolean;
   canUndo: boolean;
   canRedo: boolean;
   canDelete: boolean;
@@ -35,6 +36,8 @@ const emit = defineEmits<{
   startSimulation: [];
   pauseSimulation: [];
   resumeSimulation: [];
+  /** 把仿真恢复到初始状态；Circuit 结构不变。 */
+  resetSimulation: [];
   undo: [];
   redo: [];
   deleteSelection: [];
@@ -62,6 +65,7 @@ const emit = defineEmits<{
         <button class="tool-button tool-button--fit" type="button" :disabled="!canPause" title="暂停连续运行 (F6)" @click="emit('pauseSimulation')">暂停</button>
         <button class="run-button" type="button" :disabled="!canResume" title="从暂停处继续 (F5)" @click="emit('resumeSimulation')">继续</button>
         <button class="tool-button tool-button--fit" type="button" :disabled="!canStep" title="推进一个 tick (F7)" @click="emit('stepSimulation')">单步</button>
+        <button class="tool-button tool-button--fit" type="button" :disabled="!canReset" title="重置到初始状态 (F8)" @click="emit('resetSimulation')">重置</button>
       </div>
     </div>
   </div>

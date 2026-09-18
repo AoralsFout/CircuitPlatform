@@ -67,8 +67,17 @@ public:
     [[nodiscard]] SimulationResult tick();
 
     /**
+     * 把这份仿真恢复到刚创建时的状态：全部输出端口回到该元件类型的初值、Clock 回到 0、
+     * 每个 DFlipFlop 的 `q` 回到 X、tick 计数归零。Circuit 结构不受影响——元件与连接的
+     * 引擎身份属于 Circuit，重置只清运行时状态。
+     * @note 与 `Simulation(circuit)` 等价，唯独不重新复制 Circuit；重置后调用方仍需重新
+     *       提交 Input 的值并求值到稳定，因为 Input 的输出同样回到了初值 X。
+     */
+    void reset();
+
+    /**
      * 返回从创建仿真以来成功推进的 tick 次数。
-     * @return 当前步数；初始为 0。
+     * @return 当前步数；初始为 0，`reset` 之后同样归零。
      */
     [[nodiscard]] std::uint64_t step() const noexcept;
 
@@ -96,6 +105,9 @@ public:
 private:
     bool setOutputSignal(const PortId& portId, SignalValue value);
     [[nodiscard]] SignalValue outputSignal(const PortId& portId) const;
+
+    /** 按当前 Circuit 重建输出信号表，并把每个输出端口置为该元件类型的初值。 */
+    void initializeOutputSignals();
 
     Circuit circuit_;
     std::vector<PortSignal> signals_;
