@@ -181,9 +181,24 @@ issue #20 接上了 `tick` 的第 ④ 步：
 
 已知限制：撤销删除会用新的引擎身份重建被删元件（[ADR 0007](decisions/0007-editor-session-and-stable-editor-ids.md)），因此按身份保留救不回撤销恢复的 `DFlipFlop`——它的 `q` 回到 `X`。规格明确接受这一点。
 
-`reset`（issue #22）与端到端截图基准（issue #24）仍待后续切片。
+同一批里还有切片 2 的显式重置（issue #22）：引擎 `reset` 把 `SimulationState` 整份清回初始值，`Circuit` 结构不动；工作区新增 `reset()`，运行中同样可用（同步取消已排定的下一拍）；键盘等价路径是 `F8`。它与「结构变更按身份保留」互为反例，因此两条路径各有独立断言。
 
 第一版明确不做：多位 D Flip-Flop（由 Phase 4.5 的拆线器组合表达）、Clock 分频或可编程时钟、建立/保持时间等模拟时序参数。
+
+### 已交付（切片 5）
+
+2026-09-18，切片 5 的端到端回归与截图基准（issue #24）给本阶段留下可重复的基线：
+
+- [x] 端到端回归：一条 Clock 驱动 D Flip-Flop 的电路跑通「连续运行 → 暂停 → 继续 → 重置」，跑的是真实 `circuit-engine` 二进制、真实 JSON Lines 协议和真实工作区运行循环（`apps/desktop/tests/temporal-e2e.test.ts`）。它覆盖了 C++ 单测与前端 fake 都够不到的那一段：运行循环、协议往返与真实时序语义接在一起之后每拍的实际读数。引擎二进制不存在时优雅跳过，因此 `pnpm test` 在干净检出上不会被它拖垮；`pnpm verify` 的 `test:engine` 步骤在 `build:engine` 之后会把它重跑一遍；
+- [x] 截图回归：新增 `running` 与 `paused` 两个状态，由真实 DOM 交互产生——清空画布、从元件库拖出 Clock / D Flip-Flop / Input、拉出 `clock` 与 `d` 两条连线、按「开始」连续运行，暂停态再按「暂停」。截图 harness 同时修掉两处会让基线失真的问题：只等 `.app-shell` 会在准备过程中取图，隐藏窗口的合成器也不会持续产出新帧；
+- [x] 性能基准：五种既有交互模式全部重跑，P95 与帧间隔均无回归，详见 [docs/testing/performance-benchmark.md](testing/performance-benchmark.md)。
+
+已知限制，两者都是本阶段分期与既有设计的直接结果，不是缺陷：
+
+- **波形面板在本阶段不逐 tick 记录。** 连续运行时画布会逐拍更新，但波形历史只记录用户发起的推进——单步与输入切换各追加一点，自动 tick 不追加，所以运行中波形列不会增长。由仿真状态产生的逐 tick 波形属于 Phase 5 切片 4；
+- **撤销会丢掉触发器状态。** 撤销删除会用新的引擎身份重建被删元件（[ADR 0007](decisions/0007-editor-session-and-stable-editor-ids.md) 的补偿事务），新身份的 `q` 从 `X` 开始，需要在时钟上再走一个上升沿才会重新采样。本阶段不改变这条设计。
+
+切片 5 的本阶段部分到此完成。引擎重启后的时序状态重建仍依赖 Phase 5 的文档推送路径。
 
 ### Phase 4.5：多位 Port 与总线
 

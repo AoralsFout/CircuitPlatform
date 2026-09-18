@@ -8,6 +8,7 @@
     "build": "vite build",
     "typecheck": "vue-tsc --noEmit -p tsconfig.json && tsc -p tsconfig.test.json --noEmit",
     "test": "node --test --experimental-strip-types tests/*.test.ts tests/*.test.cjs",
+    "test:temporal-e2e": "node --test --experimental-strip-types tests/temporal-e2e.test.ts",
     "test:canvas-selection": "electron scripts/canvas-selection-regression.mjs",
     "performance:benchmark": "node scripts/performance-benchmark.mjs",
     "visual:test": "electron scripts/visual-regression.mjs"

@@ -11,7 +11,7 @@ test("visual fixture covers the required state matrix and reduced motion mode", 
   const fixture = await readFile(join(desktopRoot, "visual-regression.html"), "utf8");
   const script = await readFile(join(desktopRoot, "scripts", "visual-regression.mjs"), "utf8");
   const styles = await readFile(join(desktopRoot, "src", "styles.css"), "utf8");
-  for (const state of ["default", "empty", "selected-component", "selected-wire", "draft", "dangling", "pending", "error"]) {
+  for (const state of ["default", "empty", "selected-component", "selected-wire", "draft", "dangling", "pending", "error", "running", "paused"]) {
     assert.match(script, new RegExp(state.replace("-", "\\-")));
   }
   assert.match(script, /regular: \{ width: 1440, height: 900 \}/);
@@ -22,6 +22,22 @@ test("visual fixture covers the required state matrix and reduced motion mode", 
   assert.match(styles, /transition: none !important/);
   assert.match(fixture, /import\("\/src\/main\.ts"\)/);
   assert.doesNotMatch(fixture, /fixture-node|style="left:|<path[^>]+ d="/);
+});
+
+/**
+ * 内存 adapter 取代的是引擎边界，因此必须覆盖 `EngineAdapter` 的全部方法。
+ * 每加一条运行控制就漏一次的代价是截图页整片挂掉，所以这里按接口本身而不是手抄一份清单来断言。
+ */
+test("the visual fixture implements every engine adapter method", async () => {
+  const workspace = await readFile(join(desktopRoot, "src", "workspace", "index.ts"), "utf8");
+  const fixture = await readFile(join(desktopRoot, "visual-regression.html"), "utf8");
+  const adapterBody = workspace.match(/export interface EngineAdapter \{([\s\S]*?)\n\}/)?.[1];
+  assert.ok(adapterBody, "没有找到 EngineAdapter 接口");
+  const methods = [...adapterBody.matchAll(/^  (\w+)\(/gm)].map((match) => match[1]);
+  assert.ok(methods.length >= 8, `没有从 EngineAdapter 解析出方法：${methods.join(", ")}`);
+  for (const method of methods) {
+    assert.match(fixture, new RegExp(`\\b${method}:`), `视觉回归的内存 adapter 缺少 ${method}`);
+  }
 });
 
 /** 语义 class 是截图和实际画布共用的视觉契约，不能只在夹具中伪造。 */

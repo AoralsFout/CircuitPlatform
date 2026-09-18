@@ -7,7 +7,7 @@ import { createServer } from "vite";
 
 const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const outputRoot = resolve(desktopRoot, "artifacts", "visual-regression");
-const states = ["default", "empty", "selected-component", "selected-wire", "draft", "dangling", "pending", "error"];
+const states = ["default", "empty", "selected-component", "selected-wire", "draft", "dangling", "pending", "error", "running", "paused"];
 const themes = ["dark", "light"];
 const viewports = {
   regular: { width: 1440, height: 900 },
@@ -55,7 +55,14 @@ async function main() {
     app.commandLine.appendSwitch("disable-gpu");
     app.commandLine.appendSwitch("no-sandbox");
     await app.whenReady();
-    const window = new BrowserWindow({ show: false, width: 1440, height: 900, webPreferences: { sandbox: true } });
+    // 显示窗口：隐藏窗口不会持续产出新帧，`capturePage()` 会拿到很早以前的那一张，
+    // 拍出来的不是当前状态。与性能基准同样的理由——隐藏页面会被节流，画面跟不上交互。
+    const window = new BrowserWindow({
+      show: true,
+      width: 1440,
+      height: 900,
+      webPreferences: { sandbox: true, backgroundThrottling: false },
+    });
     window.webContents.on("console-message", (_event, level, message) => console.error(`[visual console ${level}] ${message}`));
     window.webContents.on("did-fail-load", (_event, code, description) => console.error(`[visual load ${code}] ${description}`));
     const manifest = [];
@@ -65,11 +72,15 @@ async function main() {
           window.setSize(viewport.width, viewport.height);
           const motion = options.reducedMotion ? "&motion=reduced" : "";
           await window.loadURL(`http://127.0.0.1:${port}/visual-regression.html?theme=${theme}&state=${state}${motion}`);
-          // 等待真实 Vue 场景完成挂载；首次 Vite 依赖编译可能超过普通动画等待时间。
-          await window.webContents.executeJavaScript("new Promise((resolve, reject) => { const started = Date.now(); const check = () => document.querySelector('.app-shell') ? resolve(true) : Date.now() - started > 20000 ? reject(new Error('真实 Vue App 挂载超时')) : setTimeout(check, 50); check(); })");
+          // 等待真实 Vue 场景完成挂载、并且夹具已经把该状态的全部交互跑完。
+          // 只等 `.app-shell` 会在准备过程中取图，拍到的就不是这个状态的最终画面。
+          await window.webContents.executeJavaScript("new Promise((resolve, reject) => { const started = Date.now(); const check = () => { if (window.__visualError) return reject(new Error(`视觉夹具准备失败：${window.__visualError}`)); if (document.querySelector('.app-shell') && window.__visualReady) return resolve(true); if (Date.now() - started > 20000) return reject(new Error('真实 Vue App 未完成准备')); setTimeout(check, 50); }; check(); })");
           await new Promise((resolvePromise) => setTimeout(resolvePromise, 180));
           const bodyText = await window.webContents.executeJavaScript("document.body.innerText.slice(0, 120)");
           if (!bodyText) throw new Error(`真实 Vue 页面未渲染：${theme}/${viewportName}/${state}`);
+          // 再主动让合成器重画一帧并等它落地，取到的就是当前状态而不是上一张缓存帧。
+          window.webContents.invalidate();
+          await new Promise((resolvePromise) => setTimeout(resolvePromise, 120));
           const image = await window.webContents.capturePage();
           const filename = `${theme}-${viewportName}-${state}${options.reducedMotion ? "-reduced-motion" : ""}.png`;
           const outputPath = resolve(outputRoot, filename);
