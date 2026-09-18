@@ -47,9 +47,10 @@ function createWindow() {
     },
   });
 
-  // 画布自己处理 Ctrl/Cmd + 0/=/−（视图缩放）与 Alt + 方向键（移动聚焦元件）。
-  // Electron 的默认菜单会用同一组加速键缩放整个页面，而且 Windows 上裸按 Alt 会先聚焦菜单栏，
+  // 画布自己处理 Ctrl/Cmd + 0/=/−（视图缩放）、Alt + 方向键（移动聚焦元件）与 F5/F6/F7（运行控制）。
+  // Electron 的默认菜单会用同一组加速键缩放整个页面与重新加载，而且 Windows 上裸按 Alt 会先聚焦菜单栏，
   // 后者即使 autoHideMenuBar 也挡不住。移除菜单是唯一可靠的做法；DevTools 用 before-input-event 补回。
+  // 菜单一旦移除，默认加速键（含 F5 重新加载）就不再存在，运行控制键因此直达渲染进程，这里不需要再拦。
   Menu.setApplicationMenu(null);
   window.webContents.on("before-input-event", (event, input) => {
     if (input.type === "keyDown" && input.control && input.shift && input.key.toLowerCase() === "i") {

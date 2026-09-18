@@ -23,7 +23,8 @@ interface SidebarComponent {
 defineProps<{
   activeRailPage: RailPage;
   inputControls: readonly InputControl[];
-  canRun: boolean;
+  /** 可以切换 Input；运行中同样成立——那次切换会在下一次推进时生效。 */
+  canToggleInput: boolean;
   selectedComponentId: string | null;
   components: readonly SidebarComponent[];
   componentCount: number;
@@ -81,13 +82,13 @@ function startComponentDrag(event: DragEvent, kind: ComponentKindName): void {
     <template v-else-if="activeRailPage === 'inputs'">
       <div class="sidebar-section-title"><span>当前输入</span><span class="component-count">{{ inputControls.length }}</span></div>
       <div class="input-settings-list">
-        <button v-for="input in inputControls" :key="input.key" class="input-setting" :class="{ 'input-setting--on': input.value === 1 }" type="button" :disabled="!canRun" @click="emit('toggleInput', input.key)">
+        <button v-for="input in inputControls" :key="input.key" class="input-setting" :class="{ 'input-setting--on': input.value === 1 }" type="button" :disabled="!canToggleInput" @click="emit('toggleInput', input.key)">
           <span class="input-setting-id">IN {{ input.index }}</span>
           <span class="input-setting-copy"><strong>{{ input.label }}</strong><small>SOURCE / 1 bit</small></span>
           <span class="input-setting-value">{{ input.value }}</span>
         </button>
       </div>
-      <p class="sidebar-hint">切换后会立即运行一次仿真，所有输入都从这里统一编辑。</p>
+      <p class="sidebar-hint">停止或暂停时切换会立即求值；连续运行中切换会在下一次推进时生效。所有输入都从这里统一编辑。</p>
     </template>
 
     <template v-else>

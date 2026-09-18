@@ -391,6 +391,34 @@ void snapshots_every_output_port_after_a_tick() {
     assert(!snapshotValue(simulation, {outputId, "in"}).has_value());
 }
 
+// 一次往返要带回全部可展示读数，因此快照在输出端口之外还要覆盖 Output 元件的接收端。
+void carries_output_receivers_in_the_signal_snapshot() {
+    circuit::Circuit circuit;
+    const auto clockId = circuit.addComponent(circuit::ComponentKind::Clock);
+    const auto outputId = circuit.addComponent(circuit::ComponentKind::Output);
+    assert(circuit.addConnection({clockId, "out"}, {outputId, "in"}).succeeded());
+
+    circuit::Simulation simulation(circuit);
+    // 输出端口快照本身不含接收端；signalSnapshot 才把它带上。
+    assert(!snapshotValue(simulation, {outputId, "in"}).has_value());
+
+    const auto snapshotValueIn = [&](circuit::PortId portId) {
+        for (const auto& signal : simulation.signalSnapshot()) {
+            if (signal.port.component == portId.component && signal.port.name == portId.name) {
+                return signal.value;
+            }
+        }
+        return circuit::SignalValue::Unknown;
+    };
+
+    assert(simulation.signalSnapshot().size() == 2);
+    assert(snapshotValueIn({outputId, "in"}) == circuit::SignalValue::Zero);
+
+    assert(simulation.tick().succeeded());
+    assert(snapshotValueIn({clockId, "out"}) == circuit::SignalValue::One);
+    assert(snapshotValueIn({outputId, "in"}) == circuit::SignalValue::One);
+}
+
 void leaves_a_flip_flop_untouched_until_edge_sampling_is_implemented() {
     circuit::Circuit circuit;
     const auto clockId = circuit.addComponent(circuit::ComponentKind::Clock);
@@ -430,6 +458,7 @@ int main() {
     keeps_the_clock_still_under_settle();
     drives_a_combinational_chain_from_the_clock();
     snapshots_every_output_port_after_a_tick();
+    carries_output_receivers_in_the_signal_snapshot();
     leaves_a_flip_flop_untouched_until_edge_sampling_is_implemented();
     rejects_a_tick_that_cannot_settle();
     evaluates_input_not_and_output();

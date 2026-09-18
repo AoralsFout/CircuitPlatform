@@ -13,18 +13,36 @@
       let nextComponentId = 1;
       let nextConnectionId = 1;
       let failAdds = false;
+      let tickStep = 0;
+      const componentKinds = new Map();
+      const visualOutputPorts = { input: "out", clock: "out", not: "out", and: "out", or: "out", nand: "out", nor: "out", xor: "out", xnor: "out", d_flip_flop: "q" };
       const response = (value) => Promise.resolve(value);
       window.circuitPlatform = {
         checkEngine: () => response({ status: "ok", engine: "Visual test engine" }),
-        addComponent: (kind) => failAdds
-          ? response({ type: "error", requestId: "visual", code: "visual_add_failed", message: "视觉回归模拟：元件提交失败" })
-          : response({ type: "component_added", requestId: "visual", componentId: nextComponentId++ }),
+        addComponent: (kind) => {
+          if (failAdds) return response({ type: "error", requestId: "visual", code: "visual_add_failed", message: "视觉回归模拟：元件提交失败" });
+          const componentId = nextComponentId++;
+          componentKinds.set(componentId, kind);
+          return response({ type: "component_added", requestId: "visual", componentId });
+        },
         addConnection: () => response({ type: "connection_added", requestId: "visual", connectionId: nextConnectionId++ }),
-        removeComponent: (componentId) => response({ type: "component_removed", requestId: "visual", componentId }),
+        removeComponent: (componentId) => {
+          componentKinds.delete(componentId);
+          return response({ type: "component_removed", requestId: "visual", componentId });
+        },
         removeConnection: (connectionId) => response({ type: "connection_removed", requestId: "visual", connectionId }),
         setInput: () => response({ type: "input_set", requestId: "visual" }),
         settle: () => response({ type: "settled", requestId: "visual", status: "ok" }),
         getSignal: () => response({ type: "signal_result", requestId: "visual", value: "X" }),
+        // 连续运行会反复发 tick；这里只需让每个 tick 带回一份快照，语义仍由引擎测试负责。
+        tick: () => {
+          tickStep += 1;
+          const signals = [...componentKinds].flatMap(([componentId, kind]) => {
+            const outputPort = visualOutputPorts[kind];
+            return outputPort === undefined ? [] : [{ componentId, port: outputPort, value: 0 }];
+          });
+          return response({ type: "ticked", requestId: "visual", step: tickStep, signals });
+        },
       };
       await import("/src/main.ts");
       const waitFor = async (selector) => {

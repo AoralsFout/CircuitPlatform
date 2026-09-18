@@ -28,7 +28,13 @@ interface WorkspaceBinding {
   bootstrap(): Promise<void>;
   checkEngine(): Promise<void>;
   runSimulation(): Promise<void>;
-  /** 推进仿真一个 tick；工具栏的「单步」是界面上唯一的推进原语。 */
+  /** 开始连续运行：反复推进，直到暂停或结构修改。 */
+  start(): Promise<void>;
+  /** 暂停连续运行，画面停在当前状态。 */
+  pause(): Promise<void>;
+  /** 从暂停处继续连续运行。 */
+  resume(): Promise<void>;
+  /** 推进仿真一个 tick；单步是界面上唯一的推进原语。 */
   step(): Promise<void>;
   toggleInput(key: InputKey): Promise<void>;
   select(selection: EditorSelection): Promise<void>;
@@ -77,6 +83,10 @@ export function useWorkspace(): WorkspaceBinding {
   const adapter = (window as unknown as { circuitPlatform: EngineAdapter }).circuitPlatform;
   const workspace = createWorkspace(adapter);
   const state = shallowRef(workspace.snapshot());
+  // 连续运行的每一拍由工作区自行排定，因此界面靠订阅拿到那部分快照变化。
+  workspace.subscribe((snapshot) => {
+    state.value = snapshot;
+  });
   const editorState = shallowRef<EditorSnapshot | null>(null);
   let editor: EditorSession | null = null;
   let unsubscribeEditor: (() => void) | null = null;
@@ -137,6 +147,18 @@ export function useWorkspace(): WorkspaceBinding {
 
   async function runSimulation(): Promise<void> {
     await reflect(() => workspace.runSimulation());
+  }
+
+  async function start(): Promise<void> {
+    await reflect(() => workspace.start());
+  }
+
+  async function pause(): Promise<void> {
+    await reflect(() => workspace.pause());
+  }
+
+  async function resume(): Promise<void> {
+    await reflect(() => workspace.resume());
   }
 
   async function step(): Promise<void> {
@@ -227,6 +249,9 @@ export function useWorkspace(): WorkspaceBinding {
     bootstrap: checkEngine,
     checkEngine,
     runSimulation,
+    start,
+    pause,
+    resume,
     step,
     toggleInput,
     select: (selection) => dispatch({ type: "select", selection }),
