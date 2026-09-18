@@ -4,9 +4,21 @@ import { createEngineCallQueue, type EngineCallQueue } from "./engineQueue.ts";
 /** 输入设置项的稳定键；键是编辑器组件 ID，与引擎身份无关。 */
 export type InputKey = string;
 /**
- * 一位输入信号的取值。
- * Input 只能被驱动到确定的 `0` 或 `1`——`X` 只可能来自引擎读数。这里保留字面量联合而不是
- * 直接用协议的宽 `Signal`，输入侧的取值因此在编译期仍有约束：`?? "0"` 之类的兜底写错会报错。
+ * 一位输入信号的取值。用户可以任意驱动一位到 `0`、`1` 或 `X`——`X` 表达「这一位未知」，
+ * 与引擎读数里的 `X` 是同一个值，某一位未知不影响同一个值里的其余位。
+ */
+export type InputBit = "0" | "1" | "X";
+/**
+ * 一个 Input Component 当前被驱动的多位取值：逐位文本，长度等于该端口声明的位宽，
+ * 最左边是最高位（`[N-1:0]`），与画布和波形上的位序一致。
+ *
+ * 这里保留宽 `string` 而不是字面量联合：位宽让合法取值的集合不再有限。需要编译期约束的地方
+ * （例如「左键点击的结果必然是确定的」）另用更窄的联合。
+ */
+export type InputValue = string;
+/**
+ * 确定的一位取值 `0` / `1`。它标记出那些**不可能**是 `X` 的位置——例如左键点击一位之后的结果，
+ * 点击的意思是「让它变成确定的」，因此 `X` 不在它的值域里。
  */
 export type BinarySignal = "0" | "1";
 export type WorkspaceEngineState = "checking" | "ready" | "unavailable" | "error";
@@ -120,8 +132,9 @@ export interface CircuitLoadResult {
 
 export interface WaveformPoint {
   step: number;
-  a: BinarySignal;
-  b: BinarySignal;
+  /** 前两个 Input 元件当时的多位取值；逐位文本，位上宽于 1 时按二进制显示。 */
+  a: InputValue;
+  b: InputValue;
   output: Signal;
 }
 
@@ -132,11 +145,11 @@ export interface WorkspaceSnapshot {
   operationError: string | null;
   isBusy: boolean;
   simulationState: SimulationState;
-  /** 兼容投影：按绑定顺序的前两个 Input 元件。 */
-  inputA: BinarySignal;
-  inputB: BinarySignal;
+  /** 兼容投影：按绑定顺序的前两个 Input 元件当前的多位取值。 */
+  inputA: InputValue;
+  inputB: InputValue;
   /** 当前所有 Input Component 的值，键为工作区绑定中的编辑器 ID。 */
-  inputValues: Readonly<Record<InputKey, BinarySignal>>;
+  inputValues: Readonly<Record<InputKey, InputValue>>;
   /** 最近一次稳定求值后的端口信号，键为 `${editorComponentId}:${portId}`。 */
   signals: Readonly<Record<string, Signal>>;
   /**
@@ -167,9 +180,63 @@ export interface WorkspaceSnapshot {
   /** 可以把仿真恢复到初始状态：清空全部运行时状态，但保留 Circuit 结构。 */
   canReset: boolean;
   /**
-   * 可以切换 Input。运行中同样成立——那次切换只提交 `set_input`，由下一次推进带上新值。
+   * 可以设置 Input 的位。运行中同样成立——那次设置只提交 `set_input`，由下一次推进带上新值。
    */
   canToggleInput: boolean;
+}
+
+/**
+ * 把一串逐位文本拆成位按钮组要渲染的位。
+ * @param value 长度等于端口位宽的逐位文本。
+ * @returns 从最高位到最低位排列的位；下标 0 是文本的最左一位，也是最高位。
+ */
+export function inputBitsOf(value: InputValue): readonly InputBit[] {
+  return [...value].map((char): InputBit => (char === "0" ? "0" : char === "1" ? "1" : "X"));
+}
+
+/**
+ * 左键点击一位之后的取值：在 `0` 与 `1` 之间切换。
+ *
+ * `X` 视作非 `1`，因此点击一个未知位会先把它变成 `1`。这条规则与改造前「整块切换一个 1 位
+ * 输入」的 `=== "1" ? "0" : "1"` 同源，只是作用范围从整个 Input 缩到了一位；返回值收窄成
+ * `BinarySignal` 是因为点击的目的就是让这一位变成确定的。
+ * @param bit 这一位当前的取值。
+ * @returns 点击后的取值，必然是确定的 `0` 或 `1`。
+ */
+export function toggledInputBit(bit: InputBit): BinarySignal {
+  return bit === "1" ? "0" : "1";
+}
+
+/**
+ * 替换多位取值里的一位；越界下标原样返回。
+ * @param value 当前的逐位文本。
+ * @param index 目标位在文本里的下标：0 是最左、也是最高位。
+ * @param bit 这一位的新取值。
+ * @returns 长度与原值相同的新逐位文本。
+ */
+export function withInputBit(value: InputValue, index: number, bit: InputBit): InputValue {
+  if (!Number.isInteger(index) || index < 0 || index >= value.length) return value;
+  return `${value.slice(0, index)}${bit}${value.slice(index + 1)}`;
+}
+
+/** 合法的逐位文本：只含 `0` / `1` / `X`。 */
+const INPUT_BIT_PATTERN = /^[01X]+$/;
+
+/**
+ * 把一个 Input 的取值对齐到端口**当前**的位宽。
+ *
+ * 候选取值有三个来源——用户刚拨的位、上一次求值留下的快照、新绑定推导出的默认值——它们的长度
+ * 不一定等于端口当前的位宽：改宽之后旧值就短了或长了，而引擎按端口位宽校验长度，对不上会以
+ * `invalid_width` 拒绝。长度或字符集对不上时整体回到默认值（全 `0`，与「新增输入默认值为 0」
+ * 一致），不发明按位对齐，也不做零扩展或截断——这与引擎「位宽变化的端口按初值重建」是同一条规则。
+ * @param value 候选取值；`undefined` 表示这个输入还没有过取值。
+ * @param width 端口声明的位宽。
+ * @returns 长度等于位宽、且只含 `0` / `1` / `X` 的逐位文本。
+ */
+export function coerceInputValue(value: InputValue | undefined, width: number): InputValue {
+  const size = Math.max(1, Math.floor(width));
+  const usable = value !== undefined && value.length === size && INPUT_BIT_PATTERN.test(value);
+  return usable ? value : "0".repeat(size);
 }
 
 /**
@@ -215,8 +282,16 @@ export interface Workspace {
    * @returns 重置之后的快照；不可重置时原样返回当前快照。
    */
   reset(): Promise<WorkspaceSnapshot>;
-  /** 切换一个 Input；运行中只提交 `set_input`，停止或暂停时提交后立刻求值。 */
-  toggleInput(key: InputKey): Promise<WorkspaceSnapshot>;
+  /**
+   * 设置一个 Input 的某一位，是输入设置里唯一的驱动入口。
+   * Phase 4 的运行中语义不变：停止或暂停时提交后立刻求值，连续运行中只提交 `set_input`，
+   * 由下一次推进带上新值。
+   * @param key 输入设置项的稳定键。
+   * @param index 目标位在取值文本里的下标：0 是最左、也是最高位。
+   * @param bit 这一位的新取值。
+   * @returns 提交之后的快照；键、下标或取值非法时原样返回当前快照。
+   */
+  setInputBit(key: InputKey, index: number, bit: InputBit): Promise<WorkspaceSnapshot>;
   snapshot(): WorkspaceSnapshot;
   /**
    * 订阅连续运行自行推进产生的快照。
@@ -234,9 +309,9 @@ interface MutableState {
   operationError: string | null;
   isBusy: boolean;
   simulationState: SimulationState;
-  inputA: BinarySignal;
-  inputB: BinarySignal;
-  inputValues: Record<InputKey, BinarySignal>;
+  inputA: InputValue;
+  inputB: InputValue;
+  inputValues: Record<InputKey, InputValue>;
   signals: Record<string, Signal>;
   outputValue: Signal;
   hasCircuit: boolean;
@@ -265,20 +340,6 @@ interface RuntimeInputBinding {
   width: number;
 }
 
-/**
- * 把一个 Input 的逻辑取值展开成能提交给引擎的逐位文本。
- *
- * 按位设置输入属于后续切片，本阶段 Input 的取值仍是整值 `0` / `1`；但位宽已经可以改，
- * 长度对不上的值会被引擎以 `invalid_width` 拒绝，因此提交与展示都按端口声明的位宽展开成
- * 全 `0` / 全 `1`。这里不发明按位语义——那属于「输入设置的按位展开」。
- * @param bit 逻辑取值。
- * @param width 目标端口的位宽。
- * @returns 长度等于位宽的逐位文本。
- */
-function driveValue(bit: BinarySignal, width: number): Signal {
-  return bit.repeat(Math.max(1, width));
-}
-
 interface RuntimeSimulationBindings {
   inputs: readonly RuntimeInputBinding[];
   /** 文档中全部 Output 元件的接收端；每个 Output 单独读取自己的值。 */
@@ -302,18 +363,54 @@ function sameIdentityMap(
 }
 
 /**
- * 判断一次绑定更新是否真的改动了拓扑。
+ * 比较两份端口清单映射。
+ *
+ * 改位宽保留 Component 与 Connection 的引擎身份（ADR 0020），因此引擎身份映射看不出这次变更——
+ * 但端口清单变了，运行时要提交的值的长度和要读的键都会跟着变。只比身份会让改宽后的绑定停留在
+ * 旧位宽上，提交出去的值长度对不上，引擎以 `invalid_width` 拒绝。
+ * @param left 上一份映射。
+ * @param right 这一份映射。
+ * @returns 每个元件的端口数量与每个端口的名字、方向、位宽、位区间都一致时返回 true。
+ */
+function samePortLists(
+  left: Readonly<Partial<Record<string, readonly PortSpec[]>>>,
+  right: Readonly<Partial<Record<string, readonly PortSpec[]>>>,
+): boolean {
+  const keys = Object.keys(left);
+  if (keys.length !== Object.keys(right).length) return false;
+  return keys.every((key) => {
+    const ports = left[key];
+    const other = right[key];
+    if (ports === undefined || other === undefined) return ports === other;
+    return ports.length === other.length && ports.every((port, index) => {
+      const candidate = other[index];
+      return candidate !== undefined &&
+        port.name === candidate.name &&
+        port.direction === candidate.direction &&
+        port.width === candidate.width &&
+        port.bitRange?.msb === candidate.bitRange?.msb &&
+        port.bitRange?.lsb === candidate.bitRange?.lsb;
+    });
+  });
+}
+
+/**
+ * 判断一次绑定更新是否真的改动了电路结构。
  * 只移动元件或改 Route 的编辑不会分配新的引擎身份，`publishBindings` 也不会为它们触发；
  * 因此这里相等就表示电路结构没变，运行态与已积累的读数都不该被动到。
+ *
+ * 端口清单算结构的一部分：改位宽不换引擎身份，却是实打实的结构变更，运行时要用的位宽就在这份
+ * 清单里。
  * @param left 上一份绑定。
  * @param right 这一份绑定。
- * @returns 元件、连接与元件类型三份映射都一致时返回 true。
+ * @returns 元件、连接、元件类型与端口清单四份映射都一致时返回 true。
  */
 function sameBindings(left: SimulationBindings | null, right: SimulationBindings | null): boolean {
   if (left === null || right === null) return left === right;
   return sameIdentityMap(left.components, right.components) &&
     sameIdentityMap(left.connections ?? {}, right.connections ?? {}) &&
-    sameIdentityMap(left.componentKinds ?? {}, right.componentKinds ?? {});
+    sameIdentityMap(left.componentKinds ?? {}, right.componentKinds ?? {}) &&
+    samePortLists(left.ports ?? {}, right.ports ?? {});
 }
 
 /** 信号读数的键空间：编辑器元件 ID 加端口名，画布、检查器与波形共用同一套键。 */
@@ -463,13 +560,14 @@ function runtimeBindingsFrom(bindings: SimulationBindings): RuntimeSimulationBin
 
 function valuesForBindings(
   bindings: RuntimeSimulationBindings,
-  existing: Readonly<Record<InputKey, BinarySignal>>,
-  inputA: BinarySignal,
-  inputB: BinarySignal,
-): Record<InputKey, BinarySignal> {
+  existing: Readonly<Record<InputKey, InputValue>>,
+  inputA: InputValue,
+  inputB: InputValue,
+): Record<InputKey, InputValue> {
   return Object.fromEntries(bindings.inputs.map((binding, index) => [
     binding.key,
-    existing[binding.key] ?? (index === 0 ? inputA : index === 1 ? inputB : "0"),
+    // 结构变更后新建或改宽的端口都还没有这个键的合法值，按端口位宽对齐到默认值。
+    coerceInputValue(existing[binding.key] ?? (index === 0 ? inputA : index === 1 ? inputB : undefined), binding.width),
   ]));
 }
 
@@ -554,7 +652,7 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
   }
 
   /** 把提交后的输入值写回状态，并同步 `inputA` / `inputB` 兼容投影。 */
-  function commitInputValues(values: Record<InputKey, BinarySignal>): void {
+  function commitInputValues(values: Record<InputKey, InputValue>): void {
     state.inputValues = values;
     const bindings = state.runtimeBindings;
     if (bindings === null) return;
@@ -624,18 +722,19 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
    */
   async function submitInputsAndSettle(
     bindings: RuntimeSimulationBindings | null,
-    nextInputValues: Readonly<Record<InputKey, BinarySignal>> = state.inputValues,
+    nextInputValues: Readonly<Record<InputKey, InputValue>> = state.inputValues,
     options: { countAsAdvance: boolean },
   ): Promise<boolean> {
     if (!bindings) return false;
     state.operationError = null;
     try {
+      // 提交的值的长度必须等于端口位宽，否则引擎以 invalid_width 拒绝；对齐在这里统一做。
       const committedValues = bindings.inputs.map((binding) => ({
         binding,
-        value: nextInputValues[binding.key] ?? "0",
+        value: coerceInputValue(nextInputValues[binding.key], binding.width),
       }));
       for (const { binding, value } of committedValues) {
-        expectResponse(await adapter.setInput(binding.componentId, driveValue(value, binding.width)), "input_set");
+        expectResponse(await adapter.setInput(binding.componentId, value), "input_set");
       }
       expectResponse(await adapter.settle(), "settled");
 
@@ -660,10 +759,7 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
       state.outputValue = bindings.outputs.length > 0 ? outputSignals[bindings.outputs[0].key] ?? "X" : "X";
       state.signals = {
         ...Object.fromEntries(
-          committedValues.map(({ binding, value }) => [
-            signalKey(binding.key, binding.port),
-            driveValue(value, binding.width),
-          ]),
+          committedValues.map(({ binding, value }) => [signalKey(binding.key, binding.port), value]),
         ),
         ...observedSignals,
         ...outputSignals,
@@ -839,7 +935,7 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
         ...Object.fromEntries(
           bindings.inputs.map((binding) => [
             signalKey(binding.key, binding.port),
-            driveValue(state.inputValues[binding.key] ?? "0", binding.width),
+            coerceInputValue(state.inputValues[binding.key], binding.width),
           ]),
         ),
         ...observedSignals,
@@ -917,13 +1013,25 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
     });
   }
 
-  function toggleInput(key: InputKey): Promise<WorkspaceSnapshot> {
+  /**
+   * 设置一个 Input 的某一位。
+   *
+   * 只有这一位变，同一位宽里的其余位保持原样；提交的值因此始终是「当前值换了那一位」，
+   * 长度等于端口位宽。设成同一个值不是一次推进：既不发请求，也不追加波形记录——否则
+   * 「把已经是 X 的位再设为 X」会在波形里留下一个什么都没变的点。
+   * @param key 输入设置项的稳定键。
+   * @param index 目标位在取值文本里的下标：0 是最左、也是最高位。
+   * @param bit 这一位的新取值。
+   */
+  function setInputBit(key: InputKey, index: number, bit: InputBit): Promise<WorkspaceSnapshot> {
     const bindings = state.runtimeBindings;
     if (bindings === null) return Promise.resolve(createWorkspaceSnapshot(state));
     const binding = bindings.inputs.find((candidate) => candidate.key === key);
     if (binding === undefined) return Promise.resolve(createWorkspaceSnapshot(state));
-    const value: BinarySignal = state.inputValues[key] === "1" ? "0" : "1";
-    const nextInputValues: Record<InputKey, BinarySignal> = { ...state.inputValues, [key]: value };
+    const current = coerceInputValue(state.inputValues[key], binding.width);
+    const value = withInputBit(current, index, bit);
+    if (value === current) return Promise.resolve(createWorkspaceSnapshot(state));
+    const nextInputValues: Record<InputKey, InputValue> = { ...state.inputValues, [key]: value };
     // 运行中只提交 set_input，不额外 settle；下一次推进自然会带上新值。
     const running = state.simulationState === "running";
     return queue.enqueue(async () => {
@@ -988,7 +1096,7 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
     resume,
     step,
     reset,
-    toggleInput,
+    setInputBit,
     snapshot: () => createWorkspaceSnapshot(state),
     subscribe(listener) {
       listeners.add(listener);
