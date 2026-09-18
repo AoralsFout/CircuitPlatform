@@ -38,9 +38,10 @@ const emit = defineEmits<{
   toggleDetails: [];
 }>();
 
+// 信号值是逐位文本，因此这里比的是字符串；多位值落到未知一档，位宽为 1 时与改造前相同。
 function signalClass(value: Signal): string {
-  if (value === 1) return "signal-state--high";
-  if (value === 0) return "signal-state--low";
+  if (value === "1") return "signal-state--high";
+  if (value === "0") return "signal-state--low";
   return "signal-state--unknown";
 }
 

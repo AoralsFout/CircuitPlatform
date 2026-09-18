@@ -1,4 +1,10 @@
-export type Signal = 0 | 1 | "X";
+/**
+ * 一个信号值的逐位文本：每一位取 `0` / `1` / `X`，长度等于所在端口的位宽。
+ *
+ * 这里是宽 `string` 而不是字面量联合：位宽让合法取值的集合不再有限，协议只保证形状与
+ * 逐位字符，真正的校验在引擎与 `isSignal` 里。需要编译期约束的前端内部类型另用更窄的联合。
+ */
+export type Signal = string;
 
 /** 电路中一个输出端口的当前信号；`ticked` 用它一次带回全部读数。 */
 export interface SignalSnapshot {
@@ -295,12 +301,12 @@ export function isConnectionRemovedResponse(value: unknown): value is Connection
 }
 
 /**
- * 判断未知值是否属于项目当前支持的数字信号值。
+ * 判断未知值是否属于项目当前支持的信号值。
  * @param value 待检查的未知值。
- * @returns 当 value 是 0、1 或 X 时返回 true。
+ * @returns 当 value 是非空且只含 `0` / `1` / `X` 的字符串时返回 true。
  */
 export function isSignal(value: unknown): value is Signal {
-  return value === 0 || value === 1 || value === "X";
+  return typeof value === "string" && /^[01X]+$/.test(value);
 }
 
 function isSignalSnapshot(value: unknown): value is SignalSnapshot {

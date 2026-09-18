@@ -124,8 +124,8 @@ test("runs, pauses, resumes, and resets a clock-driven flip-flop on the real eng
   assert.equal(loaded.snapshot.simulationStep, 0);
   assert.deepEqual(loaded.snapshot.waveform, []);
   assert.equal(loaded.snapshot.simulationState, "stopped");
-  assert.equal(signalOf(loaded.snapshot, "clock:out"), 0);
-  assert.equal(signalOf(loaded.snapshot, "data:out"), 1);
+  assert.equal(signalOf(loaded.snapshot, "clock:out"), "0");
+  assert.equal(signalOf(loaded.snapshot, "data:out"), "1");
   assert.equal(signalOf(loaded.snapshot, "flop:q"), "X", "第一次上升沿之前 q 必须是 X，而不是 0");
   assert.equal(signalOf(loaded.snapshot, "probe:in"), "X");
 
@@ -150,35 +150,35 @@ test("runs, pauses, resumes, and resets a clock-driven flip-flop on the real eng
 
   // 第 1 拍：clock 0 → 1，是上升沿，把 d = 1 采进 q。
   const afterFirst = await advance();
-  assert.equal(signalOf(afterFirst, "clock:out"), 1);
-  assert.equal(signalOf(afterFirst, "flop:q"), 1);
-  assert.equal(signalOf(afterFirst, "probe:in"), 1, "q 的变化必须沿 Connection 传到 Output");
+  assert.equal(signalOf(afterFirst, "clock:out"), "1");
+  assert.equal(signalOf(afterFirst, "flop:q"), "1");
+  assert.equal(signalOf(afterFirst, "probe:in"), "1", "q 的变化必须沿 Connection 传到 Output");
 
   // 第 2 拍：clock 1 → 0，是下降沿，q 保持不变。
   const afterSecond = await advance();
-  assert.equal(signalOf(afterSecond, "clock:out"), 0);
-  assert.equal(signalOf(afterSecond, "flop:q"), 1, "下降沿不采样");
+  assert.equal(signalOf(afterSecond, "clock:out"), "0");
+  assert.equal(signalOf(afterSecond, "flop:q"), "1", "下降沿不采样");
 
   // 第 3 拍：又是上升沿，d 仍是 1，q 保持 1。
   const afterThird = await advance();
-  assert.equal(signalOf(afterThird, "clock:out"), 1);
-  assert.equal(signalOf(afterThird, "flop:q"), 1);
+  assert.equal(signalOf(afterThird, "clock:out"), "1");
+  assert.equal(signalOf(afterThird, "flop:q"), "1");
 
   // 运行中切换 Input：只提交 set_input，由下一次推进带上新值。
   const toggled = await workspace.toggleInput("data");
-  assert.equal(toggled.inputValues.data, 0);
+  assert.equal(toggled.inputValues.data, "0");
   assert.equal(toggled.simulationState, "running", "运行中切换输入不该打断连续运行");
 
   // 第 4 拍：下降沿，d 已经变成 0，但 q 必须按住不动——这正是上升沿触发的可证伪点。
   const afterFalling = await advance();
-  assert.equal(signalOf(afterFalling, "data:out"), 0);
-  assert.equal(signalOf(afterFalling, "clock:out"), 0);
-  assert.equal(signalOf(afterFalling, "flop:q"), 1, "d 已经变了，但还没有上升沿，q 不能跟着变");
+  assert.equal(signalOf(afterFalling, "data:out"), "0");
+  assert.equal(signalOf(afterFalling, "clock:out"), "0");
+  assert.equal(signalOf(afterFalling, "flop:q"), "1", "d 已经变了，但还没有上升沿，q 不能跟着变");
 
   // 第 5 拍：上升沿，这一次采到 d = 0。
   const afterRising = await advance();
-  assert.equal(signalOf(afterRising, "clock:out"), 1);
-  assert.equal(signalOf(afterRising, "flop:q"), 0);
+  assert.equal(signalOf(afterRising, "clock:out"), "1");
+  assert.equal(signalOf(afterRising, "flop:q"), "0");
 
   const stepsBeforePause = afterRising.simulationStep;
   // 推送后的首次稳定求值不计步，连续运行从第 0 步往上走了 5 拍。
@@ -194,7 +194,7 @@ test("runs, pauses, resumes, and resets a clock-driven flip-flop on the real eng
 
   const stillPaused = workspace.snapshot();
   assert.equal(stillPaused.simulationStep, stepsBeforePause);
-  assert.equal(signalOf(stillPaused, "flop:q"), 0, "暂停期间 q 不变");
+  assert.equal(signalOf(stillPaused, "flop:q"), "0", "暂停期间 q 不变");
 
   // ── 继续：从暂停处的状态接着跑，不重放也不丢步 ──────────────────────────────
   const resumed = await workspace.resume();
@@ -204,15 +204,15 @@ test("runs, pauses, resumes, and resets a clock-driven flip-flop on the real eng
   // 第 6 拍：clock 1 → 0，下降沿，q 仍然是暂停时的 0。
   const afterResume = await advance();
   assert.equal(afterResume.simulationStep, stepsBeforePause + 1);
-  assert.equal(signalOf(afterResume, "clock:out"), 0);
-  assert.equal(signalOf(afterResume, "flop:q"), 0);
+  assert.equal(signalOf(afterResume, "clock:out"), "0");
+  assert.equal(signalOf(afterResume, "flop:q"), "0");
 
   // ── 重置：运行状态回到已停止，运行时状态整份清空，Circuit 结构不动 ──────────
   const resetSnapshot = await workspace.reset();
   assert.equal(resetSnapshot.simulationState, "stopped");
   assert.equal(resetSnapshot.simulationStep, 0);
   assert.deepEqual(resetSnapshot.waveform, []);
-  assert.equal(signalOf(resetSnapshot, "clock:out"), 0, "Clock 回到 0");
+  assert.equal(signalOf(resetSnapshot, "clock:out"), "0", "Clock 回到 0");
   assert.equal(signalOf(resetSnapshot, "flop:q"), "X", "重置后 q 回到 X");
   assert.equal(signalOf(resetSnapshot, "probe:in"), "X");
   assert.equal(resetSnapshot.hasCircuit, true, "重置只清运行时状态，不改变 Circuit 结构");
@@ -225,8 +225,8 @@ test("runs, pauses, resumes, and resets a clock-driven flip-flop on the real eng
   // 重置之后的第一拍仍然是完整的上升沿：前值快照一并清空，不会凭空造出上升沿。
   const afterResetTick = await workspace.step();
   assert.equal(afterResetTick.simulationStep, 1);
-  assert.equal(signalOf(afterResetTick, "clock:out"), 1);
-  assert.equal(signalOf(afterResetTick, "flop:q"), 0, "重置后重新从 0 起跑，上升沿采到当前的 d = 0");
+  assert.equal(signalOf(afterResetTick, "clock:out"), "1");
+  assert.equal(signalOf(afterResetTick, "flop:q"), "0", "重置后重新从 0 起跑，上升沿采到当前的 d = 0");
 });
 
 function engineAvailable(): boolean | string {

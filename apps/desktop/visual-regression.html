@@ -43,7 +43,7 @@
             tickStep += 1;
             const signals = [...componentKinds].flatMap(([componentId, kind]) => {
               const outputPort = visualOutputPorts[kind];
-              return outputPort === undefined ? [] : [{ componentId, port: outputPort, value: 0 }];
+              return outputPort === undefined ? [] : [{ componentId, port: outputPort, value: "0" }];
             });
             resolve({ type: "ticked", requestId: "visual", step: tickStep, signals });
           };

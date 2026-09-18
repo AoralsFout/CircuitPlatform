@@ -1,12 +1,13 @@
 import type { Signal } from "@circuit-platform/protocol";
 import type { EditorSnapshot } from "./index.ts";
 import type { ComponentDefinitionRegistry, SimulationSnapshot } from "../canvas/index.ts";
+import type { BinarySignal } from "../workspace/index.ts";
 
 export interface SimulationDisplayInputs {
   /** 兼容投影：按文档顺序的前两个 Input 元件；已求值的输入优先取自 `inputValues`。 */
-  inputA: 0 | 1;
-  inputB: 0 | 1;
-  inputValues?: Readonly<Record<string, 0 | 1>>;
+  inputA: BinarySignal;
+  inputB: BinarySignal;
+  inputValues?: Readonly<Record<string, BinarySignal>>;
   /**
    * 工作区最近一次稳定求值后读取到的端口信号，键为 `${componentId}:${portId}`。
    * 每个 Output 元件从自己的接收端读取，不回退到其它 Output 的值。
@@ -36,7 +37,7 @@ export function createSimulationSnapshot(
     for (const port of definition.ports) {
       const key = `${component.id}:${port.id}`;
       if (component.kind === "input" && port.direction === "output") {
-        signals[key] = values.inputValues?.[component.id] ?? (inputIndex === 0 ? values.inputA : inputIndex === 1 ? values.inputB : 0);
+        signals[key] = values.inputValues?.[component.id] ?? (inputIndex === 0 ? values.inputA : inputIndex === 1 ? values.inputB : "0");
         observedKeys.add(key);
       } else if (component.kind === "output" && port.direction === "input") {
         // 文档中的每个 Output 各自读取自己的信号；未求值时保持 X。
