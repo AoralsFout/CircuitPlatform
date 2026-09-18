@@ -261,6 +261,22 @@ interface RuntimeInputBinding {
   componentId: number;
   /** Input 元件被驱动的输出端口名；来自引擎回传的端口清单，不是前端写死的常量。 */
   port: string;
+  /** 该端口的位宽；提交的值必须长成这样，否则引擎会以 invalid_width 拒绝。 */
+  width: number;
+}
+
+/**
+ * 把一个 Input 的逻辑取值展开成能提交给引擎的逐位文本。
+ *
+ * 按位设置输入属于后续切片，本阶段 Input 的取值仍是整值 `0` / `1`；但位宽已经可以改，
+ * 长度对不上的值会被引擎以 `invalid_width` 拒绝，因此提交与展示都按端口声明的位宽展开成
+ * 全 `0` / 全 `1`。这里不发明按位语义——那属于「输入设置的按位展开」。
+ * @param bit 逻辑取值。
+ * @param width 目标端口的位宽。
+ * @returns 长度等于位宽的逐位文本。
+ */
+function driveValue(bit: BinarySignal, width: number): Signal {
+  return bit.repeat(Math.max(1, width));
 }
 
 interface RuntimeSimulationBindings {
@@ -415,7 +431,12 @@ function runtimeBindingsFrom(bindings: SimulationBindings): RuntimeSimulationBin
   const inputs = components
     .filter(([id]) => kindOf(id) === "input")
     .flatMap(([key, componentId]) =>
-      portsFacing(key, "output").map((port) => ({ key, componentId, port: port.name })));
+      portsFacing(key, "output").map((port) => ({
+        key,
+        componentId,
+        port: port.name,
+        width: port.width,
+      })));
 
   const outputs = components.flatMap(([id, componentId]) => {
     if (kindOf(id) !== "output") return [];
@@ -614,7 +635,7 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
         value: nextInputValues[binding.key] ?? "0",
       }));
       for (const { binding, value } of committedValues) {
-        expectResponse(await adapter.setInput(binding.componentId, value), "input_set");
+        expectResponse(await adapter.setInput(binding.componentId, driveValue(value, binding.width)), "input_set");
       }
       expectResponse(await adapter.settle(), "settled");
 
@@ -639,7 +660,10 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
       state.outputValue = bindings.outputs.length > 0 ? outputSignals[bindings.outputs[0].key] ?? "X" : "X";
       state.signals = {
         ...Object.fromEntries(
-          committedValues.map(({ binding, value }) => [signalKey(binding.key, binding.port), value]),
+          committedValues.map(({ binding, value }) => [
+            signalKey(binding.key, binding.port),
+            driveValue(value, binding.width),
+          ]),
         ),
         ...observedSignals,
         ...outputSignals,
@@ -815,7 +839,7 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
         ...Object.fromEntries(
           bindings.inputs.map((binding) => [
             signalKey(binding.key, binding.port),
-            state.inputValues[binding.key] ?? "0",
+            driveValue(state.inputValues[binding.key] ?? "0", binding.width),
           ]),
         ),
         ...observedSignals,

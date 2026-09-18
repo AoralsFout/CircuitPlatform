@@ -359,6 +359,35 @@ test("pushes a document that is not the AND example", async () => {
   assert.equal(state.outputValue, "0");
 });
 
+/**
+ * 位宽大于 1 的 Input 不能在提交时送出长度对不上的值：引擎会以 `invalid_width` 拒绝，
+ * 整条求值路径都会失败。按位设置输入属于后续切片，这里只要求长度按端口位宽展开。
+ */
+test("drives a widened Input with a value matching its declared width", async () => {
+  const engine = new FakeEngine();
+  const workspace = createWorkspace(engine);
+  await workspace.checkEngine();
+
+  const widePorts = [{ name: "out", direction: "output" as const, width: 4 }];
+  const document: EditorDocument = {
+    components: [
+      { id: "input", kind: "input", displayName: "输入", position: { x: 0, y: 0 }, lifecycle: "active", ports: widePorts },
+      { id: "result", kind: "output", displayName: "结果", position: { x: 400, y: 0 }, lifecycle: "active", ports: [{ name: "in", direction: "input", width: 4 }] },
+    ],
+    connections: [
+      { id: "wire", source: { componentId: "input", port: "out", point: { x: 100, y: 50 } }, target: { componentId: "result", port: "in", point: { x: 400, y: 50 } }, lifecycle: "visible", danglingEndpoints: [] },
+    ],
+  };
+
+  const state = (await workspace.loadCircuit(document)).snapshot;
+
+  assert.equal(state.operationError, null);
+  assert.deepEqual(engine.calls.filter((call) => call.type === "setInput").at(-1), { type: "setInput", componentId: 1, value: "1111" });
+  // 画布读数同样是逐位文本，长度等于端口位宽。
+  assert.equal(state.signals["input:out"], "1111");
+  assert.equal(state.signals["result:in"], "1111");
+});
+
 test("reads every Output component's own signal instead of reusing the first one", async () => {
   const engine = new FakeEngine();
   const workspace = createWorkspace(engine);
