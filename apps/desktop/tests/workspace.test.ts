@@ -17,6 +17,7 @@ import { createEngineCallQueue } from "../src/workspace/engineQueue.ts";
 import {
   createWorkspace,
   type EngineAdapter,
+  type EngineHealth,
   type SimulationBindings,
 } from "../src/workspace/index.ts";
 import { drain, FakeScheduler } from "./fake-scheduler.ts";
@@ -48,13 +49,13 @@ class FakeEngine implements EngineAdapter {
   holdTick: (() => Promise<void>) | null = null;
   step = 0;
   /** Clock 的输出初值为 0，每推进一次翻转一次。 */
-  private readonly clocks = new Map<number, Signal>();
-  private readonly kinds = new Map<number, ComponentKindName>();
-  private readonly ports = new Map<number, readonly PortSpec[]>();
-  private readonly inputs = new Map<number, Signal>();
-  private readonly connections: { source: { componentId: number; port: string }; target: { componentId: number; port: string } }[] = [];
+  protected readonly clocks = new Map<number, Signal>();
+  protected readonly kinds = new Map<number, ComponentKindName>();
+  protected readonly ports = new Map<number, readonly PortSpec[]>();
+  protected readonly inputs = new Map<number, Signal>();
+  protected readonly connections: { source: { componentId: number; port: string }; target: { componentId: number; port: string } }[] = [];
 
-  async checkEngine() {
+  async checkEngine(): Promise<EngineHealth> {
     this.calls.push({ type: "checkEngine" });
     return { status: "ok" as const, engine: "fake-engine" };
   }
@@ -191,6 +192,110 @@ const fakeOutputPorts: Readonly<Partial<Record<ComponentKindName, string>>> = {
   and: "out",
   d_flip_flop: "q",
 };
+
+/**
+ * 能模拟「进程死亡与健康检查恢复」的假引擎。
+ *
+ * `kill()` 之后除 `checkEngine` 外的全部方法都会抛出与真实 `EngineClient` 同款死亡前缀的
+ * 传输错误；`checkEngine` 兼任健康检查的拉起动作（与主进程 `checkEngineHealth` 调
+ * `restart()` 再请求的角色一致）：第一次调用把进程救活、清空电路、递增进程代号。
+ * 新身份让元件/连接序列继续递增而不是从 1 重来——真实进程重启后从 1 开始，但那样新旧
+ * 映射无法区分，测试要证明的恰恰是「身份映射被整体替换」。
+ */
+class RestartableEngine extends FakeEngine implements EngineAdapter {
+  /** 进程代号：恢复流程用「代号是否变化」判断进程是否真的被更换过。 */
+  processEpoch = 0;
+  /** 让下一次 addComponent 抛出传输层错误而不记录死亡；模拟超时一类的瞬时故障。 */
+  failNextAddComponentWithTransportError = false;
+  private dead = false;
+
+  kill(): void {
+    this.dead = true;
+  }
+
+  /** 与真实进程一致：新进程里上一份电路与全部运行时状态都不存在。 */
+  private revive(): void {
+    this.dead = false;
+    this.processEpoch += 1;
+    this.kinds.clear();
+    this.ports.clear();
+    this.inputs.clear();
+    this.clocks.clear();
+    this.connections.length = 0;
+    this.step = 0;
+  }
+
+  private assertAlive(): void {
+    if (this.dead) throw new Error("C++ 引擎进程已退出（code=7, signal=none），等待健康检查恢复。");
+  }
+
+  override async checkEngine(): Promise<EngineHealth> {
+    this.calls.push({ type: "checkEngine" });
+    if (this.dead) this.revive();
+    return { status: "ok", engine: "fake-engine", processEpoch: this.processEpoch };
+  }
+
+  // 以下覆写不在成功路径上记录调用（基类会记录）：死亡时抛错的请求引擎从未收到，不留下痕迹；
+  // 瞬时传输故障与基类同款——先记录再失败。
+
+  override async addComponent(kind: ComponentKindName, ports?: readonly PortSpec[]): Promise<EngineResponse> {
+    if (this.failNextAddComponentWithTransportError) {
+      this.failNextAddComponentWithTransportError = false;
+      this.calls.push({ type: "addComponent", kind });
+      throw new Error("C++ 引擎请求超时: add_component");
+    }
+    this.assertAlive();
+    return super.addComponent(kind, ports);
+  }
+
+  override async addConnection(
+    source: { componentId: number; port: string },
+    target: { componentId: number; port: string },
+  ): Promise<EngineResponse> {
+    this.assertAlive();
+    return super.addConnection(source, target);
+  }
+
+  override async setInput(componentId: number, value: Signal): Promise<EngineResponse> {
+    this.assertAlive();
+    return super.setInput(componentId, value);
+  }
+
+  override async settle(): Promise<EngineResponse> {
+    this.assertAlive();
+    return super.settle();
+  }
+
+  override async tick(): Promise<EngineResponse> {
+    this.assertAlive();
+    return super.tick();
+  }
+
+  override async reset(): Promise<EngineResponse> {
+    this.assertAlive();
+    return super.reset();
+  }
+
+  override async getSignal(componentId: number, port: string): Promise<EngineResponse> {
+    this.assertAlive();
+    return super.getSignal(componentId, port);
+  }
+
+  override async setPortWidth(componentId: number, ports: readonly PortSpec[]): Promise<EngineResponse> {
+    this.assertAlive();
+    return super.setPortWidth(componentId, ports);
+  }
+
+  override async removeComponent(componentId: number): Promise<EngineResponse> {
+    this.assertAlive();
+    return super.removeComponent(componentId);
+  }
+
+  override async removeConnection(connectionId: number): Promise<EngineResponse> {
+    this.assertAlive();
+    return super.removeConnection(connectionId);
+  }
+}
 
 /** 与 `useWorkspace` 相同的桥接：工作区绑定是可选的，编辑器绑定要求 connections 存在。 */
 function bindingsFrom(loaded: SimulationBindings): EditorBindings {
@@ -1372,6 +1477,204 @@ test("expands every Input into one button per bit of its declared width", async 
     const driven = editor.inputControls.value.find((control) => control.key === inputId);
     assert.equal(driven?.value, "0010");
     assert.deepEqual(driven?.bits.map((bit) => bit.value), ["0", "0", "1", "0"]);
+  } finally {
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
+});
+
+test("a dead engine process surfaces as unavailable and the document rebuilds on the new process", async () => {
+  const engine = new RestartableEngine();
+  const workspace = createWorkspace(engine);
+  await workspace.checkEngine();
+  await workspace.loadCircuit(createAndDemoDocument());
+  // 造一点旧进程的运行痕迹：一次用户推进留下第 1 步与一条波形记录。
+  const before = await workspace.step();
+  assert.equal(before.simulationStep, 1);
+  assert.equal(before.waveform.length, 1);
+
+  engine.kill();
+  const failed = await workspace.step();
+  // 进程死亡表达为可展示的「引擎不可用」，而不是新进程上 component_not_found 的静默错乱。
+  assert.equal(failed.engineState, "unavailable");
+  assert.ok(failed.message.includes("C++ 引擎进程已退出"));
+
+  // 健康检查拉起新进程（假引擎的 checkEngine 兼任拉起），随后走整份文档推送重建。
+  const checked = await workspace.checkEngine();
+  assert.equal(checked.engineState, "ready");
+  engine.calls.length = 0;
+
+  const rebuilt = await workspace.rebuildCircuit(createAndDemoDocument());
+
+  // 身份映射整体替换：假引擎的新身份从旧序列继续递增，与旧映射（1..4 / 1..3）区分开。
+  assert.deepEqual(rebuilt.bindings, {
+    components: { "input-a": 5, "input-b": 6, "and-gate": 7, output: 8 },
+    connections: { "wire-a": 4, "wire-b": 5, "wire-output": 6 },
+    componentKinds: { "input-a": "input", "input-b": "input", "and-gate": "and", output: "output" },
+    ports: builtInPortsById({ "input-a": "input", "input-b": "input", "and-gate": "and", output: "output" }),
+  });
+  // 读数回到「刚加载完」的第 0 步基线：步数与波形历史随旧进程的时间线一并清空。
+  assert.equal(rebuilt.snapshot.engineState, "ready");
+  assert.equal(rebuilt.snapshot.simulationStep, 0);
+  assert.deepEqual(rebuilt.snapshot.waveform, []);
+  assert.equal(rebuilt.snapshot.signals["and-gate:out"], "1");
+  // 输入值按编辑器 ID 重新提交到新身份上。
+  assert.deepEqual(
+    engine.calls.filter((call) => call.type === "setInput"),
+    [
+      { type: "setInput", componentId: 5, value: "1" },
+      { type: "setInput", componentId: 6, value: "1" },
+    ],
+  );
+  assert.deepEqual(
+    engine.calls.map((call) => call.type),
+    [
+      "addComponent",
+      "addComponent",
+      "addComponent",
+      "addComponent",
+      "addConnection",
+      "addConnection",
+      "addConnection",
+      "setInput",
+      "setInput",
+      "settle",
+      "getSignal",
+      "getSignal",
+    ],
+  );
+});
+
+test("a rebuild stops continuous running and returns to the stopped step-zero baseline", async () => {
+  const engine = new RestartableEngine();
+  const scheduler = new FakeScheduler();
+  const workspace = createWorkspace(engine, { scheduler });
+  await workspace.checkEngine();
+  await workspace.loadCircuit(clockDocument());
+  await workspace.start();
+  scheduler.fire();
+  await drain();
+  assert.equal(workspace.snapshot().simulationState, "running");
+
+  engine.kill();
+  scheduler.fire();
+  await drain();
+  // 推进失败自暂停是既有语义；此时恢复引擎并重建。
+  assert.equal(workspace.snapshot().simulationState, "paused");
+
+  await workspace.checkEngine();
+  const rebuilt = await workspace.rebuildCircuit(clockDocument());
+
+  // 旧进程的时间线不可复现：连续运行停回 stopped，步数归零，从第 0 步重新开始。
+  assert.equal(rebuilt.snapshot.simulationState, "stopped");
+  assert.equal(rebuilt.snapshot.simulationStep, 0);
+  assert.equal(rebuilt.snapshot.canStart, true);
+  assert.equal(scheduler.pendingCount(), 0);
+});
+
+test("the workspace binding recovers from an engine restart and keeps the undo history", async () => {
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const engine = new RestartableEngine();
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { circuitPlatform: engine },
+  });
+
+  try {
+    const binding = useWorkspace();
+    await binding.bootstrap();
+    assert.equal(binding.state.value.engineState, "ready");
+    // 造一条可撤销的结构历史：删除输入 A（deleteComponent 没有返回值，用撤销能力断言）。
+    await binding.deleteComponent("input-a");
+    assert.equal(binding.editorState.value?.canUndo, true);
+    engine.calls.length = 0;
+
+    engine.kill();
+    await binding.step();
+    await drain();
+
+    const state = binding.state.value;
+    // 恢复完成：引擎回到 ready，重建走整份文档推送（3 个元件 + 2 条连线），没有错误刷屏。
+    assert.equal(state.engineState, "ready");
+    assert.equal(state.operationError, null);
+    assert.equal(state.simulationStep, 0);
+    // 输入值按编辑器 ID 重新提交：input-a 已删除，它的值不再出现。
+    assert.deepEqual(state.inputValues, { "input-b": "1" });
+    const addCalls = engine.calls.filter((call) => call.type === "addComponent");
+    assert.deepEqual(addCalls.map((call) => call.kind), ["input", "and", "output"]);
+
+    // 撤销历史保留且可用：撤销刚才的删除会用新引擎身份重建元件——撤销本身就是一次
+    // 结构事务，它成功同时证明结构冻结已解除。
+    assert.equal(binding.editorState.value?.canUndo, true);
+    await binding.undo();
+    assert.equal(
+      binding.editorState.value?.document.components.some((component) => component.id === "input-a"),
+      true,
+    );
+    assert.equal(binding.editorState.value?.canRedo, true);
+    assert.equal(engine.calls.filter((call) => call.type === "addComponent" && call.kind === "input").length, 2);
+  } finally {
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
+});
+
+test("a transport failure on a still-serving engine does not trigger a rebuild", async () => {
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const engine = new RestartableEngine();
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { circuitPlatform: engine },
+  });
+
+  try {
+    const binding = useWorkspace();
+    await binding.bootstrap();
+    engine.calls.length = 0;
+
+    // 一次性的传输层故障（超时），进程代号没变：引擎还在，电路也还在。
+    engine.failNextAddComponentWithTransportError = true;
+    assert.equal(await binding.addComponent("not", { x: 960, y: 96 }), false);
+    await drain();
+
+    // 恢复流程识别出同一个进程：只解除冻结，不把整份文档重复推送到还在服务的引擎上。
+    assert.equal(binding.state.value.engineState, "ready");
+    assert.deepEqual(engine.calls.filter((call) => call.type === "addComponent").length, 1);
+
+    // 冻结解除后结构操作照常可用。
+    assert.equal(await binding.addComponent("not", { x: 960, y: 96 }), true);
+  } finally {
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
+});
+
+test("a health check that observes a replaced process rebuilds even without a failed call", async () => {
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const engine = new RestartableEngine();
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { circuitPlatform: engine },
+  });
+
+  try {
+    const binding = useWorkspace();
+    await binding.bootstrap();
+    engine.calls.length = 0;
+
+    // 引擎在空闲时退出，没有任何调用观察到失败；用户手动检查引擎，健康检查拉起新进程。
+    engine.kill();
+    await binding.checkEngine();
+    await drain();
+
+    // 进程代号变了就是重建的充分证据：不能让旧绑定自以为在线地留在新进程上。
+    assert.equal(binding.state.value.engineState, "ready");
+    assert.deepEqual(
+      engine.calls.filter((call) => call.type === "addComponent").map((call) => call.kind),
+      ["input", "input", "and", "output"],
+    );
+    assert.equal(binding.state.value.hasCircuit, true);
+    assert.equal(binding.editorState.value?.document.components.length, 4);
   } finally {
     if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
     else Reflect.deleteProperty(globalThis, "window");

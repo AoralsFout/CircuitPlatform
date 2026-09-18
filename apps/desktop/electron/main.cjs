@@ -13,10 +13,21 @@ function getEnginePath() {
 const engineClient = new EngineClient(getEnginePath());
 
 // 健康检查复用正式长连接，确保检查成功后下一次业务请求不会重新启动进程。
+// 它同时是进程死亡后的唯一恢复入口：restart() 清除死亡记录后，下一次请求才会重新拉起进程；
+// 业务请求在死亡记录清除前一律失败，不会悄悄换一个空电路的新进程。
 async function checkEngineHealth() {
+  engineClient.restart();
   try {
     const response = await engineClient.request({ type: "health_check" });
-    if (response.type === "health_check_result") return response;
+    if (response.type === "health_check_result") {
+      return {
+        status: "ok",
+        engine: response.engine,
+        // 进程代号让渲染层能判断「进程是否真的换过」：换过才需要按文档重建，没换过（例如
+        // 一次请求超时误伤）只解除冻结，避免把同一份电路重复推送到还在服务的进程上。
+        processEpoch: engineClient.epoch,
+      };
+    }
     return { status: "error", message: response.message || "C++ 引擎返回了错误" };
   } catch (error) {
     return {

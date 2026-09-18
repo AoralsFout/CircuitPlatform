@@ -5,6 +5,7 @@ import {
   createAndDemoDocument,
   createEditorSession,
   type CircuitEnginePort,
+  type EditorBindings,
   type EngineConnectionId,
   type EngineResult,
 } from "../src/editor/index.ts";
@@ -1048,4 +1049,70 @@ test("failed duplication preserves the source selection and does not create hist
   assert.deepEqual(result.snapshot.selection, { kind: "component", id: "and-gate" });
   assert.equal(result.snapshot.canUndo, false);
   assert.equal(result.snapshot.document.components.length, 4);
+});
+
+test("adopting rebuilt bindings keeps undo history and re-points it at the new engine identity", async () => {
+  const engine = new FakeEngine();
+  const publishedBindings: EditorBindings[] = [];
+  const session = createEditorSession({
+    document: createAndDemoDocument(),
+    bindings: {
+      components: { "input-a": 1, "input-b": 2, "and-gate": 3, output: 4 },
+      connections: { "wire-a": 10, "wire-b": 11, "wire-output": 12 },
+    },
+  }, engine, { onBindingsChanged: (bindings) => publishedBindings.push(bindings) });
+
+  const added = await session.dispatch({ type: "add-component", kind: "not", position: { x: 16, y: 16 } });
+  assert.equal(added.ok, true);
+  assert.equal(session.snapshot().canUndo, true);
+  const publishedBeforeAdoption = publishedBindings.length;
+
+  // 引擎重启后的新绑定：身份映射整体替换，端口清单以引擎回传为权威。
+  session.adoptBindings({
+    components: { "input-a": 41, "input-b": 42, "and-gate": 43, output: 44, "component-1": 45 },
+    connections: { "wire-a": 51, "wire-b": 52, "wire-output": 53 },
+    ports: { "input-a": [{ name: "out", direction: "output", width: 4 }] },
+  });
+
+  // 撤销/重做历史原样保留；adoptBindings 不把新绑定喂回工作区（那是重建路径已完成的事）。
+  assert.equal(session.snapshot().canUndo, true);
+  assert.equal(session.snapshot().canRedo, false);
+  assert.equal(publishedBindings.length, publishedBeforeAdoption);
+  const inputA = session.snapshot().document.components.find((component) => component.id === "input-a");
+  assert.equal(inputA?.ports?.[0]?.width, 4);
+
+  // 撤销对准新引擎身份：移除的是新进程里的 45，而不是旧进程里的 100。
+  const undone = await session.dispatch({ type: "undo" });
+  assert.equal(undone.ok, true);
+  assert.deepEqual(engine.calls, ["addComponent:not", "removeComponent:45"]);
+  // 重做同样对准新身份。
+  const redone = await session.dispatch({ type: "redo" });
+  assert.equal(redone.ok, true);
+  assert.deepEqual(engine.calls, ["addComponent:not", "removeComponent:45", "addComponent:not"]);
+});
+
+test("adopted bindings survive a delete-undo that rebuilds the component on the new engine", async () => {
+  const engine = new FakeEngine();
+  const session = createEditorSession({
+    document: createAndDemoDocument(),
+    bindings: {
+      components: { "input-a": 1, "input-b": 2, "and-gate": 3, output: 4 },
+      connections: { "wire-a": 10, "wire-b": 11, "wire-output": 12 },
+    },
+  }, engine);
+
+  const deleted = await session.dispatch({ type: "delete-component", componentId: "input-a" });
+  assert.equal(deleted.ok, true);
+
+  // 重建后的绑定：input-a 已不在文档里，其余元件全部换上新进程的身份。
+  session.adoptBindings({
+    components: { "input-b": 42, "and-gate": 43, output: 44 },
+    connections: { "wire-b": 52, "wire-output": 53 },
+  });
+
+  const undone = await session.dispatch({ type: "undo" });
+  assert.equal(undone.ok, true);
+  assert.equal(undone.snapshot.document.components.some((component) => component.id === "input-a"), true);
+  // 撤销删除用新引擎身份重建元件与连线；旧进程的悬空连接 10 已不存在，属于容忍的既有限制。
+  assert.deepEqual(undone.snapshot.error, null);
 });
