@@ -197,6 +197,20 @@ private:
     bool setOutputSignal(const PortId& portId, SignalValue value);
     [[nodiscard]] SignalValue outputSignal(const PortId& portId) const;
 
+    /**
+     * 求值一个拆线器：每条分支输出取宿主输入在它位区间上的那些位。
+     * @param component 要求值的拆线器。
+     * @return 任一分支输出发生变化时返回 true。
+     */
+    bool settleSplitter(const Component& component);
+
+    /**
+     * 求值一个合线器：宿主输出按每条分支输入声明的位区间拼出来。
+     * @param component 要求值的合线器。
+     * @return 宿主输出发生变化时返回 true。
+     */
+    bool settleMerger(const Component& component);
+
     /** 按当前 Circuit 重建输出信号表，并把每个输出端口置为该元件类型的初值。 */
     void initializeOutputSignals();
 

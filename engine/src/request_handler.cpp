@@ -25,6 +25,8 @@ std::optional<ComponentKind> componentKindFromName(std::string_view name) {
     if (name == "not") return ComponentKind::NotGate;
     if (name == "clock") return ComponentKind::Clock;
     if (name == "d_flip_flop") return ComponentKind::DFlipFlop;
+    if (name == "splitter") return ComponentKind::Splitter;
+    if (name == "merger") return ComponentKind::Merger;
     return std::nullopt;
 }
 
@@ -138,6 +140,41 @@ PortListResult portListFromSpecs(const std::vector<protocol::PortSpec>& specs) {
     return {std::move(ports), "", ""};
 }
 
+/** 端口清单的领域校验结果，翻译成可展示的协议错误；合法时 `error` 为假。 */
+struct PortListProblem {
+    bool error{false};
+    std::string code;
+    std::string message;
+};
+
+/**
+ * 用拆线器与合线器的覆盖规则整体校验一份端口清单，并把领域错误翻译成协议错误。
+ *
+ * 越界、重叠、漏位三者共用错误码 `invalid_bit_range`，文案各不相同：用户需要知道是写超了、
+ * 压住了别人、还是漏了几位，而调用方只需要按一个码判断「这份清单不能用」。其余元件类型不走
+ * 这条规则——它们的端口形状不是数据驱动的。
+ * @param kind 清单所属的元件类型。
+ * @param ports 翻译后的完整端口清单。
+ * @return 合法时返回 `error == false` 的结果，否则返回错误码与文案。
+ */
+PortListProblem portListProblem(ComponentKind kind, const std::vector<Port>& ports) {
+    switch (validatePortList(kind, ports)) {
+    case PortListError::None:
+        return {};
+    case PortListError::Malformed:
+        return {true, "bad_request",
+                "端口清单必须是一条不带位区间的宿主总线端口，加若干条方向相反的位区间分支"};
+    case PortListError::OutOfRange:
+        return {true, "invalid_bit_range", "位区间越出了宿主总线的位范围"};
+    case PortListError::Overlap:
+        return {true, "invalid_bit_range", "位区间不能互相重叠"};
+    case PortListError::Incomplete:
+        return {true, "invalid_bit_range", "位区间必须完整覆盖宿主总线的每一位，不能漏位"};
+    }
+
+    return {};
+}
+
 // 端口清单的出协议形状与 `component_added` / `port_width_set` 共用一份，避免两处漂移。
 std::string portListToJson(const std::vector<Port>& ports) {
     std::string result = "[";
@@ -218,6 +255,12 @@ std::string handleRequest(
         // 前端对内置类型不自己写一份清单再发过来——那正好重建了本变更要消灭的第二份定义。
         ComponentId id{};
         if (!request.ports.present) {
+            // 拆线器与合线器没有内置定义：总线多宽、分成几条分支、每条覆盖哪几位，全部由清单
+            // 决定，省略清单就无从建立。内置类型相反——省略清单正是「引擎回退到内置定义」，
+            // 因此这里只为这两个数据驱动的类型要求清单。
+            if (*kind == ComponentKind::Splitter || *kind == ComponentKind::Merger) {
+                return missingField(request, "ports");
+            }
             id = circuit.addComponent(*kind);
         } else {
             if (!request.ports.wellFormed) {
@@ -227,6 +270,12 @@ std::string handleRequest(
             const auto ports = portListFromSpecs(request.ports.ports);
             if (!ports.ports.has_value()) {
                 return protocol::errorResponse(request.requestId, ports.code, ports.message);
+            }
+            // 逐条端口的规则之上还有一条整体规则：位区间要盖满宿主总线且互不重叠。清单不成立
+            // 时元件根本没有被建立，因此不会留下一个半分好的拆线器。
+            const auto problem = portListProblem(*kind, *ports.ports);
+            if (problem.error) {
+                return protocol::errorResponse(request.requestId, problem.code, problem.message);
             }
             id = circuit.addComponent(*kind, *ports.ports);
         }
@@ -248,6 +297,16 @@ std::string handleRequest(
         const auto ports = portListFromSpecs(request.ports.ports);
         if (!ports.ports.has_value()) {
             return protocol::errorResponse(request.requestId, ports.code, ports.message);
+        }
+
+        // 覆盖规则按元件当前的类型判定，因此要先把类型读出来。这一步在写之前：一份不成立的
+        // 清单不会落在任何元件上，改位区间因此是一次要么整体成立、要么什么都没发生的提交。
+        const auto component = circuit.component(*request.componentId);
+        if (component.has_value()) {
+            const auto problem = portListProblem(component->kind, *ports.ports);
+            if (problem.error) {
+                return protocol::errorResponse(request.requestId, problem.code, problem.message);
+            }
         }
 
         // 回传的是一份差分：本次改宽**造成**的悬空连接，即改宽前不悬空、改宽后悬空的那些。

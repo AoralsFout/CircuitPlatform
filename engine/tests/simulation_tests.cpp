@@ -930,6 +930,122 @@ void carries_a_multi_bit_value_through_a_wide_connection() {
     assert(*received == circuit::SignalValue::fromBits("10X10010"));
 }
 
+// 拆线器按位区间取位：某一位未知只污染拿到这一位的那条分支，其余分支照常是确定值。
+void splits_a_host_bus_into_bit_ranges() {
+    circuit::Circuit circuit;
+    const auto inputId = circuit.addComponent(
+        circuit::ComponentKind::Input,
+        {{"out", circuit::PortDirection::Output, 8, std::nullopt}});
+    const auto splitterId = circuit.addComponent(
+        circuit::ComponentKind::Splitter,
+        {{"in", circuit::PortDirection::Input, 8, std::nullopt},
+         {"out0", circuit::PortDirection::Output, 4, circuit::PortBitRange{7, 4}},
+         {"out1", circuit::PortDirection::Output, 4, circuit::PortBitRange{3, 0}}});
+
+    assert(circuit.addConnection({inputId, "out"}, {splitterId, "in"}).succeeded());
+
+    circuit::Simulation simulation(circuit);
+    // 第 4 位是 X：它落在 out0（[7:4]）里，out1（[3:0]）因此一位都没被污染。
+    assert(simulation.setInput(inputId, circuit::SignalValue::fromBits("10X10010")));
+    assert(simulation.settle().succeeded());
+
+    assert(simulation.signal({splitterId, "out0"}) == circuit::SignalValue::fromBits("10X1"));
+    assert(simulation.signal({splitterId, "out1"}) == circuit::SignalValue::fromBits("0010"));
+}
+
+// 合线器反向搬运：每条分支的值回到它声明的位区间上，没有分支驱动的位保持未知。
+void merges_branch_inputs_back_onto_the_host_bus() {
+    circuit::Circuit circuit;
+    const auto highId = circuit.addComponent(
+        circuit::ComponentKind::Input,
+        {{"out", circuit::PortDirection::Output, 6, std::nullopt}});
+    const auto lowId = circuit.addComponent(
+        circuit::ComponentKind::Input,
+        {{"out", circuit::PortDirection::Output, 2, std::nullopt}});
+    const auto mergerId = circuit.addComponent(
+        circuit::ComponentKind::Merger,
+        {{"in0", circuit::PortDirection::Input, 6, circuit::PortBitRange{7, 2}},
+         {"in1", circuit::PortDirection::Input, 2, circuit::PortBitRange{1, 0}},
+         {"out", circuit::PortDirection::Output, 8, std::nullopt}});
+    const auto outputId = circuit.addComponent(
+        circuit::ComponentKind::Output,
+        {{"in", circuit::PortDirection::Input, 8, std::nullopt}});
+
+    assert(circuit.addConnection({highId, "out"}, {mergerId, "in0"}).succeeded());
+    assert(circuit.addConnection({lowId, "out"}, {mergerId, "in1"}).succeeded());
+    assert(circuit.addConnection({mergerId, "out"}, {outputId, "in"}).succeeded());
+
+    circuit::Simulation simulation(circuit);
+    assert(simulation.setInput(highId, circuit::SignalValue::fromBits("10X100")));
+    assert(simulation.setInput(lowId, circuit::SignalValue::fromBits("00")));
+    assert(simulation.settle().succeeded());
+
+    assert(simulation.signal({mergerId, "out"}) == circuit::SignalValue::fromBits("10X10000"));
+    assert(simulation.signal({outputId, "in"}) == circuit::SignalValue::fromBits("10X10000"));
+}
+
+// 没有连接的分支不提供来源：它覆盖的那些位是 X，其余位照常由别的分支决定。
+void leaves_the_bits_of_unconnected_branches_unknown() {
+    circuit::Circuit circuit;
+    const auto highId = circuit.addComponent(
+        circuit::ComponentKind::Input,
+        {{"out", circuit::PortDirection::Output, 4, std::nullopt}});
+    const auto mergerId = circuit.addComponent(
+        circuit::ComponentKind::Merger,
+        {{"in0", circuit::PortDirection::Input, 4, circuit::PortBitRange{7, 4}},
+         {"in1", circuit::PortDirection::Input, 4, circuit::PortBitRange{3, 0}},
+         {"out", circuit::PortDirection::Output, 8, std::nullopt}});
+
+    assert(circuit.addConnection({highId, "out"}, {mergerId, "in0"}).succeeded());
+
+    circuit::Simulation simulation(circuit);
+    assert(simulation.setInput(highId, circuit::SignalValue::fromBits("1010")));
+    assert(simulation.settle().succeeded());
+
+    assert(simulation.signal({mergerId, "out"}) == circuit::SignalValue::fromBits("1010XXXX"));
+}
+
+// 逐位拆开再合回来是同一个值：默认的八条 1 位分支走完一个来回不丢位、不错位。
+void round_trips_a_bus_through_a_splitter_and_a_merger() {
+    circuit::Circuit circuit;
+    const auto inputId = circuit.addComponent(
+        circuit::ComponentKind::Input,
+        {{"out", circuit::PortDirection::Output, 8, std::nullopt}});
+    const auto outputId = circuit.addComponent(
+        circuit::ComponentKind::Output,
+        {{"in", circuit::PortDirection::Input, 8, std::nullopt}});
+
+    // 默认配置：8 位宿主总线拆成八条 1 位分支，分支从最高位开始编号。
+    std::vector<circuit::Port> splitterPorts{{"in", circuit::PortDirection::Input, 8, std::nullopt}};
+    std::vector<circuit::Port> mergerPorts{{"out", circuit::PortDirection::Output, 8, std::nullopt}};
+    for (std::uint32_t index = 0; index < 8; ++index) {
+        const auto bit = 7 - index;
+        splitterPorts.push_back({"out" + std::to_string(index), circuit::PortDirection::Output, 1,
+                                 circuit::PortBitRange{bit, bit}});
+        mergerPorts.insert(mergerPorts.begin(),
+                           {"in" + std::to_string(index), circuit::PortDirection::Input, 1,
+                            circuit::PortBitRange{bit, bit}});
+    }
+
+    const auto splitterId =
+        circuit.addComponent(circuit::ComponentKind::Splitter, std::move(splitterPorts));
+    const auto mergerId = circuit.addComponent(circuit::ComponentKind::Merger, std::move(mergerPorts));
+
+    assert(circuit.addConnection({inputId, "out"}, {splitterId, "in"}).succeeded());
+    for (std::uint32_t index = 0; index < 8; ++index) {
+        assert(circuit.addConnection({splitterId, "out" + std::to_string(index)},
+                                     {mergerId, "in" + std::to_string(index)})
+                   .succeeded());
+    }
+    assert(circuit.addConnection({mergerId, "out"}, {outputId, "in"}).succeeded());
+
+    circuit::Simulation simulation(circuit);
+    assert(simulation.setInput(inputId, circuit::SignalValue::fromBits("10X10010")));
+    assert(simulation.settle().succeeded());
+
+    assert(simulation.signal({outputId, "in"}) == circuit::SignalValue::fromBits("10X10010"));
+}
+
 // 位宽不再匹配的连接与悬空连接是同一种表达：不参与仿真，接收端读到的是全 X。
 void skips_a_connection_whose_ends_no_longer_share_a_width() {
     circuit::Circuit circuit;
@@ -1064,6 +1180,10 @@ int main() {
     settles_a_multi_bit_not_chain();
     rejects_a_combinational_feedback_loop();
     carries_a_multi_bit_value_through_a_wide_connection();
+    splits_a_host_bus_into_bit_ranges();
+    merges_branch_inputs_back_onto_the_host_bus();
+    leaves_the_bits_of_unconnected_branches_unknown();
+    round_trips_a_bus_through_a_splitter_and_a_merger();
     skips_a_connection_whose_ends_no_longer_share_a_width();
     rebuilds_a_widened_port_as_unknown_of_the_new_width();
     keeps_the_value_of_ports_whose_width_did_not_change();
