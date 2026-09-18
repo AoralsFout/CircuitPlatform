@@ -303,7 +303,17 @@ test("toggles an input, runs the circuit, and appends a waveform point", async (
   assert.equal(state.inputB, "1");
   assert.equal(state.outputValue, "0");
   // 切换输入是用户发起的一次推进：它是波形历史里的第一个点，也是第 1 步。
-  assert.deepEqual(state.waveform, [{ step: 1, a: "0", b: "1", output: "0" }]);
+  // 记录按 `${editorComponentId}:${portId}` 索引，因此一条点里是电路里**全部**可读信号——
+  // 两个 Input 的驱动值、逻辑门的输出、Output 的接收端，而不是写死的三行。
+  assert.deepEqual(state.waveform, [{
+    step: 1,
+    signals: {
+      "input-a:out": "0",
+      "input-b:out": "1",
+      "and-gate:out": "0",
+      "output:in": "0",
+    },
+  }]);
   assert.equal(state.simulationStep, 1);
 });
 
@@ -386,6 +396,38 @@ test("drives a widened Input with a value matching its declared width", async ()
   // 画布读数同样是逐位文本，长度等于端口位宽。
   assert.equal(state.signals["input:out"], "1111");
   assert.equal(state.signals["result:in"], "1111");
+});
+
+/**
+ * 波形记录的是这一拍**全部**可读信号，而不是写死的三行；多位值原样保留逐位文本，
+ * 因此每一位都读得出来（`1111` 而不是整条未知或单个数字）。
+ */
+test("records every Input and every Output, with a widened signal kept as binary text", async () => {
+  const engine = new FakeEngine();
+  const workspace = createWorkspace(engine);
+  await workspace.checkEngine();
+
+  const widePorts = [{ name: "out", direction: "output" as const, width: 4 }];
+  const wideSink = [{ name: "in", direction: "input" as const, width: 4 }];
+  const document: EditorDocument = {
+    components: [
+      { id: "operand", kind: "input", displayName: "操作数", position: { x: 0, y: 0 }, lifecycle: "active", ports: widePorts },
+      { id: "direct", kind: "output", displayName: "直连输出", position: { x: 400, y: 0 }, lifecycle: "active", ports: wideSink },
+      { id: "second", kind: "output", displayName: "第二个输出", position: { x: 400, y: 200 }, lifecycle: "active", ports: wideSink },
+    ],
+    connections: [
+      { id: "wire-direct", source: { componentId: "operand", port: "out", point: { x: 100, y: 50 } }, target: { componentId: "direct", port: "in", point: { x: 400, y: 50 } }, lifecycle: "visible", danglingEndpoints: [] },
+      { id: "wire-second", source: { componentId: "operand", port: "out", point: { x: 100, y: 50 } }, target: { componentId: "second", port: "in", point: { x: 400, y: 250 } }, lifecycle: "visible", danglingEndpoints: [] },
+    ],
+  };
+
+  await workspace.loadCircuit(document);
+  const point = (await workspace.step()).waveform.at(-1);
+
+  assert.deepEqual(point, {
+    step: 1,
+    signals: { "operand:out": "1111", "direct:in": "1111", "second:in": "1111" },
+  });
 });
 
 test("reads every Output component's own signal instead of reusing the first one", async () => {
@@ -503,7 +545,8 @@ test("records the advanced reading in the waveform instead of the previous settl
   // Output 元件的接收端由同一次推进的快照带回，因此兼容标量与波形记录的都是这一拍的读数。
   assert.equal(advanced.outputValue, "1");
   assert.equal(advanced.signals["monitor:in"], "1");
-  assert.equal(advanced.waveform.at(-1)?.output, "1");
+  assert.equal(advanced.waveform.at(-1)?.signals["monitor:in"], "1");
+  assert.equal(advanced.waveform.at(-1)?.signals["clock:out"], "1");
 });
 
 test("starts, pauses, and resumes continuous running without losing accumulated steps", async () => {
