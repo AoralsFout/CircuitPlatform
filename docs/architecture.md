@@ -53,7 +53,7 @@ Subcircuit 是 Project 与编辑器层的概念，在进入引擎之前就已经
 
 ## 当前 Circuit 接口
 
-本节与下一节记录的是当前实现状态，不描述后续阶段的接口。Phase 4.5 已落地的是 `Port` 的位宽与位区间、逐位多位的 `SignalValue`、`addConnection` 的位宽校验、`addComponent` 的端口清单、`setComponentPorts` 以及端口清单作为位宽唯一权威来源的规则（[ADR 0015](decisions/0015-width-as-port-attribute.md)、[ADR 0016](decisions/0016-strict-port-width.md)、[ADR 0020](decisions/0020-port-list-is-the-only-authority.md)）；拆线器与合线器仍属后续切片。
+本节与下一节记录的是当前实现状态，不描述后续阶段的接口。Phase 4.5 已落地的是 `Port` 的位宽与位区间、逐位多位的 `SignalValue`、`addConnection` 的位宽校验、`addComponent` 的端口清单、`setComponentPorts` 以及端口清单作为位宽唯一权威来源的规则（[ADR 0015](decisions/0015-width-as-port-attribute.md)、[ADR 0016](decisions/0016-strict-port-width.md)、[ADR 0020](decisions/0020-port-list-is-the-only-authority.md)）；拆线器与合线器同样已落地（[ADR 0017](decisions/0017-paired-splitter-and-merger.md)）。
 
 当前 C++ 领域模块提供以下操作：
 
@@ -87,7 +87,7 @@ Subcircuit 是 Project 与编辑器层的概念，在进入引擎之前就已经
 
 端口读不到值（未连接输入、来源已失效、两端位宽不再相同）时，返回的是**按该端口自己声明的位宽**构造的全 `X`，而不是一个长度对不上的值。
 
-当前切片实现 `Input`、`NotGate`、`AndGate`、`OrGate`、`NandGate`、`NorGate`、`XorGate`、`XnorGate`、`Output`、`Clock` 和 `DFlipFlop` 的行为，并能报告组合逻辑环路。`Clock` 的输出初值是 `0`（`0 → 1` 才算上升沿，从 `X` 起步会永远判不出第一次上升沿），每推进一次在「整值全 `0`」与「整值全 `1`」之间翻转一次，长度等于端口位宽；`DFlipFlop` 的 `q` 初值是 `X`，只在 `clock` 端口出现 `0 → 1` 时把 `d` 采样进 `q`，下降沿与任何一端是 `X` 的跳变都不采样；其余元件的输出初值仍是整值全 `X`。判上升沿所比较的前值跨 tick 保留，因此时钟来自 Input 元件或组合逻辑时同样成立；`reset` 会把它连同其余运行时状态一起清空，重置后的第一次推进因此与刚创建时完全一致。未连接输入的值为该端口位宽的全 `X`；不存在的端口返回空值。更丰富的通用仿真错误将在后续切片中加入。
+当前切片实现 `Input`、`NotGate`、`AndGate`、`OrGate`、`NandGate`、`NorGate`、`XorGate`、`XnorGate`、`Output`、`Clock`、`DFlipFlop`、`Splitter` 和 `Merger` 的行为，并能报告组合逻辑环路。`Clock` 的输出初值是 `0`（`0 → 1` 才算上升沿，从 `X` 起步会永远判不出第一次上升沿），每推进一次在「整值全 `0`」与「整值全 `1`」之间翻转一次，长度等于端口位宽；`DFlipFlop` 的 `q` 初值是 `X`，只在 `clock` 端口出现 `0 → 1` 时把 `d` 采样进 `q`，下降沿与任何一端是 `X` 的跳变都不采样；其余元件的输出初值仍是整值全 `X`。判上升沿所比较的前值跨 tick 保留，因此时钟来自 Input 元件或组合逻辑时同样成立；`reset` 会把它连同其余运行时状态一起清空，重置后的第一次推进因此与刚创建时完全一致。未连接输入的值为该端口位宽的全 `X`；不存在的端口返回空值。更丰富的通用仿真错误将在后续切片中加入。
 
 结构变更与清空状态是两件独立的事：结构变更按元件身份保留已积累的运行时状态（见 `reconcile`），而把整个仿真恢复成刚创建时的样子——全部输出回到初始值、`Clock` 回到 `0`、每个 `DFlipFlop` 的 `q` 回到 `X`、步数归零——是一条独立的 `reset` 请求。取舍与已知限制见 [ADR 0019](decisions/0019-tick-driven-by-protocol-and-state-kept-by-identity.md)；[ADR 0004](decisions/0004-json-lines-engine-session.md) 中「结构变化后重建 `Simulation` 快照」的第一版规则已由它修订。
 

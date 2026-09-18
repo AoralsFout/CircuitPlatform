@@ -42,4 +42,5 @@ Phase 4.5 让 Port 携带位宽后，一条 N 位输出接到 M 位输入时必�
 - 检查器需要支持编辑 Input / Output 元件的位宽，这是 ADR 0014 所说的「第一版不引入没有实际用例的可编辑属性」的第一个真实例外；
 - 位宽的创建后修改需要一条新的协议请求（规划中取 `set_port_width`，等价形式亦可），保留 Component 与 Connection 的引擎身份，改宽后不再匹配的 Connection 转为 DanglingConnection，沿用 ADR 0003；
 - `component_added` 回传该 Component 实际的端口清单，因此前端不再需要内置一份端口定义，`ComponentDefinitionRegistry` 只保留展示元数据；
-- 协议、前端类型和 `docs/protocol.md` 必须同步更新，`isSignal` 的规则变为「只含 `0`/`1`/`X` 的非空字符串」。
+- 协议、前端类型和 `docs/protocol.md` 必须同步更新，`isSignal` 的规则变为「只含 `0`/`1`/`X` 的非空字符串」；
+- 落地记录：本决策由 [ADR 0020](0020-port-list-is-the-only-authority.md) 在 Phase 4.5 落地——`add_connection` 在两端位宽不同时拒绝连接并报 `width_mismatch`，不做零扩展、符号扩展或截断；端口清单成为位宽的唯一权威来源，前端不再持有任何端口定义，`ComponentDefinitionRegistry` 只保留展示元数据。上面「后续变更」一节所说的「前端 `ComponentDefinitionRegistry` 与引擎 `portsFor` 仍是两份互不校验的端口定义」至此结束。
