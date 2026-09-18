@@ -3,7 +3,7 @@ const test = require("node:test");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { writeTextFileAtomically } = require("../electron/project-file-io.cjs");
+const { writeTextFileAtomically, readTextFile } = require("../electron/project-file-io.cjs");
 
 /** 建一个用完即删的临时目录，真实文件系统上验证原子替换语义。 */
 function makeTempDirectory() {
@@ -79,6 +79,37 @@ test("a failed rename cleans the temporary file and keeps the previous target", 
     assert.equal(fs.readFileSync(target, "utf8"), "旧内容");
     assert.deepEqual(fs.readdirSync(directory), ["demo.circuit.json"]);
     assert.equal(tempPaths.length, 1);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("reads the exact content back from an existing file", () => {
+  const directory = makeTempDirectory();
+  try {
+    const target = path.join(directory, "demo.circuit.json");
+    fs.writeFileSync(target, JSON.stringify({ version: 1 }), "utf8");
+    assert.equal(readTextFile(fs, target), JSON.stringify({ version: 1 }));
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("strips a leading UTF-8 BOM so editors that write one still open", () => {
+  const directory = makeTempDirectory();
+  try {
+    const target = path.join(directory, "demo.circuit.json");
+    fs.writeFileSync(target, "﻿" + JSON.stringify({ version: 1 }), "utf8");
+    assert.equal(readTextFile(fs, target), JSON.stringify({ version: 1 }));
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a missing file fails with a displayable reason instead of an ENOENT stack text", () => {
+  const directory = makeTempDirectory();
+  try {
+    assert.throws(() => readTextFile(fs, path.join(directory, "missing.circuit.json")), /项目文件不存在/);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

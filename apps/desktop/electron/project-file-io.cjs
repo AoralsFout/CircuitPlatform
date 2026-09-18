@@ -39,4 +39,22 @@ function writeTextFileAtomically(fsModule, targetPath, content) {
   }
 }
 
-module.exports = { writeTextFileAtomically };
+/**
+ * 读取 UTF-8 文本文件的内容。
+ * 存在性先单独检查：让「文件不存在」成为一句可展示的原因，而不是 Node 的 ENOENT 堆栈文案。
+ * @param {Pick<typeof fs, "existsSync" | "readFileSync">} fsModule 文件系统模块；
+ *   测试注入假实现即可验证失败路径，生产调用方省略。
+ * @param {string} filePath 要读取的文件路径。
+ * @returns {string} 文件的 UTF-8 文本；开头的 UTF-8 BOM 已剥掉——Windows 记事本等编辑器
+ *   保存的文件可能带 BOM，而 JSON.parse 不认它，剥掉后这类文件照常打开。
+ * @throws {Error} 文件不存在或读取失败时抛出；message 可直接展示给用户。
+ */
+function readTextFile(fsModule, filePath) {
+  if (!fsModule.existsSync(filePath)) {
+    throw new Error("项目文件不存在。");
+  }
+  const content = fsModule.readFileSync(filePath, "utf8");
+  return content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+}
+
+module.exports = { writeTextFileAtomically, readTextFile };

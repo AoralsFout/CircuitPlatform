@@ -2,6 +2,7 @@ import type { ComponentKindName, PortSpec, Signal } from "@circuit-platform/prot
 import type {
   EditorComponent,
   EditorConnection,
+  EditorDocument,
   EditorEndpointSide,
   EditorSnapshot,
   Point,
@@ -505,13 +506,14 @@ function defaultPortSignal(component: EditorComponent, port: PortSpec): Signal {
  *
  * 已连接端点的几何必须由当前元件位置与端口偏移推导，不能沿用持久化的端点坐标；而偏移来自
  * 展示定义按端口名登记的布局，或通用排布规则。端口不在清单里时返回空值，调用方据此保留
- * 冻结的端点位置。
+ * 冻结的端点位置。打开路径的端点几何重建（`rebuildLoadedDocumentGeometry`）与场景投影共用
+ * 这条推导，保证加载出的端点与画布渲染的端口是同一个位置。
  * @param component 端点所属的编辑器元件。
  * @param definition 该元件的展示定义。
  * @param portName 要解析的引擎端口名。
  * @returns 该端口的展示布局；端口不在清单里时返回 undefined。
  */
-function portLayoutOf(
+export function portLayoutOf(
   component: EditorComponent,
   definition: ComponentDefinition,
   portName: string,
@@ -540,6 +542,57 @@ function routeBetween(start: Point, end: Point, waypoints: readonly Point[] = []
   return waypoints.length === 0
     ? createDefaultOrthogonalRoute(start, end)
     : routeFromWaypoints(start, end, waypoints);
+}
+
+/**
+ * 解析一条连接的已连接端点在画布上的世界坐标。
+ * @param endpoint 连接的一端。
+ * @param components 文档中的元件，按 ID 索引。
+ * @param registry 元件展示定义注册表。
+ * @returns 元件位置加端口偏移；元件或端口解析不到时原样返回端点自带坐标（防御性回退）。
+ */
+function connectedEndpointPoint(
+  endpoint: EditorConnection["source"],
+  components: ReadonlyMap<string, EditorComponent>,
+  registry: ComponentDefinitionRegistry,
+): Point {
+  const component = components.get(endpoint.componentId);
+  const definition = component ? registry.get(component.kind) : undefined;
+  const layout = component && definition ? portLayoutOf(component, definition, endpoint.port) : undefined;
+  if (!component || !layout) return { ...endpoint.point };
+  return { x: component.position.x + layout.offset.x, y: component.position.y + layout.offset.y };
+}
+
+/**
+ * 重建打开文档里全部连接的端点几何与渲染 Route。
+ *
+ * 项目文件里的端点 `point` 是占位零点（解析模块的既定契约）：必须等引擎回传权威端口清单、
+ * 每个元件都带上清单之后，用元件位置与端口几何重新推导端点；渲染 Route 由语义 Waypoint 推导，
+ * 没有 Waypoint 的连接回退到默认正交 Route——与场景投影对无 Route 连接的推导是同一条规则。
+ * 占位零点不能带进编辑器会话：移动元件时会把持久 point 当作端口偏移平移，画布几何从此错位。
+ * @param document 解析出的文档；元件必须已带引擎回传的端口清单。
+ * @param registry 元件展示定义注册表。
+ * @returns 端点与 Route 都是真实几何的新文档；原文档不被修改。
+ */
+export function rebuildLoadedDocumentGeometry(
+  document: EditorDocument,
+  registry: ComponentDefinitionRegistry,
+): EditorDocument {
+  const components = new Map(document.components.map((component) => [component.id, component]));
+  return {
+    components: document.components,
+    connections: document.connections.map((connection) => {
+      const source = connectedEndpointPoint(connection.source, components, registry);
+      const target = connectedEndpointPoint(connection.target, components, registry);
+      const waypoints = connection.waypoints ?? [];
+      return {
+        ...connection,
+        source: { ...connection.source, point: source },
+        target: { ...connection.target, point: target },
+        route: routeBetween(source, target, waypoints),
+      };
+    }),
+  };
 }
 
 function previewEndpoint(

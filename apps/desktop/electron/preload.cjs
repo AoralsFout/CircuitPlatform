@@ -16,4 +16,7 @@ contextBridge.exposeInMainWorld("circuitPlatform", {
   // 项目文件通道：保存对话框与原子写文件；序列化与校验留在渲染进程。
   pickSavePath: (options) => ipcRenderer.invoke("project:pick-save-path", options),
   writeProjectFile: (filePath, content) => ipcRenderer.invoke("project:write-file", filePath, content),
+  // 打开通道：打开对话框与读文件；解析与校验同样留在渲染进程。
+  pickOpenPath: () => ipcRenderer.invoke("project:pick-open-path"),
+  readProjectFile: (filePath) => ipcRenderer.invoke("project:read-file", filePath),
 });
