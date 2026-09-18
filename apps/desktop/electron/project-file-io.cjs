@@ -47,11 +47,13 @@ function writeTextFileAtomically(fsModule, targetPath, content) {
  * @param {string} filePath 要读取的文件路径。
  * @returns {string} 文件的 UTF-8 文本；开头的 UTF-8 BOM 已剥掉——Windows 记事本等编辑器
  *   保存的文件可能带 BOM，而 JSON.parse 不认它，剥掉后这类文件照常打开。
- * @throws {Error} 文件不存在或读取失败时抛出；message 可直接展示给用户。
+ * @throws {Error} 文件不存在或读取失败时抛出；message 可直接展示给用户，不存在时
+ *   另带 `code: "PROJECT_FILE_NOT_FOUND"`——渲染层靠它区分「文件没了」（例如把死条目
+ *   移出最近项目）与其它读取失败，不必解析展示文案。
  */
 function readTextFile(fsModule, filePath) {
   if (!fsModule.existsSync(filePath)) {
-    throw new Error("项目文件不存在。");
+    throw Object.assign(new Error("项目文件不存在。"), { code: "PROJECT_FILE_NOT_FOUND" });
   }
   const content = fsModule.readFileSync(filePath, "utf8");
   return content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;

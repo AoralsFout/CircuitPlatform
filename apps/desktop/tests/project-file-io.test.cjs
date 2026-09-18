@@ -114,3 +114,16 @@ test("a missing file fails with a displayable reason instead of an ENOENT stack 
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("a missing file failure carries the machine-readable not-found code for the renderer", () => {
+  const directory = makeTempDirectory();
+  try {
+    // 渲染层按这个 code 区分「文件没了」（例如把死条目移出最近项目）与其它读取失败。
+    assert.throws(
+      () => readTextFile(fs, path.join(directory, "missing.circuit.json")),
+      (error) => error.code === "PROJECT_FILE_NOT_FOUND" && /项目文件不存在/.test(error.message),
+    );
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

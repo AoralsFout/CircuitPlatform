@@ -4,7 +4,7 @@ import type { ComponentKindName, EngineResponse, PortSpec, Signal } from "@circu
 import { useWorkspace } from "../src/composables/useWorkspace.ts";
 import type { EngineAdapter } from "../src/workspace/index.ts";
 import { serializeProjectFile, type ProjectSerializationInput } from "../src/project-file/index.ts";
-import { readRecentProjects, type KeyValueStorage } from "../src/project-file/recent-projects.ts";
+import { RECENT_PROJECTS_STORAGE_KEY, readRecentProjects, type KeyValueStorage } from "../src/project-file/recent-projects.ts";
 import { portsForAddComponent } from "./fake-ports.ts";
 
 type Call =
@@ -96,9 +96,12 @@ class OpenFlowEngine implements EngineAdapter {
     return result ?? { ok: false, reason: "canceled" };
   }
 
-  async readProjectFile(filePath: string): Promise<{ ok: true; content: string } | { ok: false; reason: string }> {
+  async readProjectFile(filePath: string): Promise<{ ok: true; content: string } | { ok: false; reason: string; code?: string }> {
     const content = this.files.get(filePath);
-    if (content === undefined) return { ok: false, reason: "项目文件不存在。" };
+    if (content === undefined) {
+      // 与 electron/project-file-io.cjs 同一约定：文件不存在带回机器可读 code。
+      return { ok: false, reason: "项目文件不存在。", code: "PROJECT_FILE_NOT_FOUND" };
+    }
     return { ok: true, content };
   }
 
@@ -337,6 +340,98 @@ test("new on a clean document runs without confirmation", async () => {
     await binding.requestNew();
     assert.equal(binding.pendingFileAction.value, null, "干净文档不需要确认");
     assert.equal(binding.editorState.value?.document.components.length, 0);
+  } finally {
+    restore();
+  }
+});
+
+/** 预置两条最近项目：gone 指向已删除的文件，demo 仍然存在。 */
+function seedRecentProjects(storage: ReturnType<typeof memoryStorage>): void {
+  storage.setItem(RECENT_PROJECTS_STORAGE_KEY, JSON.stringify([
+    { path: "E:\\circuits\\gone.circuit.json", displayName: "gone.circuit.json", lastUsedAt: 20 },
+    { path: "E:\\circuits\\demo.circuit.json", displayName: "demo.circuit.json", lastUsedAt: 10 },
+  ]));
+}
+
+test("opening a dead recent entry explains why, prunes it and keeps the editor state", async () => {
+  const engine = new OpenFlowEngine();
+  const storage = memoryStorage();
+  seedRecentProjects(storage);
+  const { binding, restore } = await bootstrappedBinding(engine, storage);
+  try {
+    engine.files.set("E:\\circuits\\demo.circuit.json", simpleProjectFileText());
+
+    await binding.requestOpenRecent("E:\\circuits\\gone.circuit.json");
+
+    // 失败给出可展示原因，当前编辑器状态原样保留。
+    assert.equal(binding.openError.value, "项目文件不存在。");
+    assert.equal(binding.editorState.value?.document.components.length, 4);
+    assert.equal(binding.projectPath.value, null);
+    // 死条目已从界面列表与存储中移除，剩余条目保持最近在前的顺序。
+    assert.deepEqual(binding.recentProjects.value.map((item) => item.path), ["E:\\circuits\\demo.circuit.json"]);
+    assert.deepEqual(readRecentProjects(storage).map((item) => item.path), ["E:\\circuits\\demo.circuit.json"]);
+
+    // 剩余条目从同一入口打开成功：与对话框打开走同一条加载路径。
+    await binding.requestOpenRecent("E:\\circuits\\demo.circuit.json");
+    assert.equal(binding.openError.value, null);
+    assert.equal(binding.editorState.value?.document.components.length, 2);
+    assert.equal(binding.projectPath.value, "E:\\circuits\\demo.circuit.json");
+    // 成功打开刷新该条目的最近使用时间，位置保持在列表顶部。
+    assert.deepEqual(binding.recentProjects.value.map((item) => item.path), ["E:\\circuits\\demo.circuit.json"]);
+  } finally {
+    restore();
+  }
+});
+
+test("a failed open leaves the recent list exactly as it was", async () => {
+  const engine = new OpenFlowEngine();
+  const storage = memoryStorage();
+  seedRecentProjects(storage);
+  const { binding, restore } = await bootstrappedBinding(engine, storage);
+  try {
+    // demo 可读，future 版本过高被整体拒绝：两者都不许改动列表。
+    engine.files.set("E:\\circuits\\demo.circuit.json", simpleProjectFileText());
+    engine.files.set("E:\\circuits\\future.circuit.json", JSON.stringify({ version: 99, circuit: { components: [], connections: [] } }));
+
+    await binding.requestOpenRecent("E:\\circuits\\future.circuit.json");
+    assert.match(binding.openError.value ?? "", /更新版本/);
+    assert.deepEqual(binding.recentProjects.value.map((item) => item.path), [
+      "E:\\circuits\\gone.circuit.json", "E:\\circuits\\demo.circuit.json",
+    ]);
+    assert.deepEqual(readRecentProjects(storage).map((item) => item.path), [
+      "E:\\circuits\\gone.circuit.json", "E:\\circuits\\demo.circuit.json",
+    ]);
+    // 编辑器状态原样保留。
+    assert.equal(binding.editorState.value?.document.components.length, 4);
+  } finally {
+    restore();
+  }
+});
+
+test("opening from the recent list confirms unsaved changes first and opens the chosen path", async () => {
+  const engine = new OpenFlowEngine();
+  const storage = memoryStorage();
+  const { binding, restore } = await bootstrappedBinding(engine, storage);
+  try {
+    engine.files.set("E:\\circuits\\demo.circuit.json", simpleProjectFileText());
+    await binding.setInputBit("input-a", 0, "0");
+    assert.equal(binding.isDirty.value, true);
+
+    await binding.requestOpenRecent("E:\\circuits\\gone.circuit.json");
+    assert.equal(binding.pendingFileAction.value, "open", "置脏文档的最近项目打开先挂起待确认");
+    assert.equal(binding.editorState.value?.document.components.length, 4, "确认之前不加载");
+
+    // 取消后换一个条目：挂起的路径不能泄漏到下一次请求。
+    binding.cancelPendingFileAction();
+    await binding.requestOpenRecent("E:\\circuits\\demo.circuit.json");
+    assert.equal(binding.pendingFileAction.value, "open");
+    await binding.confirmPendingFileAction();
+
+    assert.equal(binding.editorState.value?.document.components.length, 2);
+    assert.equal(binding.projectPath.value, "E:\\circuits\\demo.circuit.json");
+    assert.equal(binding.pendingFileAction.value, null);
+    // 打开成功把该条目置顶并刷新时间戳。
+    assert.deepEqual(binding.recentProjects.value.map((item) => item.path), ["E:\\circuits\\demo.circuit.json"]);
   } finally {
     restore();
   }

@@ -43,6 +43,14 @@ export interface RememberRecentProjectOptions {
   key?: string;
 }
 
+/** `forgetRecentProject` 的可选参数。 */
+export interface ForgetRecentProjectOptions {
+  /** 路径规范化与比较的平台语义；省略时取 `currentPathPlatform()`。 */
+  platform?: PathPlatform;
+  /** 存储键；省略时取 `RECENT_PROJECTS_STORAGE_KEY`。 */
+  key?: string;
+}
+
 /**
  * 从路径的原始写法取显示名：最后一个分隔符之后的部分。
  * @param path 路径的任意写法。
@@ -116,6 +124,34 @@ export function rememberRecentProject(
     storage?.setItem(options.key ?? RECENT_PROJECTS_STORAGE_KEY, JSON.stringify(next));
   } catch {
     // 存储不可写时仍返回内存状态：记录最近项目不能让已经成功的保存回退成失败。
+  }
+  return next;
+}
+
+/**
+ * 把一条最近项目从列表移除并持久化。用于指向已不存在文件的死条目：留着它只会让用户
+ * 反复撞上同一个错误。匹配按规范化身份进行（与记录去重同一套折叠规则），因此大小写、
+ * 分隔符不同的同一写法也会被识别为同一条。
+ * @param storage 本地存储；不可用时只返回内存中的新列表，不抛错。
+ * @param recentProjects 当前列表，最近使用在前。
+ * @param path 要移除的项目路径，任意写法；按规范化身份匹配。
+ * @param options 平台语义与存储键；见 `ForgetRecentProjectOptions`。
+ * @returns 移除之后的新列表，最近使用在前；没有匹配条目时返回等价副本且不写存储。
+ */
+export function forgetRecentProject(
+  storage: KeyValueStorage | null | undefined,
+  recentProjects: readonly RecentProject[],
+  path: string,
+  options: ForgetRecentProjectOptions = {},
+): RecentProject[] {
+  if (typeof path !== "string" || path === "") return [...recentProjects];
+  const identity = projectPathIdentity(path, options.platform);
+  const next = recentProjects.filter((existing) => projectPathIdentity(existing.path, options.platform) !== identity);
+  if (next.length === recentProjects.length) return [...recentProjects];
+  try {
+    storage?.setItem(options.key ?? RECENT_PROJECTS_STORAGE_KEY, JSON.stringify(next));
+  } catch {
+    // 存储不可写时仍返回内存状态：清理死条目不能让打开失败的常规处理回退成异常。
   }
   return next;
 }

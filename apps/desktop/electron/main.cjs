@@ -152,7 +152,14 @@ app.whenReady().then(() => {
       requireNonEmptyString(filePath, "filePath");
       return { ok: true, content: readTextFile(fs, filePath) };
     } catch (error) {
-      return { ok: false, reason: error instanceof Error ? error.message : "读取项目文件失败。" };
+      // 错误对象上的 code（读文件失败带的 PROJECT_FILE_NOT_FOUND 等）随结果带回，让渲染层
+      // 按机器可读类别分支而不必解析展示文案；没有 code 的失败保持原形状。
+      const code = typeof (error && error.code) === "string" ? error.code : undefined;
+      return {
+        ok: false,
+        reason: error instanceof Error ? error.message : "读取项目文件失败。",
+        ...(code !== undefined ? { code } : {}),
+      };
     }
   });
   createWindow();

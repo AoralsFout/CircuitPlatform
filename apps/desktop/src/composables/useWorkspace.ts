@@ -34,10 +34,12 @@ import {
   type ParsedProjectFile,
 } from "../project-file/index.ts";
 import {
+  forgetRecentProject,
   projectDisplayName,
   readRecentProjects,
   rememberRecentProject,
   type KeyValueStorage,
+  type RecentProject,
 } from "../project-file/recent-projects.ts";
 import {
   defaultComponentDefinitionRegistry,
@@ -56,8 +58,12 @@ interface ProjectFileBridge {
   writeProjectFile(filePath: string, content: string): Promise<{ ok: true } | { ok: false; reason: string }>;
   /** 打开对话框；用户取消时返回 `reason: "canceled"`，调用方按静默放弃处理。 */
   pickOpenPath(): Promise<{ ok: true; path: string } | { ok: false; reason: string }>;
-  /** 读取项目文件文本；文件不存在或读取失败以 `reason` 带回可展示原因。 */
-  readProjectFile(filePath: string): Promise<{ ok: true; content: string } | { ok: false; reason: string }>;
+  /**
+   * 读取项目文件文本；文件不存在或读取失败以 `reason` 带回可展示原因。目标文件不存在时
+   * 另带 `code: "PROJECT_FILE_NOT_FOUND"`（约定见 electron/project-file-io.cjs），
+   * 调用方按机器可读类别分支，不解析展示文案。
+   */
+  readProjectFile(filePath: string): Promise<{ ok: true; content: string } | { ok: false; reason: string; code?: string }>;
 }
 
 /** 顶栏保存状态的三个可见语义：已保存、有未保存改动、最近一次保存失败。 */
@@ -65,6 +71,9 @@ export type ProjectSaveState = "saved" | "dirty" | "error";
 
 /** 未保存文档在另存为对话框里的默认文件名；与顶栏占位名一致。 */
 const UNTITLED_PROJECT_NAME = "未命名电路.circuit.json";
+
+/** `readProjectFile` 失败结果里「目标文件不存在」的机器可读类别；抛出侧约定见 electron/project-file-io.cjs。 */
+const PROJECT_FILE_NOT_FOUND_CODE = "PROJECT_FILE_NOT_FOUND";
 
 interface WorkspaceBinding {
   state: DeepReadonly<Ref<WorkspaceSnapshot>>;
@@ -165,11 +174,19 @@ interface WorkspaceBinding {
   /**
    * 从指定路径打开项目文件：读文件 → 渲染层校验 → 整体替换推送到引擎。
    * 任何一步失败都给出可展示原因，当前编辑器状态原样保留；成功后切换文档身份、
-   * 重置脏标记基线并记录最近项目。
+   * 重置脏标记基线并记录最近项目。目标文件已不存在时同时把该条目移出最近项目。
    * @param path 项目文件的路径；存在性由主进程读取时检查。
    * @returns 打开成功返回 true；任何一步失败返回 false。
    */
   openProjectFromPath(path: string): Promise<boolean>;
+  /** 最近项目列表，最近使用在前：按规范化身份去重、上限 10 条，成功打开或另存为后自动更新。 */
+  recentProjects: DeepReadonly<Ref<RecentProject[]>>;
+  /**
+   * 从最近项目入口打开指定项目：文档置脏时先经过与对话框打开相同的未保存确认，
+   * 确认或文档干净时走 `openProjectFromPath` 的同一条加载路径。
+   * @param path 最近项目条目记录的路径。
+   */
+  requestOpenRecent(path: string): Promise<void>;
 }
 
 function toEditorBindings(bindings: SimulationBindings): EditorBindings {
@@ -254,8 +271,14 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   const isDirty = shallowRef(false);
   const saveError = shallowRef<string | null>(null);
   const openError = shallowRef<string | null>(null);
+  // 最近项目在本会话内的内存副本：构造时从存储恢复，此后由记录与清理函数同步维护，
+  // 顶栏下拉与首启空状态（#40）直接消费这份响应式列表。
+  const recentProjects = shallowRef<RecentProject[]>(readRecentProjects(preferenceStorage()));
   /** 待确认的文件动作；置脏文档的打开/新建必须先经过确认。 */
   const pendingFileAction = shallowRef<"open" | "new" | null>(null);
+  // 待确认「打开」的来源路径：来自最近项目入口时非空（确认后不再弹文件对话框，
+  // 直接打开该路径）；来自对话框打开时为 null。与 pendingFileAction 同生共死。
+  let pendingOpenPath: string | null = null;
   // 上一次落盘内容（序列化后的项目文件文本）；置脏就是拿当前内容与它比较。
   let savedFileSnapshot: string | null = null;
   const canSave = computed(() => editorState.value !== null);
@@ -293,10 +316,16 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     }
   }
 
-  /** 保存成功后把该路径记录进最近项目；记录失败不影响已完成的保存。 */
+  /** 保存成功后把该路径记录进最近项目并刷新界面列表；记录失败不影响已完成的保存。 */
   function recordRecentProject(path: string): void {
     const storage = preferenceStorage();
-    rememberRecentProject(storage, readRecentProjects(storage), path);
+    recentProjects.value = rememberRecentProject(storage, recentProjects.value, path);
+  }
+
+  /** 把一条最近项目从列表与存储中移除；存储不可用时安静降级。 */
+  function removeRecentProject(path: string): void {
+    const storage = preferenceStorage();
+    recentProjects.value = forgetRecentProject(storage, recentProjects.value, path);
   }
 
   async function reflect(operation: () => Promise<WorkspaceSnapshot>): Promise<void> {
@@ -663,6 +692,8 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     const file = await adapter.readProjectFile(path);
     if (!file.ok) {
       openError.value = file.reason;
+      // 目标文件已不存在的最近项目条目立刻移出列表：留着它只会让用户反复撞上同一个错误。
+      if (file.code === PROJECT_FILE_NOT_FOUND_CODE) removeRecentProject(path);
       return false;
     }
     let raw: unknown;
@@ -726,6 +757,23 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     await performOpen();
   }
 
+  /**
+   * 从最近项目入口打开指定项目：文档置脏时先经过与对话框打开相同的未保存确认，
+   * 确认或文档干净时走 `openProjectFromPath` 的同一条加载路径。
+   * 目标文件已不存在时给出可展示原因并把该条目移出最近项目（见 `openProjectFromPath`）。
+   * @param path 最近项目条目记录的路径。
+   */
+  async function requestOpenRecent(path: string): Promise<void> {
+    if (pendingFileAction.value !== null) return;
+    if (isDirty.value) {
+      pendingOpenPath = path;
+      pendingFileAction.value = "open";
+      return;
+    }
+    openError.value = null;
+    await openProjectFromPath(path);
+  }
+
   async function requestNew(): Promise<void> {
     if (pendingFileAction.value !== null) return;
     if (isDirty.value) {
@@ -737,13 +785,23 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
 
   async function confirmPendingFileAction(): Promise<void> {
     const action = pendingFileAction.value;
+    const openPath = pendingOpenPath;
     pendingFileAction.value = null;
-    if (action === "open") await performOpen();
-    else if (action === "new") await performNew();
+    pendingOpenPath = null;
+    if (action === "open") {
+      // 最近项目入口挂起的打开直接打开原路径；对话框打开照常询问位置。
+      if (openPath !== null) {
+        openError.value = null;
+        await openProjectFromPath(openPath);
+      } else {
+        await performOpen();
+      }
+    } else if (action === "new") await performNew();
   }
 
   function cancelPendingFileAction(): void {
     pendingFileAction.value = null;
+    pendingOpenPath = null;
   }
 
   /** 创建或安全重接连接；失败只返回错误，草稿由画布交互层继续保留。 */
@@ -809,5 +867,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     confirmPendingFileAction,
     cancelPendingFileAction,
     openProjectFromPath,
+    recentProjects: readonly(recentProjects),
+    requestOpenRecent,
   };
 }

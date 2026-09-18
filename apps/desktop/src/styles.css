@@ -155,6 +155,14 @@ button:disabled { cursor: not-allowed; }
 .ui-icon { font-family: var(--font-data); font-size: 15px; }
 .avatar-button { border-color: var(--color-border-strong); color: var(--color-signal-high); font-family: var(--font-data); font-size: 9px; }
 
+/* 最近项目下拉：条目复用原生按钮语义（Tab 可达、Enter 激活），焦点走全局 focus-visible 外轮廓。 */
+.recent-projects { position: relative; }
+.recent-projects-menu { position: absolute; top: calc(100% + 7px); right: 0; z-index: 30; display: grid; gap: 2px; min-width: 250px; max-width: 400px; max-height: 320px; padding: 5px; overflow-y: auto; border: 1px solid var(--color-border-strong); border-radius: 5px; background: var(--color-panel); box-shadow: 0 18px 48px var(--theme-shadow); }
+.recent-projects-item { display: grid; gap: 1px; padding: 7px 10px; border: 1px solid transparent; border-radius: 4px; color: var(--color-text); background: transparent; cursor: pointer; text-align: left; }
+.recent-projects-item:hover:not(:disabled) { border-color: var(--color-border); background: var(--color-surface); }
+.recent-projects-name { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.recent-projects-path { overflow: hidden; color: var(--color-text-faint); font-family: var(--font-data); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+
 .editor-layout { display: grid; min-height: 0; grid-template-columns: 48px 272px minmax(0, 1fr); }
 .editor-layout--sidebar-collapsed { grid-template-columns: 48px minmax(0, 1fr); }
 .tool-rail { display: flex; min-height: 0; flex-direction: column; align-items: center; gap: 8px; padding: 13px 8px; border-right: 1px solid var(--color-border); background: color-mix(in srgb, var(--color-bg) 86%, black 14%); }
