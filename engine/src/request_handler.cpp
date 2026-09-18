@@ -125,14 +125,10 @@ PortListResult portListFromSpecs(const std::vector<protocol::PortSpec>& specs) {
             return {{}, "bad_request", "端口清单里的端口名不能重复"};
         }
 
-        switch (validatePort(port)) {
-        case PortError::None:
-            break;
-        case PortError::InvalidWidth:
-            return {{}, "invalid_width", "端口位宽必须是正整数"};
-        case PortError::InvalidBitRange:
-            return {{}, "invalid_bit_range",
-                    "位区间必须满足 msb >= lsb，且位宽等于 msb - lsb + 1"};
+        // toPortWidth 已经把 0 挡在上面了，因此 validatePort 在这里只可能报位区间的问题，
+        // 它那条 InvalidWidth 分支在这个调用点不可达。
+        if (validatePort(port) == PortError::InvalidBitRange) {
+            return {{}, "invalid_bit_range", "位区间必须满足 msb >= lsb，且位宽等于 msb - lsb + 1"};
         }
         ports.push_back(std::move(port));
     }
@@ -148,11 +144,11 @@ struct PortListProblem {
 };
 
 /**
- * 用拆线器与合线器的覆盖规则整体校验一份端口清单，并把领域错误翻译成协议错误。
+ * 用端口清单对某个元件类型的形状规则整体校验一份清单，并把领域错误翻译成协议错误。
  *
- * 越界、重叠、漏位三者共用错误码 `invalid_bit_range`，文案各不相同：用户需要知道是写超了、
- * 压住了别人、还是漏了几位，而调用方只需要按一个码判断「这份清单不能用」。其余元件类型不走
- * 这条规则——它们的端口形状不是数据驱动的。
+ * 两条规则共用同一个错误码域：越界、重叠、漏位三者各有一条文案，用户需要知道是写超了、压住了
+ * 别人、还是漏了几位，而调用方只需要按一个码判断「这份清单不能用」；形状不对则按元件类型分成
+ * 两种文案——数据驱动的两个元件要的是宿主总线加分支，其余类型要的是与内置定义一致。
  * @param kind 清单所属的元件类型。
  * @param ports 翻译后的完整端口清单。
  * @return 合法时返回 `error == false` 的结果，否则返回错误码与文案。
@@ -164,6 +160,11 @@ PortListProblem portListProblem(ComponentKind kind, const std::vector<Port>& por
     case PortListError::Malformed:
         return {true, "bad_request",
                 "端口清单必须是一条不带位区间的宿主总线端口，加若干条方向相反的位区间分支"};
+    case PortListError::NotBuiltinShape:
+        // 内置类型的端口形状就是规格里那份固定定义：数量、名称、方向都不能改，能改的只有
+        // Input 与 Output 的位宽。清单对不上是调用方写错了，不是引擎有可选的第二套形状。
+        return {true, "bad_request",
+                "端口清单必须与内置定义一致；只有 Input 与 Output 的位宽可以不同"};
     case PortListError::OutOfRange:
         return {true, "invalid_bit_range", "位区间越出了宿主总线的位范围"};
     case PortListError::Overlap:
@@ -253,6 +254,13 @@ std::string handleRequest(
 
         // 端口清单是位宽的唯一权威来源：带着清单来就按清单建立，省略时回退到内置定义。
         // 前端对内置类型不自己写一份清单再发过来——那正好重建了本变更要消灭的第二份定义。
+        //
+        // **空数组是拒绝的，不回退到内置定义。** 规格只有「带清单」与「省略」两态，`ports: []`
+        // 是规格没有的第三态，而它两种解释都不好：当作省略会让一个本想传清单、却把清单拼空了的
+        // 调用方拿到一个形状完全不同的元件，还会让拆线器与合线器（没有内置定义可回退）与内置
+        // 类型在同一份载荷上走出两条不同的路。因此它按形状错误报 `bad_request`——为内置类型
+        // 空清单对不上内置定义，为数据驱动的两个元件空清单没有宿主总线。落到这条规则的实现上，
+        // 引擎里没有「零端口元件」这个状态，也就不存在一个没有端口、永远无法连线的死件。
         ComponentId id{};
         if (!request.ports.present) {
             // 拆线器与合线器没有内置定义：总线多宽、分成几条分支、每条覆盖哪几位，全部由清单
@@ -299,8 +307,9 @@ std::string handleRequest(
             return protocol::errorResponse(request.requestId, ports.code, ports.message);
         }
 
-        // 覆盖规则按元件当前的类型判定，因此要先把类型读出来。这一步在写之前：一份不成立的
-        // 清单不会落在任何元件上，改位区间因此是一次要么整体成立、要么什么都没发生的提交。
+        // 形状规则按元件当前的类型判定——内置类型要的是与内置定义一致，数据驱动的两个元件要的
+        // 是盖满宿主总线的位区间——因此要先把类型读出来。这一步在写之前：一份不成立的清单不会
+        // 落在任何元件上，改位宽因此是一次要么整体成立、要么什么都没发生的提交。
         const auto component = circuit.component(*request.componentId);
         if (component.has_value()) {
             const auto problem = portListProblem(component->kind, *ports.ports);

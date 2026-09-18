@@ -198,6 +198,17 @@ private:
     [[nodiscard]] SignalValue outputSignal(const PortId& portId) const;
 
     /**
+     * 读取一个端口当前的有效值，读不到时按该端口自己声明的位宽给出全 X。
+     *
+     * 「端口没有值」在仿真内部只有这一种表达：长度对不上的值不是这个端口的值。求值路径上每
+     * 一次读端口都走这里，端口不存在、来源连接悬空、来源位宽不匹配因此都落到同一个结果上，
+     * 不必在每个调用点各写一遍。
+     * @param portId 要读取的端口身份。
+     * @return 端口存在且有值时返回它保存或推导出的值，否则返回该端口位宽的全 X。
+     */
+    [[nodiscard]] SignalValue valueAt(PortId portId) const;
+
+    /**
      * 求值一个拆线器：每条分支输出取宿主输入在它位区间上的那些位。
      * @param component 要求值的拆线器。
      * @return 任一分支输出发生变化时返回 true。
