@@ -18,6 +18,9 @@ const {
   editorState,
   bootstrap,
   checkEngine,
+  start,
+  pause,
+  resume,
   step,
   toggleInput,
   select,
@@ -131,6 +134,12 @@ async function duplicateSelection(): Promise<void> {
   await duplicateComponent();
 }
 
+/** 键盘上的「运行」是一个意图：已停止时开始，已暂停时继续，运行中不做任何事。 */
+async function runSimulationFromKeyboard(): Promise<void> {
+  if (state.value.simulationState === "stopped") await start();
+  else if (state.value.simulationState === "paused") await resume();
+}
+
 function onEditorKeydown(event: KeyboardEvent): void {
   const target = event.target;
   const shortcut = resolveEditorShortcut({
@@ -161,6 +170,9 @@ function onEditorKeydown(event: KeyboardEvent): void {
     case "zoom-in": adjustZoom(ZOOM_STEP); break;
     case "zoom-out": adjustZoom(-ZOOM_STEP); break;
     case "zoom-fit": fitViewport(); break;
+    case "start-or-resume-simulation": void runSimulationFromKeyboard(); break;
+    case "pause-simulation": void pause(); break;
+    case "step-simulation": void step(); break;
     case "delete-selection": void deleteSelection(); break;
     default: {
       // 新增 EditorShortcut 成员时这里会编译失败，避免静默落到删除分支。
@@ -197,7 +209,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
         v-if="showSidebar && activeRailPage !== 'settings'"
         :active-rail-page="activeRailPage"
         :input-controls="inputControls"
-        :can-run="state.canRun"
+        :can-toggle-input="state.canToggleInput"
         :selected-component-id="selectedComponentId"
         :components="sidebarComponents"
         :component-count="editorState?.document.components.length ?? 0"
@@ -214,16 +226,23 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
         <p v-if="editorState?.operation === 'recovery-required'" class="bottom-error" role="alert">编辑器与仿真引擎的结构状态可能不一致。请关闭并重新打开应用后再继续编辑。</p>
         <EditorToolbar
           :zoom-label="zoomLabel"
-          :can-step="state.canRun"
+          :can-start="state.canStart"
+          :can-pause="state.canPause"
+          :can-resume="state.canResume"
+          :can-step="state.canStep"
           :can-undo="editorState?.operation === 'idle' && !editorState.confirmation && editorState.canUndo"
           :can-redo="editorState?.operation === 'idle' && !editorState.confirmation && editorState.canRedo"
           :can-delete="editorState?.operation === 'idle' && !editorState.confirmation && Boolean(editorState.selection)"
           :can-duplicate="editorState?.operation === 'idle' && !editorState.confirmation && !interaction.connectionDraft && editorState.selection?.kind === 'component'"
           :can-clear="editorState?.operation === 'idle' && !editorState.confirmation && (editorState.document.components.length > 0 || editorState.document.connections.length > 0)"
           :simulation-state="state.simulationState"
+          :simulation-step="state.simulationStep"
           @adjust-zoom="adjustZoom"
           @reset-zoom="fitViewport"
           @step-simulation="step"
+          @start-simulation="start"
+          @pause-simulation="pause"
+          @resume-simulation="resume"
           @undo="undo"
           @redo="redo"
           @delete-selection="deleteSelection"

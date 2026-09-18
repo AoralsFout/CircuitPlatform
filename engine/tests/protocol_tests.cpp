@@ -196,6 +196,10 @@ int main() {
     assert(firstTick.find(
                "{\"componentId\":2,\"port\":\"out\",\"value\":0}") != std::string::npos);
 
+    // 快照同时覆盖 Output 元件的接收端，调用方因此不必再逐端口 get_signal 就能拿到它的读数。
+    assert(firstTick.find(
+               "{\"componentId\":3,\"port\":\"in\",\"value\":0}") != std::string::npos);
+
     const auto secondTick = dispatch(
         R"({"type":"tick","requestId":"tick-2"})", clockCircuit, clockSimulation);
     assert(secondTick.find("\"step\":2") != std::string::npos);
@@ -203,6 +207,8 @@ int main() {
                "{\"componentId\":1,\"port\":\"out\",\"value\":0}") != std::string::npos);
     assert(secondTick.find(
                "{\"componentId\":2,\"port\":\"out\",\"value\":1}") != std::string::npos);
+    assert(secondTick.find(
+               "{\"componentId\":3,\"port\":\"in\",\"value\":1}") != std::string::npos);
     assert(dispatch(
                R"({"type":"get_signal","requestId":"read-after-tick","componentId":3,"port":"in"})",
                clockCircuit, clockSimulation)

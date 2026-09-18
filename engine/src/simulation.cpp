@@ -281,6 +281,20 @@ const std::vector<Simulation::PortSignal>& Simulation::outputSignals() const noe
     return signals_;
 }
 
+// 输出端口不足以描述 Output 元件的读数：它的值来自自己的接收端，接收端沿 Connection 推导。
+// 把接收端一并放进快照，调用方就能在一次往返里得到全部可展示读数。
+std::vector<Simulation::PortSignal> Simulation::signalSnapshot() const {
+    std::vector<PortSignal> snapshot = outputSignals();
+    for (const auto& component : circuit_.components_) {
+        if (component.kind != ComponentKind::Output) {
+            continue;
+        }
+        const PortId receivePort{component.id, "in"};
+        snapshot.push_back({receivePort, signal(receivePort).value_or(SignalValue::Unknown)});
+    }
+    return snapshot;
+}
+
 // 输出端直接读取保存值；输入端沿 Connection 读取来源输出值。
 std::optional<SignalValue> Simulation::signal(PortId portId) const {
     const auto* port = findPort(circuit_.components_, portId);

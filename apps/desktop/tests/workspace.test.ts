@@ -12,7 +12,12 @@ import {
 import { createProtocolEnginePort } from "../src/editor/protocolEnginePort.ts";
 import { createSimulationSnapshot } from "../src/editor/simulation.ts";
 import { useWorkspace } from "../src/composables/useWorkspace.ts";
-import { createWorkspace, type EngineAdapter, type SimulationBindings } from "../src/workspace/index.ts";
+import {
+  createWorkspace,
+  type EngineAdapter,
+  type SimulationBindings,
+  type TickScheduler,
+} from "../src/workspace/index.ts";
 
 type Call =
   | { type: "checkEngine" }
@@ -34,6 +39,8 @@ class FakeEngine implements EngineAdapter {
   nextComponentId = 1;
   nextConnectionId = 1;
   errorOn: Call["type"] | null = null;
+  /** 让 tick 悬停，用于验证下一次推进必须等上一次响应。 */
+  holdTick: (() => Promise<void>) | null = null;
   step = 0;
   /** Clock 的输出初值为 0，每推进一次翻转一次。 */
   private readonly clocks = new Map<number, Signal>();
@@ -88,17 +95,23 @@ class FakeEngine implements EngineAdapter {
 
   async tick(): Promise<EngineResponse> {
     this.calls.push({ type: "tick" });
+    if (this.holdTick) await this.holdTick();
     if (this.errorOn === "tick") return this.error("推进一步失败");
     this.step += 1;
     for (const [componentId, kind] of this.kinds) {
       if (kind === "clock") this.clocks.set(componentId, this.clocks.get(componentId) === 1 ? 0 : 1);
     }
-    // 快照覆盖每一个可观察的输出端口，因此工作区不必再逐端口 get_signal。
+    // 快照覆盖每一个输出端口，外加每个 Output 元件的接收端，因此工作区不必再逐端口 get_signal。
     const signals = [...this.kinds].flatMap(([componentId, kind]) => {
-      const port = fakeOutputPorts[kind];
-      return port === undefined
-        ? []
-        : [{ componentId, port, value: this.evaluate(componentId, port, 0) }];
+      const entries: { componentId: number; port: string; value: Signal }[] = [];
+      const outputPort = fakeOutputPorts[kind];
+      if (outputPort !== undefined) {
+        entries.push({ componentId, port: outputPort, value: this.evaluate(componentId, outputPort, 0) });
+      }
+      if (kind === "output") {
+        entries.push({ componentId, port: "in", value: this.evaluate(componentId, "in", 0) });
+      }
+      return entries;
     });
     return { type: "ticked", requestId: "fake", step: this.step, signals };
   }
@@ -141,6 +154,44 @@ class FakeEngine implements EngineAdapter {
 function invert(value: Signal): Signal {
   if (value === "X") return "X";
   return value === 1 ? 0 : 1;
+}
+
+/**
+ * 手动点火的假调度器：注入它就能无头驱动整个连续运行，不必等真实定时器。
+ * 同一时刻最多只有一次已排定的推进，因此 `fire()` 也顺带断言了「没有积压」。
+ */
+class FakeScheduler implements TickScheduler {
+  scheduled = 0;
+  cancelled = 0;
+  private pending: { run: () => void; cancelled: boolean } | null = null;
+
+  schedule(_delayMs: number, run: () => void): () => void {
+    this.scheduled += 1;
+    const entry = { run, cancelled: false };
+    this.pending = entry;
+    return () => {
+      if (entry.cancelled) return;
+      entry.cancelled = true;
+      this.cancelled += 1;
+      if (this.pending === entry) this.pending = null;
+    };
+  }
+
+  /** 触发已排定的那一次推进；当前没有排定（或已被取消）时返回 false。 */
+  fire(): boolean {
+    const entry = this.pending;
+    this.pending = null;
+    if (!entry || entry.cancelled) return false;
+    entry.run();
+    return true;
+  }
+}
+
+/** 让出宏任务，把工作区里已经排队的微任务全部跑完。 */
+function drain(): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, 0);
+  });
 }
 
 /** FakeEngine 认识的、带可观察输出端口的元件类型；真正的时序语义仍由 C++ 测试负责。 */
@@ -220,7 +271,7 @@ test("turns an engine error response into visible workspace error state", async 
   assert.equal(state.outputValue, "X");
   assert.equal(state.message, "连接失败");
   assert.equal(state.operationError, "连接失败");
-  assert.equal(state.canRun, false);
+  assert.equal(state.canStep, false);
   assert.deepEqual(
     engine.calls.slice(-4),
     [
@@ -295,7 +346,7 @@ test("pushes a document that is not the AND example", async () => {
   const state = (await workspace.loadCircuit(document)).snapshot;
 
   assert.equal(state.hasCircuit, true);
-  assert.equal(state.canRun, true);
+  assert.equal(state.canStep, true);
   assert.equal(state.inputValues["input"], 1);
   assert.equal(state.signals["result:in"], 0);
   assert.equal(state.outputValue, 0);
@@ -398,7 +449,195 @@ test("advances the clock one tick per single step with a single round trip", asy
   const second = await workspace.step();
   assert.deepEqual(engine.calls.map((call) => call.type), ["tick", "tick"]);
   assert.equal(second.signals["clock:out"], 0);
-  assert.equal(second.canRun, true);
+  assert.equal(second.canStep, true);
+});
+
+test("records the advanced reading in the waveform instead of the previous settle", async () => {
+  const engine = new FakeEngine();
+  const workspace = createWorkspace(engine);
+  await workspace.checkEngine();
+  const loaded = await workspace.loadCircuit(clockDocument());
+
+  // 加载时 Clock 的输出是 0，Output 的接收端也是 0。
+  assert.equal(loaded.snapshot.outputValue, 0);
+  assert.equal(loaded.snapshot.waveform.at(-1)?.output, 0);
+
+  const advanced = await workspace.step();
+
+  // Output 元件的接收端由同一次推进的快照带回，因此兼容标量与波形记录的都是这一拍的读数。
+  assert.equal(advanced.outputValue, 1);
+  assert.equal(advanced.signals["monitor:in"], 1);
+  assert.equal(advanced.waveform.at(-1)?.output, 1);
+});
+
+test("starts, pauses, and resumes continuous running without losing accumulated steps", async () => {
+  const engine = new FakeEngine();
+  const scheduler = new FakeScheduler();
+  const workspace = createWorkspace(engine, { scheduler });
+  await workspace.checkEngine();
+  const loaded = await workspace.loadCircuit(clockDocument());
+  const waveformPoints = loaded.snapshot.waveform.length;
+  // 加载时的稳定求值已经记了一次推进，连续运行从它继续往上加。
+  const baseStep = loaded.snapshot.simulationStep;
+  engine.calls.length = 0;
+
+  const started = await workspace.start();
+  assert.equal(started.simulationState, "running");
+  assert.equal(started.canPause, true);
+  assert.equal(started.canStart, false);
+  assert.equal(started.canStep, false);
+  // 开始只是排定第一次推进，还没有请求在飞。
+  assert.equal(engine.calls.length, 0);
+
+  scheduler.fire();
+  await drain();
+  assert.deepEqual(engine.calls.map((call) => call.type), ["tick"]);
+  assert.equal(workspace.snapshot().simulationStep, baseStep + 1);
+  assert.equal(workspace.snapshot().signals["clock:out"], 1);
+
+  scheduler.fire();
+  await drain();
+  assert.equal(workspace.snapshot().simulationStep, baseStep + 2);
+  assert.equal(workspace.snapshot().signals["clock:out"], 0);
+
+  const paused = await workspace.pause();
+  assert.equal(paused.simulationState, "paused");
+  assert.equal(paused.canResume, true);
+  assert.equal(paused.canPause, false);
+  assert.equal(paused.canStep, true);
+  // 暂停取消了已经排定的下一次推进：暂停期间不再前进。
+  assert.equal(scheduler.fire(), false);
+  await drain();
+  assert.equal(engine.calls.length, 2);
+  assert.equal(workspace.snapshot().simulationStep, baseStep + 2);
+  assert.equal(workspace.snapshot().message, `已暂停在第 ${baseStep + 2} 步。`);
+
+  const resumed = await workspace.resume();
+  assert.equal(resumed.simulationState, "running");
+  scheduler.fire();
+  await drain();
+  // 继续从暂停处接着跑：步数与时钟相位都接上，不从头开始。
+  assert.equal(workspace.snapshot().simulationStep, baseStep + 3);
+  assert.equal(workspace.snapshot().signals["clock:out"], 1);
+
+  // 自动推进不追加波形记录：波形历史只记录用户发起的推进。
+  assert.equal(workspace.snapshot().waveform.length, waveformPoints);
+});
+
+test("schedules the next advance only after the previous response arrives", async () => {
+  const engine = new FakeEngine();
+  const scheduler = new FakeScheduler();
+  const workspace = createWorkspace(engine, { scheduler });
+  await workspace.checkEngine();
+  await workspace.loadCircuit(clockDocument());
+
+  let release: () => void = () => {};
+  engine.holdTick = () => new Promise<void>((resolve) => { release = resolve; });
+  engine.calls.length = 0;
+  await workspace.start();
+  assert.equal(scheduler.scheduled, 1);
+
+  scheduler.fire();
+  await drain();
+  // 上一次响应还没回来，因此没有新的调度被排定：引擎变慢时不会积压请求。
+  assert.equal(engine.calls.length, 1);
+  assert.equal(scheduler.scheduled, 1);
+  assert.equal(scheduler.fire(), false);
+
+  release();
+  await drain();
+  assert.equal(scheduler.scheduled, 2);
+});
+
+test("queues an input commit behind an in-flight advance while running", async () => {
+  const engine = new FakeEngine();
+  const scheduler = new FakeScheduler();
+  const workspace = createWorkspace(engine, { scheduler });
+  await workspace.checkEngine();
+  await workspace.loadCircuit(createAndDemoDocument());
+  await workspace.start();
+
+  let release: () => void = () => {};
+  engine.holdTick = () => new Promise<void>((resolve) => { release = resolve; });
+  engine.calls.length = 0;
+
+  scheduler.fire();
+  await drain();
+  const toggling = workspace.toggleInput("input-a");
+  await drain();
+  // 推进还在飞，输入提交因此排在它之后，两条请求不交错。
+  assert.deepEqual(engine.calls.map((call) => call.type), ["tick"]);
+
+  release();
+  await drain();
+  await toggling;
+  assert.deepEqual(engine.calls.map((call) => call.type), ["tick", "setInput"]);
+  // 运行中切换只提交 set_input，不额外 settle；新值由下一次推进带上。
+  assert.equal(workspace.snapshot().inputValues["input-a"], 0);
+  assert.equal(workspace.snapshot().canToggleInput, true);
+});
+
+test("pauses continuous running when the circuit structure changes", async () => {
+  const engine = new FakeEngine();
+  const scheduler = new FakeScheduler();
+  const workspace = createWorkspace(engine, { scheduler });
+  await workspace.checkEngine();
+  await workspace.loadCircuit(clockDocument());
+  await workspace.start();
+  assert.equal(workspace.snapshot().simulationState, "running");
+
+  const rebound = workspace.rebindSimulation({
+    components: { clock: 1, monitor: 2 },
+    componentKinds: { clock: "clock", monitor: "output" },
+  });
+
+  // 结构修改把运行切到暂停，并要求用户显式继续；已排定的推进被取消。
+  assert.equal(rebound.simulationState, "paused");
+  assert.equal(scheduler.cancelled, 1);
+  assert.equal(scheduler.fire(), false);
+  assert.equal(rebound.canResume, true);
+});
+
+test("notifies subscribers about each advance the run loop makes on its own", async () => {
+  const engine = new FakeEngine();
+  const scheduler = new FakeScheduler();
+  const workspace = createWorkspace(engine, { scheduler });
+  await workspace.checkEngine();
+  await workspace.loadCircuit(clockDocument());
+
+  const observed: number[] = [];
+  const unsubscribe = workspace.subscribe((snapshot) => observed.push(snapshot.simulationStep));
+  await workspace.start();
+  scheduler.fire();
+  await drain();
+  scheduler.fire();
+  await drain();
+  unsubscribe();
+  await workspace.pause();
+
+  // 自行排定的每一拍都通知一次；取消订阅后不再收到。
+  assert.deepEqual(observed, [2, 3]);
+});
+
+test("pauses continuous running when an advance fails instead of repeating the error", async () => {
+  const engine = new FakeEngine();
+  const scheduler = new FakeScheduler();
+  const workspace = createWorkspace(engine, { scheduler });
+  await workspace.checkEngine();
+  await workspace.loadCircuit(clockDocument());
+  engine.errorOn = "tick";
+  await workspace.start();
+
+  scheduler.fire();
+  await drain();
+
+  const state = workspace.snapshot();
+  assert.equal(state.simulationState, "paused");
+  assert.equal(state.operationError, "推进一步失败");
+  assert.equal(state.engineState, "ready");
+  // 失败之后不再排定：每一拍重复报同一个错误没有意义。
+  assert.equal(scheduler.fire(), false);
+  assert.equal(state.canResume, true);
 });
 
 test("surfaces a failed tick without leaving the workspace stuck", async () => {
@@ -412,8 +651,8 @@ test("surfaces a failed tick without leaving the workspace stuck", async () => {
 
   assert.equal(state.operationError, "推进一步失败");
   assert.equal(state.engineState, "ready");
-  assert.equal(state.simulationState, "idle");
-  assert.equal(state.canRun, true);
+  assert.equal(state.simulationState, "stopped");
+  assert.equal(state.canStep, true);
 });
 
 test("refreshes the AND output signal immediately after creating its output wire", async () => {
@@ -529,7 +768,7 @@ test("keeps the committed input when the next simulation is rejected", async () 
   assert.equal(state.outputValue, 1);
   assert.equal(state.operationError, "输入设置失败");
   assert.equal(state.engineState, "ready");
-  assert.equal(state.canRun, true);
+  assert.equal(state.canStep, true);
 });
 
 test("recognizes every input component in generic editor bindings", async () => {
@@ -542,7 +781,7 @@ test("recognizes every input component in generic editor bindings", async () => 
     componentKinds: { "input-a": "input", "input-b": "input", "input-c": "input", "and-gate": "and", output: "output" },
   });
 
-  assert.equal(workspace.snapshot().canRun, true);
+  assert.equal(workspace.snapshot().canStep, true);
   assert.equal(workspace.snapshot().inputValues["input-c"], 0);
   const state = await workspace.toggleInput("input-c");
 
@@ -575,7 +814,7 @@ test("rebinds simulation to the new engine ID after undo", async () => {
 
   await session.dispatch({ type: "delete-component", componentId: "input-a" });
   await session.dispatch({ type: "undo" });
-  assert.equal(workspace.snapshot().canRun, true);
+  assert.equal(workspace.snapshot().canStep, true);
 
   engine.calls.length = 0;
   await workspace.runSimulation();
@@ -601,8 +840,8 @@ test("disables simulation after clear and rebinds it after one undo", async () =
 
   await session.dispatch({ type: "request-clear" });
   await session.dispatch({ type: "confirm-clear" });
-  assert.equal(workspace.snapshot().canRun, false);
+  assert.equal(workspace.snapshot().canStep, false);
 
   await session.dispatch({ type: "undo" });
-  assert.equal(workspace.snapshot().canRun, true);
+  assert.equal(workspace.snapshot().canStep, true);
 });

@@ -162,10 +162,10 @@ std::string handleRequest(
             return protocol::errorResponse(request.requestId, "combinational_loop", "检测到组合逻辑环路");
         }
 
-        // 一次推进就把全部输出端口的当前值带回，运行循环每步因此只有一次跨进程往返。
+        // 一次推进就把全部输出端口与每个 Output 接收端的当前值带回，运行循环每步只有一次跨进程往返。
         std::string signals = ",\"signals\":[";
         bool first = true;
-        for (const auto& signal : simulation->outputSignals()) {
+        for (const auto& signal : simulation->signalSnapshot()) {
             if (!first) signals += ",";
             first = false;
             signals += "{\"componentId\":" + std::to_string(signal.port.component) +

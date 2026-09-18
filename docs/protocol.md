@@ -27,7 +27,7 @@ Electron 主进程与 C++ 引擎通过 stdin/stdout 建立一条长连接。双�
 | `remove_connection` | `connectionId` | 删除指定 Connection |
 | `set_input` | `componentId`、`value`：`0`、`1` 或 `X` | 设置 Input 元件的输出 |
 | `settle` | 无 | 求值到稳定状态 |
-| `tick` | 无 | 推进一个 tick，返回当前步数与全部输出端口的值 |
+| `tick` | 无 | 推进一个 tick，返回当前步数与全部输出端口、Output 接收端的值 |
 | `get_signal` | `componentId`、`port` | 返回 `value`：`0`、`1` 或 `X` |
 
 示例：
@@ -43,13 +43,15 @@ Electron 主进程与 C++ 引擎通过 stdin/stdout 建立一条长连接。双�
 {"type":"tick","requestId":"r8"}
 ```
 
-`tick` 是推进时间的唯一入口，响应是一次推进后的**全部输出端口**快照：
+`tick` 是推进时间的唯一入口，响应是一次推进后的**全部输出端口**快照，外加**每个 `Output` 元件的接收端**：
 
 ```json
-{"type":"ticked","requestId":"r8","step":7,"signals":[{"componentId":3,"port":"out","value":1},{"componentId":5,"port":"q","value":"X"}]}
+{"type":"ticked","requestId":"r8","step":7,"signals":[{"componentId":3,"port":"out","value":1},{"componentId":5,"port":"q","value":"X"},{"componentId":7,"port":"in","value":1}]}
 ```
 
-`signals` 直接来自仿真内部的输出信号表，只覆盖输出端口（`Output` 元件的 `in` 这类接收端不在其中，但它总是经 Connection 由某个输出端口驱动）。因此连续推进时每步只需一次跨进程往返，不必再按端口逐条 `get_signal`，往返次数不随电路规模增长。
+`signals` 的前半段直接来自仿真内部的输出信号表，覆盖每一个输出端口；后半段是每个 `Output` 元件 `in` 端口的当前值。带上接收端的原因是 `Output` 的读数来自它的 `in`——只带输出端口的话，调用方无法在一次往返内得到 Output 的展示值，只能逐端口 `get_signal` 或自己沿 Connection 推导。因此连续推进时每步只需一次跨进程往返，往返次数不随电路规模增长。
+
+`step` 是**引擎当前那份 `Simulation` 自建立以来**累计推进的 tick 次数，属于引擎侧的仿真状态，不是调用方的推进次数：结构变更重建 `Simulation` 会让它从头计数。调用方若要展示「已经推进了多少步」，应当维护自己的计数，不要把它和引擎侧的值混用。
 
 ## 响应
 
@@ -62,7 +64,7 @@ Electron 主进程与 C++ 引擎通过 stdin/stdout 建立一条长连接。双�
 - `connection_removed`：`connectionId`；
 - `input_set`：表示输入已写入；
 - `settled`：`status` 为 `ok`；
-- `ticked`：`step` 为累计推进步数，`signals` 为每个输出端口的 `componentId`、`port` 与 `value`；
+- `ticked`：`step` 为引擎当前 `Simulation` 的累计推进步数，`signals` 为每个输出端口与每个 `Output` 接收端的 `componentId`、`port` 与 `value`；
 - `signal_result`：`value` 为 `0`、`1` 或 `X`。
 
 失败响应统一为：
@@ -81,7 +83,7 @@ Electron 主进程与 C++ 引擎通过 stdin/stdout 建立一条长连接。双�
 - `remove_connection` 只删除指定 Connection，不删除两端 Component。
 - 悬空 Connection 在领域层可以被查看、删除或重新连接；当前协议只能按已知 ID 删除它。编辑器的「重接」不新增协议请求，而是用「删除旧 Connection + 创建新 Connection」的补偿事务实现（见 [ADR 0007](decisions/0007-editor-session-and-stable-editor-ids.md) 与前端设计规范 14.1）；若将来出现需要原子重接的用例，再评估新请求类型。
 - `Simulation` 不读取 UI 位置，也不向 Electron 暴露 C++ 对象；跨进程边界只传输协议数据。
-- `tick` 是唯一的推进动作：`settle` 只做组合求值到稳定，`tick` 才翻转 Clock 并推进步数。引擎侧没有定时器也没有后台线程，「连续运行」由前端反复发 `tick` 表达。
+- `tick` 是唯一的推进动作：`settle` 只做组合求值到稳定，`tick` 才翻转 Clock 并推进步数。引擎侧没有定时器也没有后台线程，「连续运行」由前端反复发 `tick` 表达——开始就是反复发，暂停就是不再发，继续就是把没发完的接上，暂停与继续因此不需要任何新请求。
 - `clock` 元件的输出初值是 `0`，每推进一次在 `0` 与 `1` 之间翻转一次；`d_flip_flop` 在它 `clock` 端口出现 `0 → 1` 时把 `d` 采样进 `q`，其余推进保持不变。
 - 边沿判定只看 `clock` 端口的前值与当前值，不看元件类型：时钟可以来自 Clock 元件、`set_input` 驱动的 Input 元件，或经过组合逻辑的门控时钟。
 - `d_flip_flop` 的 `q` 初值是 `X`，表示还没有采过样；没有连接 `clock` 端口时它每步都不更新，这是结构问题而不是错误，引擎不报错。

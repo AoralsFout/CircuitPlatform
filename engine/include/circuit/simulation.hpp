@@ -79,6 +79,14 @@ public:
     [[nodiscard]] const std::vector<PortSignal>& outputSignals() const noexcept;
 
     /**
+     * 返回一次推进后可供一次往返带走的完整信号快照：全部输出端口，外加每个 Output 元件的接收端。
+     * 只有输出端口不足以让调用方在一次往返内得到 Output 的读数——`Output` 的值来自它的 `in`，
+     * 因此这里把它一并带上，调用方不必再按端口逐条 `get_signal`。
+     * @return 覆盖输出端口与 Output 接收端的快照，顺序为先全部输出端口、再按元件顺序的接收端。
+     */
+    [[nodiscard]] std::vector<PortSignal> signalSnapshot() const;
+
+    /**
      * 读取指定端口当前的信号值。
      * @param portId 要读取的端口身份。
      * @return 端口存在时返回信号值；不存在时返回空值。未连接输入返回 Unknown。
