@@ -40,8 +40,51 @@ test("registry exposes complete display definitions and searchable aliases", () 
   assert.equal(registry.get("clock")?.available, true);
   assert.equal(registry.get("clock")?.disabledReason, null);
   assert.match(registry.get("clock")?.description ?? "", /翻转/);
-  assert.equal(registry.get("d_flip_flop")?.available, false);
-  assert.equal(typeof registry.get("d_flip_flop")?.disabledReason, "string");
+  // D Flip-Flop 也已解除禁用，描述与「只在 clock 上升沿采样」的真实行为一致。
+  assert.equal(registry.get("d_flip_flop")?.available, true);
+  assert.equal(registry.get("d_flip_flop")?.disabledReason, null);
+  assert.match(registry.get("d_flip_flop")?.description ?? "", /上升沿/);
+});
+
+/** 端口 id 原样发给引擎，因此展示定义的时钟端口必须与引擎一致地叫 `clock`。 */
+test("d flip-flop exposes the engine clock port name so a connection can be created", () => {
+  const registry = createComponentDefinitionRegistry();
+  const flipFlop = registry.get("d_flip_flop");
+  assert.deepEqual(flipFlop?.ports.map((port) => port.id), ["d", "clock", "q"]);
+  assert.deepEqual(flipFlop?.ports.map((port) => port.direction), ["input", "input", "output"]);
+  // `CLK` 只是显示标签，与发给引擎的端口 id 分开。
+  assert.equal(flipFlop?.ports.find((port) => port.id === "clock")?.name, "CLK");
+});
+
+test("projects a connection onto the d flip-flop clock port", () => {
+  const projector = createCanvasSceneProjector(createComponentDefinitionRegistry());
+  const scene = projector.project({
+    document: {
+      components: [
+        { id: "clock-1", kind: "clock", displayName: "Clock", position: { x: 32, y: 48 }, lifecycle: "active" },
+        { id: "dff-1", kind: "d_flip_flop", displayName: "D Flip-Flop", position: { x: 320, y: 80 }, lifecycle: "active" },
+      ],
+      connections: [{
+        id: "connection-1",
+        source: { componentId: "clock-1", port: "out", point: { x: 180, y: 90 } },
+        target: { componentId: "dff-1", port: "clock", point: { x: 320, y: 134 } },
+        route: [{ x: 180, y: 90 }, { x: 250, y: 90 }, { x: 250, y: 134 }, { x: 320, y: 134 }],
+        lifecycle: "visible",
+        danglingEndpoints: [],
+      }],
+    },
+    selection: null,
+    operation: "idle",
+    canUndo: false,
+    canRedo: false,
+    confirmation: null,
+    error: null,
+  }, { signals: { "clock-1:out": 1 } });
+
+  const clockPort = scene.nodes.find((node) => node.id === "dff-1")?.ports.find((port) => port.id === "clock");
+  assert.equal(clockPort?.direction, "input");
+  assert.equal(clockPort?.dangling, false);
+  assert.equal(scene.wires[0].target.port, "clock");
 });
 
 test("projects non-default editor identities through explicit routes and signal state", () => {

@@ -45,6 +45,50 @@ test("object context actions keep Component and Wire vocabulary separate", () =>
   assert.deepEqual(contextActionsFor({ kind: "port", nodeId: "and-1", portId: "in1" }), []);
 });
 
+/** 没有接时钟的 D Flip-Flop 每一步都不更新：这是结构问题，检查器给出一行提示而不是报错。 */
+test("inspector hints when the d flip-flop clock port has no connection", () => {
+  const registry = createComponentDefinitionRegistry();
+  const flipFlopPorts = registry.get("d_flip_flop")!.ports;
+  const unconnectedClock: CanvasScene = {
+    nodes: [{
+      id: "dff-1", kind: "d_flip_flop", displayName: "D Flip-Flop", symbol: "D", description: "在 clock 端口的上升沿把 D 采样进 Q。",
+      position: { x: 100, y: 100 }, size: { width: 148, height: 84 }, selected: true,
+      ports: flipFlopPorts.map((definition) => ({
+        id: definition.id, name: definition.name, direction: definition.direction,
+        point: { x: 100 + definition.offset.x, y: 100 + definition.offset.y }, offset: { ...definition.offset },
+        signal: "X" as const, dangling: false,
+      })),
+    }],
+    wires: [{
+      id: "wire-1", source: { componentId: "source", port: "out", point: { x: 0, y: 130 } },
+      target: { componentId: "dff-1", port: "d", point: { x: 100, y: 130 } },
+      route: [{ x: 0, y: 130 }, { x: 50, y: 130 }, { x: 50, y: 130 }, { x: 100, y: 130 }],
+      signal: 1, danglingEndpoints: [], selected: false,
+    }],
+    bounds: { min: { x: 0, y: 100 }, max: { x: 248, y: 184 } },
+  };
+
+  const model = createInspectorModel(unconnectedClock, { kind: "component", id: "dff-1" }, registry);
+  assert.equal(model?.kind, "component");
+  if (model?.kind === "component") {
+    assert.equal(model.ports.find((port) => port.id === "clock")?.connectionState, "unconnected");
+    assert.match(model.hint ?? "", /clock 端口未连接/);
+  }
+
+  // 时钟接上之后提示消失。
+  const connectedClock: CanvasScene = {
+    ...unconnectedClock,
+    wires: [...unconnectedClock.wires, {
+      id: "wire-2", source: { componentId: "clock-source", port: "out", point: { x: 0, y: 154 } },
+      target: { componentId: "dff-1", port: "clock", point: { x: 100, y: 154 } },
+      route: [{ x: 0, y: 154 }, { x: 50, y: 154 }, { x: 50, y: 154 }, { x: 100, y: 154 }],
+      signal: 0, danglingEndpoints: [], selected: false,
+    }],
+  };
+  const connected = createInspectorModel(connectedClock, { kind: "component", id: "dff-1" }, registry);
+  assert.equal(connected?.kind === "component" ? connected.hint : "missing", null);
+});
+
 test("inspector projects read-only Component ports and Wire endpoints", () => {
   const current = scene();
   const registry = createComponentDefinitionRegistry();

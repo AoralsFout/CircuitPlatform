@@ -426,6 +426,7 @@ button:disabled { cursor: not-allowed; }
 .bottom-inspector-heading { display: flex; min-width: 150px; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .bottom-inspector-heading strong { display: block; margin-top: 8px; color: var(--color-text); font-size: 14px; font-weight: 600; }
 .bottom-content--inspector > p { flex: 1; max-width: 300px; margin: 0; color: var(--color-text-muted); font-size: 10px; line-height: 1.55; }
+.inspector-hint { border-left: 2px solid var(--color-status-warning); padding-left: 7px; }
 .bottom-content--inspector .inspector-value { width: 150px; }
 .bottom-content--inspector .details-button { width: 112px; margin-top: 0; }
 .bottom-content--outputs { display: grid; grid-template-columns: minmax(0, 1fr) 190px; grid-template-rows: auto 1fr; gap: 9px 24px; align-items: center; }
