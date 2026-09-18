@@ -29,6 +29,28 @@ Electron 主进程与 C++ 引擎通过 stdin/stdout 建立一条长连接。双�
 
 位宽为 1 且没有位区间的端口与引入位宽之前完全等价；位宽在创建之后仍然可以改（见 `set_port_width`）。
 
+### 数据驱动的元件：拆线器与合线器
+
+`splitter`（拆线器）把一条多位输入按位区间拆成若干条分支输出，`merger`（合线器）反向把若干条位区间输入合并成一条多位输出。两者都是**单向**元件：拆线器一条输入、若干条输出；合线器若干条输入、一条输出。引擎的 `PortDirection` 只有输入与输出，因此不做拆合一体元件（[ADR 0017](decisions/0017-paired-splitter-and-merger.md)）。
+
+它们的端口形状完全由数据决定，因此**没有内置定义**：`add_component` 必须携带 `ports`，省略时报 `bad_request`（`缺少字段: ports`）。这与内置元件相反——那些省略清单正是「引擎回退到内置定义」。前端在放置时生成默认清单：8 位宿主总线拆成八条 1 位分支，分支从最高位开始编号（`out0` 覆盖 `[7:7]`，`out7` 覆盖 `[0:0]`），合线器与它对称。
+
+清单的形状是「一条不带位区间的宿主总线端口 ＋ 若干条方向相反的位区间分支」：拆线器的宿主是输入、分支是输出；合线器反过来。宿主按结构认——它是清单里唯一不带位区间的那条端口，不按名字认，因为分支的数量与名字都由数据决定。
+
+**位区间组合必须完整覆盖宿主总线的每一位且互不重叠**，越界、重叠、漏位各自被拒绝，且都不产生半成品快照（元件的端口清单原样保留）：
+
+| 违反 | 错误码 | `message` |
+| --- | --- | --- |
+| 有分支越出宿主总线的位范围 | `invalid_bit_range` | 位区间越出了宿主总线的位范围 |
+| 有两位被不止一条分支覆盖 | `invalid_bit_range` | 位区间不能互相重叠 |
+| 有宿主位没有被任何分支覆盖 | `invalid_bit_range` | 位区间必须完整覆盖宿主总线的每一位，不能漏位 |
+| 分支的位宽不等于它声明的区间长度 | `invalid_bit_range` | 位区间必须满足 msb >= lsb，且位宽等于 msb - lsb + 1 |
+| 清单不是一条宿主加若干条分支 | `bad_request` | 端口清单必须是一条不带位区间的宿主总线端口，加若干条方向相反的位区间分支 |
+
+`set_port_width` 因此也是改拆线器位区间的入口：一次合法的变更往往要同时改动多条分支（把「八个 1 位」改成「两个 4 位」），按单端口下发的形状表达不出来，所以载荷是整份清单（[ADR 0020](decisions/0020-port-list-is-the-only-authority.md)）。分支数量与分支名都跟着清单走，因此改完之后没有保留的旧分支端口会连同接在它上面的 Connection 一起变成悬空，调用方从 `danglingConnectionIds` 直接读到它们。
+
+求值是逐位搬运：拆线器的每条分支输出取宿主总线在它位区间上的那些位，合线器把每条分支输入的位放回它区间声明的那些位置。分支的位宽等于它区间的长度，两者在清单校验时已经对齐。没有连接的分支不提供来源，它覆盖的那些位因此是 `X`，其余位照常由别的分支决定。
+
 所有 `componentId` 和 `connectionId` 都从 `1` 开始。渲染进程传入删除接口的 ID 必须是正安全整数；C++ 删除处理还会拒绝零，以及负数、小数、指数形式、字符串和超出无符号整数范围的值。
 
 ## 请求
@@ -38,7 +60,7 @@ Electron 主进程与 C++ 引擎通过 stdin/stdout 建立一条长连接。双�
 | type | 主要字段 | 结果 |
 | --- | --- | --- |
 | `health_check` | 无 | 返回引擎名称和版本 |
-| `add_component` | `kind`：`input`、`output`、`and`、`or`、`nand`、`nor`、`xor`、`xnor`、`not`、`clock`、`d_flip_flop`；可选 `ports`：端口清单 | 返回 `componentId` 与该元件实际的端口清单 |
+| `add_component` | `kind`：`input`、`output`、`and`、`or`、`nand`、`nor`、`xor`、`xnor`、`not`、`clock`、`d_flip_flop`、`splitter`、`merger`；可选 `ports`：端口清单（`splitter` 与 `merger` 必填） | 返回 `componentId` 与该元件实际的端口清单 |
 | `set_port_width` | `componentId`、`ports`：替换后的**整份**端口清单 | 返回替换后的端口清单，以及因本次改宽而转为悬空的 Connection 身份 |
 | `add_connection` | `sourceComponentId`、`sourcePort`、`targetComponentId`、`targetPort` | 返回 `connectionId` |
 | `remove_component` | `componentId` | 删除 Component，并保留相关悬空 Connection |
@@ -119,7 +141,7 @@ reset 之后引擎里的 Input 也回到初值 `X`，因此调用方需要重新
 三个与位宽有关的错误码各管一件事：
 
 - `invalid_width`：端口位宽不是正整数，或 `set_input` 的值长度不等于目标端口声明的位宽；
-- `invalid_bit_range`：位区间的下界高于上界，或它的跨度与 `width` 不符；
+- `invalid_bit_range`：位区间的下界高于上界，或它的跨度与 `width` 不符；对拆线器与合线器还包括位区间组合没有盖满宿主总线、互相重叠或越出宿主总线（三种违反的 `message` 各不相同，见上面的「数据驱动的元件」一节）；
 - `width_mismatch`：`add_connection` 的两端位宽不同。它不与其他结构错误合并成 `invalid_connection`，因为这是用户能修、也需要看到原因的一类拒绝。
 
 `add_connection` 的位宽校验不做零扩展、符号扩展或截断（[ADR 0016](decisions/0016-strict-port-width.md)）。
@@ -142,11 +164,13 @@ reset 之后引擎里的 Input 也回到初值 `X`，因此调用方需要重新
 - `d_flip_flop` 的 `q` 初值是 `X`，表示还没有采过样；没有连接 `clock` 端口时它每步都不更新，这是结构问题而不是错误，引擎不报错。
 - `reset` 是清空全部运行时状态的唯一途径，与推进是两条独立请求：它把 `Simulation` 恢复成刚建立时的样子（这一点等价于「用同一份 `Circuit` 重新构造一个 `Simulation`」，包括清空上升沿判定的前值快照），但不触碰 `Circuit`——元件与连接的引擎身份原样保留，`reset` 之后新建的元件仍拿到递增的身份。
 
-## 规划中的变更
+## 已知限制
 
-以下变更已由 [ADR 0017](decisions/0017-paired-splitter-and-merger.md) 决定，但尚未实现。列在这里以免与上面的当前协议混淆：
-
-- `add_component` 的 `kind` 增加 `splitter` 与 `merger`。位区间本身已经作为 Port 的属性能过协议（见上面的「端口清单」），缺的是这两个元件类型、它们的求值，以及位区间组合「完整覆盖且互不重叠」的校验（新增 `invalid_bit_range` 的第二种用法）。
+- 多位值只有二进制逐位文本一种表示，没有十六进制或十进制显示；
+- 没有隐式位宽转换：零扩展、符号扩展与截断都不做，需要换宽度时用合线器显式构造；
+- 拆线器与合线器没有「可选分支」这种属性，位区间必须完整覆盖宿主总线，未覆盖的位不会被丢弃；
+- 多位 `d_flip_flop` 不存在，多位寄存器由拆线器、逐位 `d_flip_flop` 与合线器组合表达；
+- 端口位宽没有领域上限。
 
 多条 Connection 的悬空只在一种情况下会被调用方观察到「恢复有效」：改宽回原样。协议不为它单独发一条通知——`set_port_width` 的 `danglingConnectionIds` 是一份**差分**，调用方若要完整画面，可以按各元件当前的端口清单自行推导匹配关系。
 
