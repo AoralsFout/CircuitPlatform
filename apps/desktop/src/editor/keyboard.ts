@@ -10,7 +10,9 @@ export type EditorShortcut =
   | "start-or-resume-simulation"
   | "pause-simulation"
   | "step-simulation"
-  | "reset-simulation";
+  | "reset-simulation"
+  | "save"
+  | "save-as";
 
 /** 画布键盘导航可执行的最小意图集合；组件只负责把意图映射为 DOM/编辑器动作。 */
 export type CanvasKeyboardAction =
@@ -144,6 +146,11 @@ export function isNativeActivationTarget(target: EventTarget | null): boolean {
  * @returns 匹配到的编辑器快捷键；普通按键返回 null。
  */
 export function resolveEditorShortcut(input: EditorKeyInput): EditorShortcut | null {
+  // 保存键位先于输入控件判定：文件操作在控件内没有本地含义，而应用菜单已移除，
+  // 没有其它处理器会接住这个组合键，焦点在哪都应当能保存。
+  if ((input.ctrlKey || input.metaKey) && input.key.toLowerCase() === "s") {
+    return input.shiftKey ? "save-as" : "save";
+  }
   if (input.editableTarget) return null;
   // 运行控制占用功能键簇：开始与继续是同一个「运行」意图，由调用方按当前运行态分派。
   if (input.key === "F5") return "start-or-resume-simulation";

@@ -1,4 +1,4 @@
-import { readonly, shallowRef, type DeepReadonly, type Ref } from "vue";
+import { readonly, shallowRef, computed, type ComputedRef, type DeepReadonly, type Ref } from "vue";
 import {
   createAndDemoDocument,
   createEditorSession,
@@ -28,7 +28,31 @@ import {
   type WorkspaceSnapshot,
 } from "../workspace/index.ts";
 import { createEngineCallQueue } from "../workspace/engineQueue.ts";
+import { parseProjectFile, serializeProjectFile } from "../project-file/index.ts";
+import {
+  projectDisplayName,
+  readRecentProjects,
+  rememberRecentProject,
+  type KeyValueStorage,
+} from "../project-file/recent-projects.ts";
 import type { ComponentKindName, PortSpec } from "@circuit-platform/protocol";
+
+/**
+ * 项目文件保存的主进程桥接；与引擎 adapter 一样来自 `window.circuitPlatform`。
+ * 序列化与校验留在渲染层，桥接只负责保存对话框与原子写文件。
+ */
+interface ProjectFileBridge {
+  /** 保存对话框；用户取消时返回 `reason: "canceled"`，调用方按静默放弃处理。 */
+  pickSavePath(options?: { defaultPath?: string }): Promise<{ ok: true; path: string } | { ok: false; reason: string }>;
+  /** 原子写入项目文件；文件系统失败以 `reason` 带回可展示原因。 */
+  writeProjectFile(filePath: string, content: string): Promise<{ ok: true } | { ok: false; reason: string }>;
+}
+
+/** 顶栏保存状态的三个可见语义：已保存、有未保存改动、最近一次保存失败。 */
+export type ProjectSaveState = "saved" | "dirty" | "error";
+
+/** 未保存文档在另存为对话框里的默认文件名；与顶栏占位名一致。 */
+const UNTITLED_PROJECT_NAME = "未命名电路.circuit.json";
 
 interface WorkspaceBinding {
   state: DeepReadonly<Ref<WorkspaceSnapshot>>;
@@ -84,6 +108,28 @@ interface WorkspaceBinding {
   addComponent(kind: ComponentKindName, center: Point, altKey?: boolean, continuous?: boolean): Promise<boolean>;
   /** 复制指定稳定编辑器元件；副本不继承连接、路线、选择或信号。 */
   duplicateComponent(componentId?: EditorComponentId): Promise<boolean>;
+  /** 当前文档已保存到的路径原始写法；从未保存过时为 null。 */
+  projectPath: DeepReadonly<Ref<string | null>>;
+  /** 文档内容（结构与 Input 当前值）自上次保存以来是否有改动。 */
+  isDirty: DeepReadonly<Ref<boolean>>;
+  /** 最近一次保存失败的展示原因；没有失败时为 null，成功的保存会清除它。 */
+  saveError: DeepReadonly<Ref<string | null>>;
+  /** 编辑器就绪时可以保存；保存不依赖引擎在线。 */
+  canSave: ComputedRef<boolean>;
+  /** 顶栏显示的项目名：已保存文档的文件名，未保存文档为 null（界面回退到占位名）。 */
+  projectName: ComputedRef<string | null>;
+  /** 顶栏的保存状态语义，见 `ProjectSaveState`。 */
+  saveState: ComputedRef<ProjectSaveState>;
+  /**
+   * 保存当前文档。已有路径直接覆写；没有路径的文档等价另存为。
+   * @returns 保存成功返回 true；用户取消对话框或保存失败返回 false。
+   */
+  save(): Promise<boolean>;
+  /**
+   * 另存为：总是询问位置，成功后文档身份切换为新路径。
+   * @returns 保存成功返回 true；用户取消对话框或保存失败返回 false。
+   */
+  saveAs(): Promise<boolean>;
 }
 
 function toEditorBindings(bindings: SimulationBindings): EditorBindings {
@@ -114,7 +160,7 @@ export interface UseWorkspaceOptions {
  * @returns 只读仿真/编辑器快照，以及基于稳定 editor ID 的界面操作。
  */
 export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBinding {
-  const adapter = (window as unknown as { circuitPlatform: EngineAdapter }).circuitPlatform;
+  const adapter = (window as unknown as { circuitPlatform: EngineAdapter & ProjectFileBridge }).circuitPlatform;
   // 记录每次健康检查看到的引擎进程代号：恢复流程靠「代号是否变化」区分「进程真的换了」
   // 与「一次超时之类的传输故障误伤了结构事务」——后者引擎还在，电路不需要重建。
   let lastKnownEngineEpoch: number | null = null;
@@ -163,6 +209,52 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   let simulationRefreshRequested = false;
   /** 恢复循环是否在跑：防止同一次不可用触发多条并行的恢复路径。 */
   let recovering = false;
+
+  const projectPath = shallowRef<string | null>(null);
+  const isDirty = shallowRef(false);
+  const saveError = shallowRef<string | null>(null);
+  // 上一次落盘内容（序列化后的项目文件文本）；置脏就是拿当前内容与它比较。
+  let savedFileSnapshot: string | null = null;
+  const canSave = computed(() => editorState.value !== null);
+  const projectName = computed(() => projectPath.value === null ? null : projectDisplayName(projectPath.value));
+  const saveState = computed<ProjectSaveState>(() => {
+    if (saveError.value !== null) return "error";
+    return isDirty.value ? "dirty" : "saved";
+  });
+
+  /**
+   * 把当前文档与 Input 当前值序列化成项目文件文本。
+   * 置脏比较与实际落盘共用这一条序列化路径，保证「脏」的含义就是「落盘内容会不一样」。
+   */
+  function serializeCurrentProjectFile(): string | null {
+    const snapshot = editor?.snapshot();
+    if (!snapshot) return null;
+    return JSON.stringify(serializeProjectFile({
+      document: snapshot.document,
+      inputValues: state.value.inputValues,
+    }));
+  }
+
+  /** 用当前内容对照上次落盘内容刷新脏标记；在每条会改动文档或输入的命令之后调用。 */
+  function refreshDirtyMarker(): void {
+    const current = serializeCurrentProjectFile();
+    isDirty.value = savedFileSnapshot !== null && current !== savedFileSnapshot;
+  }
+
+  /** 读取本地偏好存储；浏览器禁用持久化时返回 null，记录最近项目安静降级。 */
+  function preferenceStorage(): KeyValueStorage | null {
+    try {
+      return typeof window === "undefined" ? null : window.localStorage ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** 保存成功后把该路径记录进最近项目；记录失败不影响已完成的保存。 */
+  function recordRecentProject(path: string): void {
+    const storage = preferenceStorage();
+    rememberRecentProject(storage, readRecentProjects(storage), path);
+  }
 
   async function reflect(operation: () => Promise<WorkspaceSnapshot>): Promise<void> {
     const pending = operation();
@@ -308,6 +400,9 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     unsubscribeEditor = editor.subscribe((snapshot) => {
       editorState.value = snapshot;
     });
+    // 新会话的初始文档就是脏标记的基线：加载（示例或项目）之后是干净的，改动才置脏。
+    savedFileSnapshot = serializeCurrentProjectFile();
+    isDirty.value = false;
   }
 
   /** 把启动示例当作普通文档推送到引擎；示例不占用任何专用代码路径。 */
@@ -351,6 +446,8 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
 
   async function setInputBit(key: InputKey, index: number, bit: InputBit): Promise<void> {
     await reflect(() => workspace.setInputBit(key, index, bit));
+    // 拨输入也是文档改动（输入值进文件）；被引擎拒绝的提交不会改 inputValues，因此不会置脏。
+    refreshDirtyMarker();
   }
 
   /**
@@ -366,6 +463,9 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     const result = await pending;
     editorState.value = result.snapshot;
     await refreshSimulationAfterBindingsChange();
+    await refreshSimulationAfterBindingsChange();
+    // 命令可能改变文档或输入值：脏标记在这里统一刷新，包装函数不必各自记挂。
+    refreshDirtyMarker();
     if (!result.ok && ENGINE_TRANSPORT_ERROR_CODES.includes(result.error.code)) {
       beginRecovery();
     }
@@ -406,6 +506,53 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   async function retryPlacement(): Promise<boolean> {
     const result = await runEditorCommand({ type: "retry-placement" });
     return result?.ok ?? false;
+  }
+
+  /**
+   * 把文档写入指定路径并落定保存结果：成功则文档身份切换为该路径、脏标记清除并记录最近项目；
+   * 失败只记录可展示原因，编辑器内容原样保留。
+   * 序列化与校验都在这一刻完成，写入期间用户的继续编辑会反映在保存结束后的脏标记上。
+   */
+  async function commitSave(path: string): Promise<boolean> {
+    const content = serializeCurrentProjectFile();
+    if (content === null) return false;
+    // 落盘前用同一份校验实现做往返自检：保存出一个自己都打不开的文件是不可接受的。
+    const validation = parseProjectFile(JSON.parse(content));
+    if (!validation.ok) {
+      saveError.value = `项目文件校验失败，已停止保存：${validation.errors[0]?.message ?? "未知原因"}`;
+      return false;
+    }
+    const result = await adapter.writeProjectFile(path, content);
+    if (!result.ok) {
+      saveError.value = result.reason;
+      return false;
+    }
+    projectPath.value = path;
+    saveError.value = null;
+    // 基线取序列化时刻的内容：写文件期间用户又做了编辑的话，保存结束后仍然是脏的。
+    savedFileSnapshot = content;
+    refreshDirtyMarker();
+    recordRecentProject(path);
+    return true;
+  }
+
+  async function saveAs(): Promise<boolean> {
+    if (!editor) return false;
+    const dialog = await adapter.pickSavePath({
+      defaultPath: projectPath.value ?? UNTITLED_PROJECT_NAME,
+    });
+    if (!dialog.ok) {
+      // 取消不是失败：不打断用户，也不清掉上一次的错误提示。
+      if (dialog.reason !== "canceled") saveError.value = dialog.reason;
+      return false;
+    }
+    return commitSave(dialog.path);
+  }
+
+  async function save(): Promise<boolean> {
+    if (!editor) return false;
+    if (projectPath.value === null) return saveAs();
+    return commitSave(projectPath.value);
   }
 
   /** 创建或安全重接连接；失败只返回错误，草稿由画布交互层继续保留。 */
@@ -456,5 +603,13 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     retryPlacement,
     addComponent,
     duplicateComponent,
+    projectPath: readonly(projectPath),
+    isDirty: readonly(isDirty),
+    saveError: readonly(saveError),
+    canSave,
+    projectName,
+    saveState,
+    save,
+    saveAs,
   };
 }

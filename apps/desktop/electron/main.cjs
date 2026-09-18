@@ -1,7 +1,9 @@
-const { app, BrowserWindow, Menu, ipcMain } = require("electron");
+const { app, BrowserWindow, Menu, dialog, ipcMain } = require("electron");
+const fs = require("node:fs");
 const path = require("node:path");
 const { EngineClient } = require("./engine-client.cjs");
-const { requirePositiveId } = require("./request-validation.cjs");
+const { requirePositiveId, requireNonEmptyString, requireSaveDialogOptions } = require("./request-validation.cjs");
+const { writeTextFileAtomically } = require("./project-file-io.cjs");
 
 const engineFileName = process.platform === "win32" ? "circuit-engine.exe" : "circuit-engine";
 
@@ -113,6 +115,28 @@ app.whenReady().then(() => {
       componentId: requirePositiveId(componentId, "componentId"),
       ports,
     }));
+  // 项目文件通道只做对话框与 IO：序列化与校验在渲染层，校验规则只有一份实现（规格 #34）。
+  // 参数校验失败按既有通道惯例抛 TypeError；文件系统失败进结果对象，让渲染层拿到可展示原因。
+  ipcMain.handle("project:pick-save-path", async (event, options) => {
+    const dialogOptions = requireSaveDialogOptions(options);
+    const result = await dialog.showSaveDialog(BrowserWindow.fromWebContents(event.sender), {
+      title: "保存项目文件",
+      defaultPath: dialogOptions.defaultPath,
+      filters: [{ name: "CircuitPlatform 项目", extensions: ["circuit.json"] }],
+    });
+    if (result.canceled || !result.filePath) return { ok: false, reason: "canceled" };
+    return { ok: true, path: result.filePath };
+  });
+  ipcMain.handle("project:write-file", (_event, filePath, content) => {
+    try {
+      requireNonEmptyString(filePath, "filePath");
+      requireNonEmptyString(content, "content");
+      writeTextFileAtomically(fs, filePath, content);
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, reason: error instanceof Error ? error.message : "写入项目文件失败。" };
+    }
+  });
   createWindow();
 
   app.on("activate", () => {

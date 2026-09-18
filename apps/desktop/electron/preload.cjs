@@ -13,4 +13,7 @@ contextBridge.exposeInMainWorld("circuitPlatform", {
   reset: () => ipcRenderer.invoke("engine:reset"),
   getSignal: (componentId, port) => ipcRenderer.invoke("engine:get-signal", componentId, port),
   setPortWidth: (componentId, ports) => ipcRenderer.invoke("engine:set-port-width", componentId, ports),
+  // 项目文件通道：保存对话框与原子写文件；序列化与校验留在渲染进程。
+  pickSavePath: (options) => ipcRenderer.invoke("project:pick-save-path", options),
+  writeProjectFile: (filePath, content) => ipcRenderer.invoke("project:write-file", filePath, content),
 });
