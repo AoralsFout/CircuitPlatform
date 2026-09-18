@@ -154,10 +154,10 @@ interface WorkspaceBinding {
   /** 最近一次打开或新建失败的可展示原因；没有失败时为 null，成功的打开/新建会清除它。 */
   openError: DeepReadonly<Ref<string | null>>;
   /**
-   * 待确认的文件操作（`"open"` / `"new"`）：文档置脏时先确认再执行。
+   * 待确认的文件操作（`"open"` / `"new"` / `"load-example"`）：文档置脏时先确认再执行。
    * 确认对话框由界面层渲染；Esc 与取消按钮都走 `cancelPendingFileAction`。
    */
-  pendingFileAction: DeepReadonly<Ref<"open" | "new" | null>>;
+  pendingFileAction: DeepReadonly<Ref<"open" | "new" | "load-example" | null>>;
   /**
    * 请求打开项目文件：文档置脏时先挂起待确认动作，否则直接进入打开流程。
    * 打开流程本身见 `openProjectFromPath`。
@@ -187,6 +187,12 @@ interface WorkspaceBinding {
    * @param path 最近项目条目记录的路径。
    */
   requestOpenRecent(path: string): Promise<void>;
+  /**
+   * 请求加载 AND 示例：文档置脏时先经过与打开/新建相同的未保存确认，确认或文档干净时
+   * 把示例当作普通文档走与打开项目相同的整体替换推送路径。示例加载后是一份未保存文档——
+   * 不切换文件身份、不写入最近项目，脏基线是示例文档本身（`attachEditor` 的既有行为）。
+   */
+  requestLoadExample(): Promise<void>;
 }
 
 function toEditorBindings(bindings: SimulationBindings): EditorBindings {
@@ -274,8 +280,8 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   // 最近项目在本会话内的内存副本：构造时从存储恢复，此后由记录与清理函数同步维护，
   // 顶栏下拉与首启空状态（#40）直接消费这份响应式列表。
   const recentProjects = shallowRef<RecentProject[]>(readRecentProjects(preferenceStorage()));
-  /** 待确认的文件动作；置脏文档的打开/新建必须先经过确认。 */
-  const pendingFileAction = shallowRef<"open" | "new" | null>(null);
+  /** 待确认的文件动作；置脏文档的打开/新建/加载示例必须先经过确认。 */
+  const pendingFileAction = shallowRef<"open" | "new" | "load-example" | null>(null);
   // 待确认「打开」的来源路径：来自最近项目入口时非空（确认后不再弹文件对话框，
   // 直接打开该路径）；来自对话框打开时为 null。与 pendingFileAction 同生共死。
   let pendingOpenPath: string | null = null;
@@ -487,29 +493,38 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     isDirty.value = false;
   }
 
-  /** 启动示例是否已经加载过：它只属于启动，新建空文档之后不得被引擎检查悄悄带回来。 */
-  let exampleLoaded = false;
-
-  /** 把启动示例当作普通文档推送到引擎；示例不占用任何专用代码路径。 */
-  async function loadExampleWhenReady(): Promise<void> {
-    if (exampleLoaded || state.value.engineState !== "ready" || state.value.hasCircuit) return;
-    const document = createAndDemoDocument();
-    const pending = workspace.loadCircuit(document);
-    state.value = workspace.snapshot();
-    const loaded = await pending;
-    state.value = loaded.snapshot;
-    if (loaded.bindings) {
-      attachEditor(document, loaded.bindings);
-      exampleLoaded = true;
+  /**
+   * 把 AND 示例当作普通文档推送到引擎：与打开项目共用整体替换推送路径，没有专用路径。
+   * 示例加载后是一份未保存文档——不切换文件身份（`projectPath` 清空）、不写入最近项目；
+   * 脏基线由 `attachEditor` 置为示例文档本身，之后的改动才置脏。
+   * 首启没有编辑器会话也一样可用：会话由这次成功加载建立。
+   */
+  async function performLoadExample(): Promise<void> {
+    openError.value = null;
+    // 引擎不在线时推送必然是空操作：先给出可展示的原因，而不是等推送悄悄返回。
+    if (state.value.engineState !== "ready") {
+      openError.value = "仿真引擎不可用，无法加载示例。";
+      return;
     }
+    const document = createAndDemoDocument();
+    // 初值省略：沿推送路径的既有规则沿用工作区当前输入值（与引擎重建同规则），示例不另立语义。
+    const loaded = await workspace.openCircuit(document);
+    if (loaded.bindings === null) {
+      openError.value = loaded.snapshot.operationError ?? "加载示例失败。";
+      return;
+    }
+    state.value = loaded.snapshot;
+    attachEditor(document, loaded.bindings);
+    projectPath.value = null;
+    saveError.value = null;
+    openError.value = null;
   }
 
   async function checkEngine(): Promise<void> {
     await reflect(() => workspace.checkEngine());
-    // 恢复循环进行中时不打扰它：可用性由恢复流程自己解除，示例加载也可能与重建互相踩踏。
+    // 恢复循环进行中时不打扰它：可用性由恢复流程自己解除。
     if (recovering) return;
     editor?.setEngineAvailability(state.value.engineState === "ready");
-    await loadExampleWhenReady();
   }
 
   async function start(): Promise<void> {
@@ -688,7 +703,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   }
 
   async function openProjectFromPath(path: string): Promise<boolean> {
-    if (!editor) return false;
+    // 首启空状态（#40）没有编辑器会话也必须能打开：会话由这次成功加载的 attachEditor 建立。
     const file = await adapter.readProjectFile(path);
     if (!file.ok) {
       openError.value = file.reason;
@@ -713,7 +728,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   }
 
   async function performOpen(): Promise<void> {
-    if (!editor) return;
+    // 首启空状态没有会话也可以打开：置脏确认以「有文档」为前提，无会话时文档不存在、无需确认。
     openError.value = null;
     const dialog = await adapter.pickOpenPath();
     if (!dialog.ok) {
@@ -729,7 +744,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
    * 工作区回到无电路状态、时间线归零；脏基线由 attachEditor 重置为空文档本身。
    */
   async function performNew(): Promise<void> {
-    if (!editor) return;
+    // 首启空状态没有会话也可以新建：成功后空文档会话由 attachEditor 建立。
     openError.value = null;
     if (state.value.engineState !== "ready") {
       openError.value = "仿真引擎不可用，无法新建文档。";
@@ -783,6 +798,15 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     await performNew();
   }
 
+  async function requestLoadExample(): Promise<void> {
+    if (pendingFileAction.value !== null) return;
+    if (isDirty.value) {
+      pendingFileAction.value = "load-example";
+      return;
+    }
+    await performLoadExample();
+  }
+
   async function confirmPendingFileAction(): Promise<void> {
     const action = pendingFileAction.value;
     const openPath = pendingOpenPath;
@@ -797,6 +821,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
         await performOpen();
       }
     } else if (action === "new") await performNew();
+    else if (action === "load-example") await performLoadExample();
   }
 
   function cancelPendingFileAction(): void {
@@ -869,5 +894,6 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     openProjectFromPath,
     recentProjects: readonly(recentProjects),
     requestOpenRecent,
+    requestLoadExample,
   };
 }

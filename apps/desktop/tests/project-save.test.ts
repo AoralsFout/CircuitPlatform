@@ -132,12 +132,13 @@ function stubWindow(engine: SaveFlowEngine, storage: KeyValueStorage): () => voi
   };
 }
 
-/** 启动后的示例电路是一份未保存文档：脏标记干净、没有任何路径。 */
+/** 启动后的示例电路是一份未保存文档：脏标记干净、没有任何路径。#40 起示例由启动后的空状态显式加载。 */
 async function bootstrappedBinding(engine: SaveFlowEngine, storage: KeyValueStorage) {
   const restore = stubWindow(engine, storage);
   try {
     const binding = useWorkspace();
     await binding.bootstrap();
+    await binding.requestLoadExample();
     assert.equal(binding.isDirty.value, false);
     assert.equal(binding.projectPath.value, null);
     assert.equal(binding.saveState.value, "saved");

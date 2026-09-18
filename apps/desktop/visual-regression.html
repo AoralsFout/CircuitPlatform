@@ -217,6 +217,10 @@
         }
       };
       const prepare = async () => {
+        // 首启空状态（#40）本身就是画面：启动不再自动加载示例，其余状态先从空状态面板
+        // 显式加载示例，再等电路出现在画布上。
+        if (state === "first-start") return;
+        click(await waitFor('[title="加载示例电路"]'));
         await waitFor(".circuit-node");
         failAdds = state === "error";
         if (state === "selected-component") click(document.querySelector(".circuit-node"));
