@@ -34,6 +34,34 @@ pnpm --filter @circuit-platform/desktop performance:benchmark --mode=route
 
 `--components=` 与 `--wires=` 可改变规模，只用于定位成本随规模的变化，验收口径固定为 500 / 1,000。输出中的 `domElements` 与 `smilAnimations` 用于成本定位。
 
+## 当前状态：本基准跑不起来（Phase 4.5 遗留，未修）
+
+**五种模式目前都无法运行，因此下表的读数是 Phase 4.5 之前的，不是本次复测结果。** 命令不会失败退出，也不会打印任何东西——它会一直挂着，直到被外部超时杀掉。
+
+根因在基准页面自身，与画布或引擎无关：
+
+```js
+// apps/desktop/benchmark.html:36
+const port = definition.ports.find((candidate) => candidate.direction === direction) || definition.ports[0];
+```
+
+`ComponentDefinition` 已经不再有 `ports` 字段——端口清单改由引擎回传、`ComponentDefinition` 只保留展示元数据，这是 `963e77d`（feat(desktop): 端口清单改由引擎回传，检查器可改位宽）做的。该提交没有同步更新 `benchmark.html`，而它最后一次被改是在此之前。
+
+可以直接在纯 Node 下证实，不需要拉起 Electron：
+
+```bash
+node --experimental-strip-types --input-type=module -e "
+import { createComponentDefinitionRegistry } from './src/canvas/index.ts';
+console.log(JSON.stringify(createComponentDefinitionRegistry().get('input').ports));"
+# → undefined
+```
+
+`undefined.find(...)` 抛 TypeError，`benchmark.html` 的模块脚本因此在构建连线时中断，`window.__benchmarkReady` 永远不会被置上；`scripts/performance-benchmark-runner.cjs` 等的就是它，于是进程一直等下去。也就是说这不是「跑得慢」，页面在构造文档阶段就已经死了。
+
+为什么会漏到现在：本基准不在 `pnpm verify` 里，`963e77d` 合并时没有任何一步会碰它。修它属于把端口来源从展示定义改成引擎清单那件事的收尾，需要在基准页面里按端口清单构造连线几何（与 `canvas/index.ts` 的通用排布规则同源）。**这不在 issue #32 的范围内，收口票不改源码让验收成立**，因此留待单独判断。
+
+下表是 Phase 4.5 之前的最后一次可用读数，保留作为回归目标；在基准修好之前它不代表当前代码。
+
 ## 当前结果
 
 2026-09-18 在本工作区执行（Windows，Node 24，500 Component / 1,000 Wire，5 秒）：
