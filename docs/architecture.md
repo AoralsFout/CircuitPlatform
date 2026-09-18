@@ -73,12 +73,12 @@ Subcircuit 是 Project 与编辑器层的概念，在进入引擎之前就已经
 - `Simulation(Circuit)`：从 Circuit 创建独立仿真快照；
 - `setInput`：设置 Input 元件的输出值；
 - `settle`：重复求值直到输出稳定，并返回 `SimulationResult`；
-- `tick`：推进一个 tick——翻转全部 Clock、求值到稳定、让时序元件完成采样、再求值一次——并返回 `SimulationResult`；
+- `tick`：推进一个 tick——记录 `clock` 端口前值、翻转全部 Clock、求值到稳定、让 DFlipFlop 在上升沿采样、再求值一次——并返回 `SimulationResult`；
 - `step`：返回从创建以来推进的 tick 次数；
 - `outputSignals`：返回电路中全部输出端口的当前信号，供一次响应带回整份读数；
 - `signal`：读取端口当前的 SignalValue。
 
-当前切片实现 `Input`、`NotGate`、`AndGate`、`OrGate`、`NandGate`、`NorGate`、`XorGate`、`XnorGate`、`Output` 和 `Clock` 的行为，并能报告组合逻辑环路。`Clock` 的输出初值是 `0`（`0 → 1` 才算上升沿，从 `X` 起步会永远判不出第一次边沿），每推进一次翻转一次；其余元件的输出初值仍是 `Unknown`。未连接输入的值为 `Unknown`；不存在的端口返回空值。更丰富的通用仿真错误将在后续切片中加入。
+当前切片实现 `Input`、`NotGate`、`AndGate`、`OrGate`、`NandGate`、`NorGate`、`XorGate`、`XnorGate`、`Output`、`Clock` 和 `DFlipFlop` 的行为，并能报告组合逻辑环路。`Clock` 的输出初值是 `0`（`0 → 1` 才算上升沿，从 `X` 起步会永远判不出第一次边沿），每推进一次翻转一次；`DFlipFlop` 的 `q` 初值是 `Unknown`，只在 `clock` 端口出现 `0 → 1` 时把 `d` 采样进 `q`，下降沿与任何一端是 `X` 的跳变都不采样；其余元件的输出初值仍是 `Unknown`。判边沿所比较的前值跨 tick 保留，因此时钟来自 Input 元件或组合逻辑时同样成立。未连接输入的值为 `Unknown`；不存在的端口返回空值。更丰富的通用仿真错误将在后续切片中加入。
 
 ## 当前外部接口
 
