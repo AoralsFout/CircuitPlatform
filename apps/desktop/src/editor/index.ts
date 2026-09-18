@@ -264,6 +264,13 @@ export interface EditorSession {
   subscribe(listener: (snapshot: EditorSnapshot) => void): () => void;
   /** 更新引擎可用性；只影响结构命令，不影响离线本地布局编辑。 */
   setEngineAvailability(available: boolean): void;
+  /**
+   * 用引擎重启后重建得到的绑定整体替换当前绑定；文档与撤销/重做历史原样保留。
+   * 这是 `onBindingsChanged` 的反向：由组合层在「同一文档采纳新引擎」时把新绑定喂回
+   * 既有会话，不重开会话，撤销栈因此不丢。它不触发 `onBindingsChanged`——新绑定此刻
+   * 已经是工作区手里的那一份。
+   */
+  adoptBindings(bindings: EditorBindings): void;
 }
 
 export interface EditorSessionOptions {
@@ -448,6 +455,17 @@ const engineUnavailableError: EngineError = {
   retryable: true,
   category: "structure",
 };
+
+/**
+ * 传输层不可用的错误代码集合：请求没有得到协议响应（进程死亡、连接失败、超时）时
+ * `CircuitEnginePort` 的实现会以这些代码报告失败。看到它们就冻结结构事务，直到可用性
+ * 被显式恢复。组合层用同一份清单识别「结构事务因引擎不可用而失败」，据此发起恢复。
+ */
+export const ENGINE_TRANSPORT_ERROR_CODES: readonly string[] = [
+  "engine_unavailable",
+  "engine_offline",
+  "engine_connection_failed",
+];
 
 function cloneVisibleDocument(document: MutableDocument): EditorDocument {
   const isAttached = (componentId: EditorComponentId): boolean =>
@@ -792,7 +810,7 @@ export function createEditorSession(
       .catch((thrown): EngineResult<T> => failed<T>(normalizeThrown(thrown)))
       .then((result) => {
         // 传输/进程故障会冻结后续 Circuit 事务；协议业务拒绝仍可直接重试。
-        if (!result.ok && ["engine_unavailable", "engine_offline", "engine_connection_failed"].includes(result.error.code)) {
+        if (!result.ok && ENGINE_TRANSPORT_ERROR_CODES.includes(result.error.code)) {
           engineAvailabilityOverride = false;
         }
         return result;
@@ -2284,6 +2302,21 @@ export function createEditorSession(
     setEngineAvailability(available) {
       engineAvailabilityOverride = available;
       if (available && error?.code === engineUnavailableError.code) error = null;
+      publish();
+    },
+    adoptBindings(next) {
+      // 引擎身份映射整体替换：旧进程的引擎 ID 全部作废，历史帧里没有存引擎 ID，
+      // 撤销/重做时都按当时的绑定重新解析，因此历史不需要改写。
+      bindings.components = { ...next.components };
+      bindings.connections = { ...next.connections };
+      bindings.componentKinds = next.componentKinds ? { ...next.componentKinds } : undefined;
+      bindings.ports = next.ports ? { ...next.ports } : undefined;
+      // 端口清单以引擎回传为权威（ADR 0020）：重建后的清单随绑定刷新到文档上。
+      for (const component of document.components.values()) {
+        if (component.lifecycle !== "active") continue;
+        const known = bindings.ports?.[component.id];
+        if (known !== undefined) component.ports = clonePorts(known);
+      }
       publish();
     },
     subscribe(listener) {

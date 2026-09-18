@@ -51,6 +51,13 @@ const defaultTickScheduler: TickScheduler = {
   },
 };
 
+/**
+ * 引擎进程死亡时传输层错误消息的稳定前缀。
+ * Electron IPC 只把 Error 的 message 带到渲染层，识别「进程死亡」靠这段文案；它与
+ * `apps/desktop/electron/engine-client.cjs` 里生成的死亡错误共用同一句，两处必须同步修改。
+ */
+const ENGINE_PROCESS_EXITED_MARKER = "C++ 引擎进程已退出";
+
 export interface WorkspaceOptions {
   /** 连续运行的调度器；省略时使用 `setTimeout`。 */
   scheduler?: TickScheduler;
@@ -66,6 +73,12 @@ export interface EngineHealth {
   status: "ok" | "error" | "unavailable";
   message?: string;
   engine?: string;
+  /**
+   * 引擎进程代号：主进程每次成功拉起新进程时递增。
+   * 同号表示健康检查看到的仍是同一个进程（电路还在引擎里）；缺省表示调用方无法提供
+   * （测试假引擎），此时恢复流程按「进程已更换」处理。
+   */
+  processEpoch?: number;
 }
 
 /**
@@ -251,6 +264,15 @@ export interface Workspace {
   checkEngine(): Promise<WorkspaceSnapshot>;
   /** 把一份电路文档整体推送到引擎，并返回本次会话的编辑器 ID → 引擎 ID 绑定。 */
   loadCircuit(document: CircuitDocument): Promise<CircuitLoadResult>;
+  /**
+   * 引擎重启后的重建入口：把整份文档重新推送到（新的）引擎进程，整体替换引擎身份映射。
+   *
+   * 与 `loadCircuit` 的区别：它不做 `hasCircuit` 守卫——工作区记着的旧电路已经随旧进程
+   * 消失，推送目标本来就是一份空白引擎；它同时把运行时状态清回「刚加载完」的第 0 步基线
+   * （步数与波形历史随旧进程的时间线一并清空，连续运行停回 stopped），输入值由推送路径
+   * 按编辑器 ID 重新提交。调用时机由组合层掌握：健康检查确认新进程就绪之后。
+   */
+  rebuildCircuit(document: CircuitDocument): Promise<CircuitLoadResult>;
   /**
    * 由编辑器会话在结构提交后更新仿真所使用的临时引擎身份。
    * 只有拓扑真的变了才把连续运行切到暂停，并按元件身份保留已积累的读数；内容相同的绑定原样返回。
@@ -597,15 +619,17 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
 
   /**
    * 统一记录一次引擎操作失败：可展示的文案进 message 与 operationError。
-   * 只有传输层故障（拿不到协议响应）才把引擎打成 `error`；协议内的业务错误说明引擎还在，
-   * 保留 `ready` 让用户能继续操作。
+   * 协议内的业务错误说明引擎还在，保留 `ready` 让用户能继续操作；传输层故障里，
+   * 进程死亡表达为 `unavailable`（引擎本体已经消失，等待恢复），其余表达为 `error`。
    * @param error 捕获到的异常。
    * @param fallback 拿不到异常信息时的兜底文案。
    */
   function recordEngineFailure(error: unknown, fallback: string): void {
-    state.message = errorMessage(error, fallback);
-    state.operationError = state.message;
-    if (!(error instanceof ProtocolResponseError)) state.engineState = "error";
+    const message = errorMessage(error, fallback);
+    state.message = message;
+    state.operationError = message;
+    if (error instanceof ProtocolResponseError) return;
+    state.engineState = message.includes(ENGINE_PROCESS_EXITED_MARKER) ? "unavailable" : "error";
   }
 
   /** 连续运行期间每一拍完成后通知的订阅者；调用方发起的操作不需要这条通道。 */
@@ -830,8 +854,9 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
       state.isBusy = false;
       return { snapshot: createWorkspaceSnapshot(state), bindings, ports };
     } catch (error) {
-      state.message = errorMessage(error, "推送电路结构失败。");
-      state.operationError = state.message;
+      // 推送失败也要给引擎状态一个诚实的分类：协议错误说明引擎还在（保持 ready），
+      // 传输层故障（例如推送途中进程又死了）进入不可用，让恢复流程能接着处理。
+      recordEngineFailure(error, "推送电路结构失败。");
       for (const connectionId of createdConnectionIds.reverse()) {
         try { await adapter.removeConnection(connectionId); } catch { /* 保留原始创建错误。 */ }
       }
@@ -853,6 +878,28 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
       return Promise.resolve({ snapshot: createWorkspaceSnapshot(state), bindings: null, ports: {} });
     }
     return queue.enqueue(() => loadCircuitInternal(document));
+  }
+
+  /**
+   * 引擎重启后的重建入口：忽略 `loadCircuit` 的 `hasCircuit` 守卫（旧电路已随旧进程消失，
+   * 新进程本来就是空的），把整份文档重新推送并整体替换引擎身份映射，运行时状态清回
+   * 「刚加载完」的第 0 步基线。调用时机由组合层掌握：健康检查确认新进程就绪之后。
+   */
+  function rebuildCircuit(document: CircuitDocument): Promise<CircuitLoadResult> {
+    if (state.isBusy || state.engineState !== "ready") {
+      return Promise.resolve({ snapshot: createWorkspaceSnapshot(state), bindings: null, ports: {} });
+    }
+    return queue.enqueue(async () => {
+      // 新进程的仿真状态从零开始：旧进程的时间线已不可复现，步数与波形历史一并清空，
+      // 连续运行停回 stopped；读数由推送路径末尾的稳定求值重新填满。
+      cancelTick();
+      state.simulationState = "stopped";
+      state.simulationStep = 0;
+      state.waveform = [];
+      state.signals = {};
+      state.outputValue = "X";
+      return loadCircuitInternal(document);
+    });
   }
 
   function rebindSimulation(bindings: SimulationBindings | null): WorkspaceSnapshot {
@@ -1087,6 +1134,7 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
   return {
     checkEngine,
     loadCircuit,
+    rebuildCircuit,
     rebindSimulation,
     refreshReadings,
     start,
