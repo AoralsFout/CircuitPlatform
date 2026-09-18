@@ -1,14 +1,21 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ComponentKindName } from "@circuit-platform/protocol";
+import type { ComponentKindName, PortSpec } from "@circuit-platform/protocol";
 import {
   createEditorSession,
   type CircuitEnginePort,
   type EngineResult,
 } from "../src/editor/index.ts";
+import { portsForAddComponent } from "./fake-ports.ts";
 
 class LocalEngine implements CircuitEnginePort {
-  async addComponent(_kind: ComponentKindName): Promise<EngineResult<{ componentId: number }>> { return { ok: true, value: { componentId: 10 } }; }
+  async addComponent(kind: ComponentKindName, ports?: readonly PortSpec[]): Promise<EngineResult<{ componentId: number; ports: readonly PortSpec[] }>> {
+    // 与真实引擎同一条回退规则：省略端口清单时用内置定义，并把实际清单回传。
+    return { ok: true, value: { componentId: 10, ports: portsForAddComponent(kind, ports) } };
+  }
+  async setPortWidth(_componentId: number, ports: readonly PortSpec[]): Promise<EngineResult<{ ports: readonly PortSpec[]; danglingConnectionIds: readonly number[] }>> {
+    return { ok: true, value: { ports, danglingConnectionIds: [] } };
+  }
   async addConnection(): Promise<EngineResult<{ connectionId: number }>> { return { ok: true, value: { connectionId: 1 } }; }
   async removeComponent(componentId: number): Promise<EngineResult<{ componentId: number }>> { return { ok: true, value: { componentId } }; }
   async removeConnection(connectionId: number): Promise<EngineResult<{ connectionId: number }>> { return { ok: true, value: { connectionId } }; }

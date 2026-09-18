@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import type { ComponentKindName, EngineResponse, Signal } from "@circuit-platform/protocol";
+import type { ComponentKindName, EngineResponse, PortSpec, Signal } from "@circuit-platform/protocol";
 import {
   createWorkspace,
   type CircuitDocument,
@@ -52,7 +52,10 @@ function createEngineAdapter(client: ProtocolEngineClient): EngineAdapter {
       }
       return { status: "ok" as const, engine: response.engine };
     },
-    addComponent: (kind: ComponentKindName) => client.request({ type: "add_component", kind }),
+    addComponent: (kind: ComponentKindName, ports?: readonly PortSpec[]) =>
+      client.request({ type: "add_component", kind, ports }),
+    setPortWidth: (componentId: number, ports: readonly PortSpec[]) =>
+      client.request({ type: "set_port_width", componentId, ports }),
     addConnection: (source, target) =>
       client.request({
         type: "add_connection",

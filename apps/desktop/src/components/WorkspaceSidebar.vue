@@ -56,7 +56,7 @@ function startComponentDrag(event: DragEvent, kind: ComponentKindName): void {
       <div class="sidebar-section-title"><span>元件库</span><span class="component-count">{{ componentDefinitions.length }}</span></div>
       <div class="component-list">
         <button v-for="definition in componentDefinitions" :key="definition.kind" class="component-item" :class="{ 'component-item--disabled': !definition.available }" type="button" :draggable="definition.available" :disabled="!definition.available" :title="definition.disabledReason ?? `添加${definition.displayName}`" @dragstart="startComponentDrag($event, definition.kind)" @click="emit('placeComponent', definition.kind, $event.shiftKey)">
-          <span class="component-symbol">{{ definition.symbol }}</span><span><strong>{{ definition.displayName }}</strong><small>{{ definition.kind.toUpperCase() }} / {{ definition.ports.filter((port) => port.direction === 'input').length }} → {{ definition.ports.filter((port) => port.direction === 'output').length }}</small></span><span class="drag-hint">＋</span>
+          <span class="component-symbol">{{ definition.symbol }}</span><span><strong>{{ definition.displayName }}</strong><small>{{ definition.kind.toUpperCase() }}</small></span><span class="drag-hint">＋</span>
         </button>
       </div>
       <div class="wire-default-setting">

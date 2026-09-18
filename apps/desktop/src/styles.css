@@ -240,6 +240,9 @@ button:disabled { cursor: not-allowed; }
 .inspector-details { display: grid; gap: 4px; margin-top: 8px; color: var(--color-text-faint); font-family: var(--font-data); font-size: 8px; line-height: 1.45; }
 .inspector-copy { display: grid; gap: 3px; min-width: 170px; color: var(--color-text-muted); font-size: 10px; line-height: 1.45; }
 .inspector-copy p { margin: 0; }
+.inspector-attributes { display: grid; gap: 4px; margin-bottom: 8px; }
+.inspector-attribute { display: flex; align-items: center; gap: 8px; color: var(--color-text-muted); font-size: 9px; }
+.inspector-attribute input { width: 64px; padding: 2px 6px; border: 1px solid var(--color-border); border-radius: 4px; background: var(--color-surface); color: var(--color-text); font-family: var(--font-data); font-size: 11px; }
 .inspector-port-list { display: grid; gap: 4px; min-width: 190px; }
 .inspector-port-row { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; align-items: center; color: var(--color-text-muted); font-size: 9px; }
 .inspector-port-row strong { font-family: var(--font-data); font-size: 12px; }

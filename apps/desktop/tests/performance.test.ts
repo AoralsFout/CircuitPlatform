@@ -1,11 +1,24 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createCanvasSceneProjector, createComponentDefinitionRegistry, isDenseCanvasScene } from "../src/canvas/index.ts";
-import { createAndDemoDocument, type EditorSnapshot } from "../src/editor/index.ts";
+import { createAndDemoDocument, type EditorDocument, type EditorSnapshot } from "../src/editor/index.ts";
+import { portsForAddComponent } from "./fake-ports.ts";
+
+/** 给示例文档补上引擎回传的端口清单：没有清单就画不出端口，性能断言也就无从谈起。 */
+function documentWithPorts(): EditorDocument {
+  const document = createAndDemoDocument();
+  return {
+    ...document,
+    components: document.components.map((component) => ({
+      ...component,
+      ports: portsForAddComponent(component.kind),
+    })),
+  };
+}
 
 function snapshot(): EditorSnapshot {
   return {
-    document: createAndDemoDocument(),
+    document: documentWithPorts(),
     selection: null,
     operation: "idle",
     canUndo: false,

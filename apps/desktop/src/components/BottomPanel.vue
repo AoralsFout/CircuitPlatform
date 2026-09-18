@@ -3,7 +3,7 @@ import { computed } from "vue";
 import type { Signal } from "@circuit-platform/protocol";
 import type { BottomTab, WaveformKey, WaveformRow } from "../composables/useEditorState";
 import type { EditorConnectionId } from "../editor";
-import type { InspectorModel } from "../editor/inspector";
+import type { InspectorAttribute, InspectorModel } from "../editor/inspector";
 import type { WaveformPoint, WorkspaceEngineState } from "../workspace";
 
 interface OutputItem {
@@ -36,7 +36,23 @@ const emit = defineEmits<{
   togglePanel: [];
   selectComponent: [componentId: string];
   toggleDetails: [];
+  setPortWidth: [componentId: string, portName: string, width: number];
 }>();
+
+/**
+ * 提交一次位宽编辑。
+ *
+ * 非法输入就地还原成当前值，不发出命令。提交后的 DOM 值先退回模型里的当前值：成功时模型
+ * 更新会把输入框重新渲染成新值，失败时它就停在原值上——「失败保留原值」因此不需要额外状态。
+ */
+function onWidthChange(attribute: InspectorAttribute, event: Event): void {
+  const input = event.target as HTMLInputElement;
+  const width = Number.parseInt(input.value, 10);
+  input.value = String(attribute.value);
+  if (props.inspector?.kind !== "component") return;
+  if (!Number.isSafeInteger(width) || width < 1 || width === attribute.value) return;
+  emit("setPortWidth", props.inspector.id, attribute.portName, width);
+}
 
 // 信号值是逐位文本，因此这里比的是字符串；多位值落到未知一档，位宽为 1 时与改造前相同。
 function signalClass(value: Signal): string {
@@ -79,8 +95,14 @@ const waveformRange = computed(() => {
         <div class="inspector-copy"><p>{{ inspector.behavior }}</p><span>类型：{{ inspector.type }}</span></div>
         <p v-if="inspector.hint" class="inspector-hint">{{ inspector.hint }}</p>
         <div class="inspector-value"><span>当前信号</span><strong :class="signalClass(inspector.signal)">{{ inspector.signal }}</strong></div>
+        <div v-if="inspector.attributes.length > 0" class="inspector-attributes" aria-label="可编辑属性">
+          <label v-for="attribute in inspector.attributes" :key="attribute.id" class="inspector-attribute">
+            <span>{{ attribute.label }}</span>
+            <input type="number" min="1" step="1" :value="attribute.value" :aria-label="`${attribute.label}：${attribute.portName}`" @change="onWidthChange(attribute, $event)" />
+          </label>
+        </div>
         <div class="inspector-port-list" aria-label="端口信号">
-          <span v-for="port in inspector.ports" :key="port.id" class="inspector-port-row"><span>{{ port.direction === 'input' ? '输入' : '输出' }} · {{ port.name }}</span><strong :class="signalClass(port.signal)">{{ port.signal }}</strong><small>{{ port.connectionState === 'connected' ? '已连接' : port.connectionState === 'dangling' ? '悬空' : '未连接' }}</small></span>
+          <span v-for="port in inspector.ports" :key="port.id" class="inspector-port-row"><span>{{ port.direction === 'input' ? '输入' : '输出' }} · {{ port.label }}（{{ port.width }} 位）</span><strong :class="signalClass(port.signal)">{{ port.signal }}</strong><small>{{ port.connectionState === 'connected' ? '已连接' : port.connectionState === 'dangling' ? '悬空' : '未连接' }}</small></span>
         </div>
       </template>
       <template v-else-if="inspector?.kind === 'wire'">
