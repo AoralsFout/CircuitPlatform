@@ -4,6 +4,7 @@ import BottomPanel from "./components/BottomPanel.vue";
 import CircuitCanvas from "./components/CircuitCanvas.vue";
 import ClearCanvasDialog from "./components/ClearCanvasDialog.vue";
 import EditorToolbar from "./components/EditorToolbar.vue";
+import EmptyStatePanel from "./components/EmptyStatePanel.vue";
 import SettingsPage from "./components/SettingsPage.vue";
 import ToolRail from "./components/ToolRail.vue";
 import TopBar from "./components/TopBar.vue";
@@ -61,6 +62,7 @@ const {
   cancelPendingFileAction,
   recentProjects,
   requestOpenRecent,
+  requestLoadExample,
 } = useWorkspace();
 const {
   selectedConnection,
@@ -287,7 +289,21 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           @duplicate-selection="duplicateSelection"
           @request-clear="requestClear"
         />
+        <!-- 首启空状态（#40）：没有任何文档时以引导面板占据画布区；一旦建立会话（打开、
+             新建或加载示例）面板消失，画布与顶栏入口接管。 -->
+        <EmptyStatePanel
+          v-if="editorState === null"
+          :engine-state="state.engineState"
+          :engine-message="state.message"
+          :recent-projects="recentProjects"
+          @open-project="requestOpen"
+          @new-document="requestNew"
+          @load-example="requestLoadExample"
+          @open-recent-project="requestOpenRecent"
+          @check-engine="checkEngine"
+        />
         <CircuitCanvas
+          v-else
           :scene="canvasScene"
           :viewport="viewport"
           :interaction="interaction"

@@ -132,12 +132,13 @@ function stubWindow(engine: OpenFlowEngine, storage: KeyValueStorage): () => voi
   };
 }
 
-/** 启动后的示例电路已就绪：引擎在线、编辑器有 4 个示例元件。 */
+/** 启动后的示例电路已就绪：引擎在线、编辑器有 4 个示例元件。#40 起示例由启动后的空状态显式加载。 */
 async function bootstrappedBinding(engine: OpenFlowEngine, storage: KeyValueStorage) {
   const restore = stubWindow(engine, storage);
   try {
     const binding = useWorkspace();
     await binding.bootstrap();
+    await binding.requestLoadExample();
     assert.equal(binding.state.value.engineState, "ready");
     assert.equal(binding.editorState.value?.document.components.length, 4);
     return { binding, restore };

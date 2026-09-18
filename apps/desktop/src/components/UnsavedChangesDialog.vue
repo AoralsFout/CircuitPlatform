@@ -2,12 +2,12 @@
 import { nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 
 /**
- * 打开/新建前的未保存改动确认：沿用清空画布确认的交互（Esc 取消、焦点圈定、关闭后焦点还原）。
- * 确认意味着放弃当前文档的未保存改动，继续执行挂起的文件操作。
+ * 打开/新建/加载示例前的未保存改动确认：沿用清空画布确认的交互（Esc 取消、焦点圈定、
+ * 关闭后焦点还原）。确认意味着放弃当前文档的未保存改动，继续执行挂起的文件操作。
  */
 const props = defineProps<{
   /** 挂起的文件操作；文案随它变化。 */
-  action: "open" | "new";
+  action: "open" | "new" | "load-example";
 }>();
 
 const emit = defineEmits<{
@@ -20,8 +20,9 @@ const confirmButton = ref<HTMLButtonElement | null>(null);
 let returnFocus: HTMLElement | null = null;
 
 const COPY = {
-  open: { title: "打开项目文件？", description: "当前文档有未保存的改动，打开后这些改动将丢失。" },
-  new: { title: "新建文档？", description: "当前文档有未保存的改动，新建后这些改动将丢失。" },
+  open: { title: "打开项目文件？", description: "当前文档有未保存的改动，打开后这些改动将丢失。", confirm: "放弃改动并打开" },
+  new: { title: "新建文档？", description: "当前文档有未保存的改动，新建后这些改动将丢失。", confirm: "放弃改动并新建" },
+  "load-example": { title: "加载示例？", description: "当前文档有未保存的改动，加载示例后这些改动将丢失。", confirm: "放弃改动并加载示例" },
 } as const;
 
 function onDialogKeydown(event: KeyboardEvent): void {
@@ -67,7 +68,7 @@ const copy = COPY[props.action];
       <div class="confirmation-dialog__actions">
         <button ref="cancelButton" type="button" class="dialog-button" @click="emit('cancel')">取消</button>
         <button ref="confirmButton" type="button" class="dialog-button dialog-button--danger" @click="emit('confirm')">
-          {{ action === "open" ? "放弃改动并打开" : "放弃改动并新建" }}
+          {{ copy.confirm }}
         </button>
       </div>
     </section>

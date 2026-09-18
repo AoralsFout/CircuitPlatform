@@ -1254,7 +1254,9 @@ test("refreshes the AND output signal immediately after creating its output wire
 
   try {
     const binding = useWorkspace();
+    // #40 起启动不再自动加载示例：这些用例显式加载后仍围绕示例电路断言。
     await binding.bootstrap();
+    await binding.requestLoadExample();
     assert.equal(await binding.addComponent("output", { x: 1040, y: 240 }), true);
     const newOutput = binding.editorState.value?.document.components.find((component) => component.kind === "output" && component.id !== "output");
     assert.ok(newOutput);
@@ -1294,7 +1296,9 @@ test("deletes a connection loaded with the example through the workspace binding
 
   try {
     const binding = useWorkspace();
+    // #40 起启动不再自动加载示例：这些用例显式加载后仍围绕示例电路断言。
     await binding.bootstrap();
+    await binding.requestLoadExample();
     engine.calls.length = 0;
 
     await binding.deleteConnection("wire-a");
@@ -1321,7 +1325,9 @@ test("clears an example loaded through the workspace binding", async () => {
 
   try {
     const binding = useWorkspace();
+    // #40 起启动不再自动加载示例：这些用例显式加载后仍围绕示例电路断言。
     await binding.bootstrap();
+    await binding.requestLoadExample();
     engine.calls.length = 0;
 
     await binding.requestClear();
@@ -1449,7 +1455,9 @@ test("expands every Input into one button per bit of its declared width", async 
 
   try {
     const binding = useWorkspace();
+    // #40 起启动不再自动加载示例：这些用例显式加载后仍围绕示例电路断言。
     await binding.bootstrap();
+    await binding.requestLoadExample();
     const editor = useEditorState(binding.state, binding.editorState, binding.select);
 
     // 1 位 Input 与多位 Input 走同一个模型：一位就是一个方形按钮，没有为 1 位单开一种样子。
@@ -1582,7 +1590,9 @@ test("the workspace binding recovers from an engine restart and keeps the undo h
 
   try {
     const binding = useWorkspace();
+    // #40 起启动不再自动加载示例：这些用例显式加载后仍围绕示例电路断言。
     await binding.bootstrap();
+    await binding.requestLoadExample();
     assert.equal(binding.state.value.engineState, "ready");
     // 造一条可撤销的结构历史：删除输入 A（deleteComponent 没有返回值，用撤销能力断言）。
     await binding.deleteComponent("input-a");
@@ -1629,7 +1639,9 @@ test("a transport failure on a still-serving engine does not trigger a rebuild",
 
   try {
     const binding = useWorkspace();
+    // #40 起启动不再自动加载示例：这些用例显式加载后仍围绕示例电路断言。
     await binding.bootstrap();
+    await binding.requestLoadExample();
     engine.calls.length = 0;
 
     // 一次性的传输层故障（超时），进程代号没变：引擎还在，电路也还在。
@@ -1659,7 +1671,9 @@ test("a health check that observes a replaced process rebuilds even without a fa
 
   try {
     const binding = useWorkspace();
+    // #40 起启动不再自动加载示例：这些用例显式加载后仍围绕示例电路断言。
     await binding.bootstrap();
+    await binding.requestLoadExample();
     engine.calls.length = 0;
 
     // 引擎在空闲时退出，没有任何调用观察到失败；用户手动检查引擎，健康检查拉起新进程。
