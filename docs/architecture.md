@@ -53,7 +53,7 @@ Subcircuit 是 Project 与编辑器层的概念，在进入引擎之前就已经
 
 ## 当前 Circuit 接口
 
-本节与下一节记录的是当前实现状态，不描述后续阶段的接口。Phase 4.5 会让 `Port` 增加位宽、`SignalValue` 从三值标量变为逐位多位值、`addConnection` 增加位宽校验、`addComponent` 支持携带端口清单（[ADR 0015](decisions/0015-width-as-port-attribute.md)、[ADR 0016](decisions/0016-strict-port-width.md)）；届时本节同步更新。
+本节与下一节记录的是当前实现状态，不描述后续阶段的接口。Phase 4.5 已经落地了其中一半：`SignalValue` 从三值标量变为逐位多位值，协议中的信号值随之统一为字符串。仍在进行的是 `Port` 增加位宽、`addConnection` 增加位宽校验、`addComponent` 支持携带端口清单（[ADR 0015](decisions/0015-width-as-port-attribute.md)、[ADR 0016](decisions/0016-strict-port-width.md)）；届时本节同步更新。
 
 当前 C++ 领域模块提供以下操作：
 
@@ -80,7 +80,9 @@ Subcircuit 是 Project 与编辑器层的概念，在进入引擎之前就已经
 - `outputSignals`：返回电路中全部输出端口的当前信号，供一次响应带回整份读数；
 - `signal`：读取端口当前的 SignalValue。
 
-当前切片实现 `Input`、`NotGate`、`AndGate`、`OrGate`、`NandGate`、`NorGate`、`XorGate`、`XnorGate`、`Output`、`Clock` 和 `DFlipFlop` 的行为，并能报告组合逻辑环路。`Clock` 的输出初值是 `0`（`0 → 1` 才算上升沿，从 `X` 起步会永远判不出第一次上升沿），每推进一次翻转一次；`DFlipFlop` 的 `q` 初值是 `Unknown`，只在 `clock` 端口出现 `0 → 1` 时把 `d` 采样进 `q`，下降沿与任何一端是 `X` 的跳变都不采样；其余元件的输出初值仍是 `Unknown`。判上升沿所比较的前值跨 tick 保留，因此时钟来自 Input 元件或组合逻辑时同样成立；`reset` 会把它连同其余运行时状态一起清空，重置后的第一次推进因此与刚创建时完全一致。未连接输入的值为 `Unknown`；不存在的端口返回空值。更丰富的通用仿真错误将在后续切片中加入。
+`SignalValue` 是一个 N 位的逐位三值：每一位独立取 `0` / `1` / `X`，某一位未知不影响其余位，用户看到的是 `1X0` 而不是整条 `XXX`。`invert`、`andValue`、`orValue`、`xorValue` 这四个标量原语的签名不变，只是体内按位循环。相等是逐位比较，长度也必须相同——`settle` 的定点迭代正是靠这个相等判断本轮有没有变化，因此任何近似（例如把 `X` 当成通配）都会让迭代提前收敛、静默地求值不全。当前所有端口的位宽都是 1，`SignalValue` 因此暂时等价于旧的三值标量。
+
+当前切片实现 `Input`、`NotGate`、`AndGate`、`OrGate`、`NandGate`、`NorGate`、`XorGate`、`XnorGate`、`Output`、`Clock` 和 `DFlipFlop` 的行为，并能报告组合逻辑环路。`Clock` 的输出初值是 `0`（`0 → 1` 才算上升沿，从 `X` 起步会永远判不出第一次上升沿），每推进一次翻转一次；`DFlipFlop` 的 `q` 初值是 `X`，只在 `clock` 端口出现 `0 → 1` 时把 `d` 采样进 `q`，下降沿与任何一端是 `X` 的跳变都不采样；其余元件的输出初值仍是整值全 `X`。判上升沿所比较的前值跨 tick 保留，因此时钟来自 Input 元件或组合逻辑时同样成立；`reset` 会把它连同其余运行时状态一起清空，重置后的第一次推进因此与刚创建时完全一致。未连接输入的值为整值全 `X`；不存在的端口返回空值。更丰富的通用仿真错误将在后续切片中加入。
 
 结构变更与清空状态是两件独立的事：结构变更按元件身份保留已积累的运行时状态（见 `reconcile`），而把整个仿真恢复成刚创建时的样子——全部输出回到初始值、`Clock` 回到 `0`、每个 `DFlipFlop` 的 `q` 回到 `X`、步数归零——是一条独立的 `reset` 请求。取舍与已知限制见 [ADR 0019](decisions/0019-tick-driven-by-protocol-and-state-kept-by-identity.md)；[ADR 0004](decisions/0004-json-lines-engine-session.md) 中「结构变化后重建 `Simulation` 快照」的第一版规则已由它修订。
 

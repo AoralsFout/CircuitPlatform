@@ -16,7 +16,7 @@ import {
   type ViewportState,
 } from "../canvas";
 import type { ComponentDefinition } from "../canvas";
-import type { ComponentKindName } from "@circuit-platform/protocol";
+import type { ComponentKindName, Signal } from "@circuit-platform/protocol";
 import { isConnectionDraftTarget, resolveConnectionPortPointerAction, type ConnectionDraftPort } from "../editor/connection-draft.ts";
 import type { Point } from "../editor";
 import { resolveCanvasKeyboardAction, isEditableKeyboardTarget, type CanvasFocusKind } from "../editor/keyboard.ts";
@@ -152,9 +152,11 @@ function keyboardMenuAnchor(target: EventTarget | null): { x: number; y: number 
 /** 稠密判定只取决于场景规模；逐 Wire 重复计算会放大整树重渲染的成本。 */
 const denseScene = computed(() => isDenseCanvasScene(props.scene));
 
-function signalClass(value: 0 | 1 | "X"): string {
-  if (value === 1) return "signal-state--high";
-  if (value === 0) return "signal-state--low";
+// 信号值是逐位文本，因此这里比的是字符串。多位值还没有自己的渲染（Phase 4.5 的后续切片），
+// 落到未知一档；位宽为 1 的电路与改造前完全相同。
+function signalClass(value: Signal): string {
+  if (value === "1") return "signal-state--high";
+  if (value === "0") return "signal-state--low";
   return "signal-state--unknown";
 }
 

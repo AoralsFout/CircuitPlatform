@@ -85,16 +85,6 @@ std::optional<std::uint64_t> numberField(std::string_view json, std::string_view
     return parsed.ec == std::errc{} ? std::optional{value} : std::nullopt;
 }
 
-std::optional<std::string> valueField(std::string_view json, std::string_view key) {
-    if (const auto text = stringField(json, key); text.has_value()) {
-        return text;
-    }
-    if (const auto number = numberField(json, key); number.has_value()) {
-        return std::to_string(*number);
-    }
-    return std::nullopt;
-}
-
 }  // namespace
 
 std::optional<Request> parseRequest(std::string_view json) {
@@ -115,7 +105,9 @@ std::optional<Request> parseRequest(std::string_view json) {
         .sourcePort = stringField(json, "sourcePort"),
         .targetComponentId = numberField(json, "targetComponentId"),
         .targetPort = stringField(json, "targetPort"),
-        .value = valueField(json, "value"),
+        // 信号值统一是字符串：只接受 JSON 字符串字面量。数字形式是「0/1 是数字、X 是字符串」
+        // 那个混用表示的遗留，数字也无法表达多位值，因此不再回退到它。
+        .value = stringField(json, "value"),
     };
 }
 

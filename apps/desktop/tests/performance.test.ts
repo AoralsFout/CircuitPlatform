@@ -18,13 +18,13 @@ function snapshot(): EditorSnapshot {
 test("signal updates reuse cached Route geometry", () => {
   const projector = createCanvasSceneProjector(createComponentDefinitionRegistry());
   const editorSnapshot = snapshot();
-  const first = projector.project(editorSnapshot, { signals: { "input-a:out": 0 } });
-  const second = projector.project(editorSnapshot, { signals: { "input-a:out": 1 } });
+  const first = projector.project(editorSnapshot, { signals: { "input-a:out": "0" } });
+  const second = projector.project(editorSnapshot, { signals: { "input-a:out": "1" } });
 
   // The benchmark's hot path must not generate fresh point arrays when only signal state changes.
   assert.strictEqual(second.wires[0]?.route, first.wires[0]?.route);
   assert.notEqual(second.wires[0]?.signal, first.wires[0]?.signal);
-  assert.equal(second.nodes[0]?.ports[0]?.signal, 1);
+  assert.equal(second.nodes[0]?.ports[0]?.signal, "1");
 });
 
 test("signal updates reuse Route geometry during a stable route preview", () => {
@@ -32,8 +32,8 @@ test("signal updates reuse Route geometry during a stable route preview", () => 
   const editorSnapshot = snapshot();
   const previewRoute = [{ x: 200, y: 80 }, { x: 240, y: 80 }, { x: 240, y: 160 }];
   const previewRoutes = { "wire-a": previewRoute };
-  const first = projector.project(editorSnapshot, { signals: { "input-a:out": 0 } }, undefined, previewRoutes);
-  const second = projector.project(editorSnapshot, { signals: { "input-a:out": 1 } }, undefined, previewRoutes);
+  const first = projector.project(editorSnapshot, { signals: { "input-a:out": "0" } }, undefined, previewRoutes);
+  const second = projector.project(editorSnapshot, { signals: { "input-a:out": "1" } }, undefined, previewRoutes);
 
   assert.strictEqual(second.wires[0]?.route, first.wires[0]?.route);
 });

@@ -3,7 +3,12 @@ import { createEngineCallQueue, type EngineCallQueue } from "./engineQueue.ts";
 
 /** 输入设置项的稳定键；键是编辑器组件 ID，与引擎身份无关。 */
 export type InputKey = string;
-export type BinarySignal = 0 | 1;
+/**
+ * 一位输入信号的取值。
+ * Input 只能被驱动到确定的 `0` 或 `1`——`X` 只可能来自引擎读数。这里保留字面量联合而不是
+ * 直接用协议的宽 `Signal`，输入侧的取值因此在编译期仍有约束：`?? "0"` 之类的兜底写错会报错。
+ */
+export type BinarySignal = "0" | "1";
 export type WorkspaceEngineState = "checking" | "ready" | "unavailable" | "error";
 /**
  * 运行态：`stopped` 从未开始或已停止，`running` 连续推进中，`paused` 停在当前状态。
@@ -350,8 +355,8 @@ function createInitialState(): MutableState {
     operationError: null,
     isBusy: false,
     simulationState: "stopped",
-    inputA: 1,
-    inputB: 1,
+    inputA: "1",
+    inputB: "1",
     inputValues: {},
     signals: {},
     outputValue: "X",
@@ -432,7 +437,7 @@ function valuesForBindings(
 ): Record<InputKey, BinarySignal> {
   return Object.fromEntries(bindings.inputs.map((binding, index) => [
     binding.key,
-    existing[binding.key] ?? (index === 0 ? inputA : index === 1 ? inputB : 0),
+    existing[binding.key] ?? (index === 0 ? inputA : index === 1 ? inputB : "0"),
   ]));
 }
 
@@ -591,7 +596,7 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
     try {
       const committedValues = bindings.inputs.map((binding) => ({
         binding,
-        value: nextInputValues[binding.key] ?? 0,
+        value: nextInputValues[binding.key] ?? "0",
       }));
       for (const { binding, value } of committedValues) {
         expectResponse(await adapter.setInput(binding.componentId, value), "input_set");
@@ -792,7 +797,7 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
         ...Object.fromEntries(
           bindings.inputs.map((binding) => [
             signalKey(binding.key, INPUT_OUTPUT_PORT),
-            state.inputValues[binding.key] ?? 0,
+            state.inputValues[binding.key] ?? "0",
           ]),
         ),
         ...observedSignals,
@@ -875,7 +880,7 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
     if (bindings === null) return Promise.resolve(createWorkspaceSnapshot(state));
     const binding = bindings.inputs.find((candidate) => candidate.key === key);
     if (binding === undefined) return Promise.resolve(createWorkspaceSnapshot(state));
-    const value = (state.inputValues[key] === 1 ? 0 : 1) as BinarySignal;
+    const value: BinarySignal = state.inputValues[key] === "1" ? "0" : "1";
     const nextInputValues: Record<InputKey, BinarySignal> = { ...state.inputValues, [key]: value };
     // 运行中只提交 set_input，不额外 settle；下一次推进自然会带上新值。
     const running = state.simulationState === "running";

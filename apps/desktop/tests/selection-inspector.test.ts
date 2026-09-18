@@ -10,8 +10,8 @@ function scene(): CanvasScene {
       id: "and-1", kind: "and", displayName: "AND 1", symbol: "&", description: "所有输入为 1 时输出 1。",
       position: { x: 100, y: 100 }, size: { width: 148, height: 84 }, selected: true,
       ports: [
-        { id: "in1", name: "in1", direction: "input", point: { x: 100, y: 130 }, offset: { x: 0, y: 30 }, signal: 1, dangling: false },
-        { id: "out", name: "out", direction: "output", point: { x: 248, y: 142 }, offset: { x: 148, y: 42 }, signal: 1, dangling: false },
+        { id: "in1", name: "in1", direction: "input", point: { x: 100, y: 130 }, offset: { x: 0, y: 30 }, signal: "1", dangling: false },
+        { id: "out", name: "out", direction: "output", point: { x: 248, y: 142 }, offset: { x: 148, y: 42 }, signal: "1", dangling: false },
       ],
     }],
     wires: [{
@@ -19,7 +19,7 @@ function scene(): CanvasScene {
       target: { componentId: "and-1", port: "in1", point: { x: 100, y: 130 } },
       route: [{ x: 0, y: 142 }, { x: 50, y: 142 }, { x: 50, y: 130 }, { x: 100, y: 130 }],
       waypoints: [{ x: 50, y: 142 }, { x: 50, y: 130 }],
-      signal: 1, danglingEndpoints: [], selected: false,
+      signal: "1", danglingEndpoints: [], selected: false,
     }],
     bounds: { min: { x: 0, y: 100 }, max: { x: 248, y: 184 } },
   };
@@ -56,14 +56,14 @@ test("inspector hints when the d flip-flop clock port has no connection", () => 
       ports: flipFlopPorts.map((definition) => ({
         id: definition.id, name: definition.name, direction: definition.direction,
         point: { x: 100 + definition.offset.x, y: 100 + definition.offset.y }, offset: { ...definition.offset },
-        signal: "X" as const, dangling: false,
+        signal: "X", dangling: false,
       })),
     }],
     wires: [{
       id: "wire-1", source: { componentId: "source", port: "out", point: { x: 0, y: 130 } },
       target: { componentId: "dff-1", port: "d", point: { x: 100, y: 130 } },
       route: [{ x: 0, y: 130 }, { x: 50, y: 130 }, { x: 50, y: 130 }, { x: 100, y: 130 }],
-      signal: 1, danglingEndpoints: [], selected: false,
+      signal: "1", danglingEndpoints: [], selected: false,
     }],
     bounds: { min: { x: 0, y: 100 }, max: { x: 248, y: 184 } },
   };
@@ -82,7 +82,7 @@ test("inspector hints when the d flip-flop clock port has no connection", () => 
       id: "wire-2", source: { componentId: "clock-source", port: "out", point: { x: 0, y: 154 } },
       target: { componentId: "dff-1", port: "clock", point: { x: 100, y: 154 } },
       route: [{ x: 0, y: 154 }, { x: 50, y: 154 }, { x: 50, y: 154 }, { x: 100, y: 154 }],
-      signal: 0, danglingEndpoints: [], selected: false,
+      signal: "0", danglingEndpoints: [], selected: false,
     }],
   };
   const connected = createInspectorModel(connectedClock, { kind: "component", id: "dff-1" }, registry);
@@ -109,7 +109,7 @@ test("inspector projects read-only Component ports and Wire endpoints", () => {
       status: wire.status, waypointCount: wire.waypointCount,
     }, {
       kind: "wire", source: { componentId: "source", port: "out" }, target: { componentId: "and-1", port: "in1" },
-      signal: 1, status: "normal", waypointCount: 2,
+      signal: "1", status: "normal", waypointCount: 2,
     });
   }
 });

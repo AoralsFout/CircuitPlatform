@@ -289,7 +289,7 @@ export function useEditorState(
     key: node.id as InputKey,
     index: index + 1,
     label: node.displayName,
-    value: (workspaceState.value.inputValues[node.id] ?? (index === 0 ? workspaceState.value.inputA : index === 1 ? workspaceState.value.inputB : 0)) as 0 | 1,
+    value: workspaceState.value.inputValues[node.id] ?? (index === 0 ? workspaceState.value.inputA : index === 1 ? workspaceState.value.inputB : "0"),
     componentId: node.id,
   })));
   // 输出面板读取文档中全部 Output 元件，每个元件显示自己求值后的信号。

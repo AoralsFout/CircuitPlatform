@@ -6,11 +6,15 @@ Electron 主进程与 C++ 引擎通过 stdin/stdout 建立一条长连接。双�
 
 协议适配层只负责序列化、反序列化和错误格式化，不负责 Circuit 规则或信号求值。
 
-## 信号值的当前表示
+## 信号值的表示
 
-本版本中信号值在协议里是混用的：`0` 和 `1` 以 JSON 数字传输，`X` 以字符串传输，TypeScript 侧的类型是 `0 | 1 | "X"`。这是历史实现，不是有意设计，本文档的示例与实现保持一致（`"value":1` 是数字）。
+信号值在协议里统一是**非空字符串**：逐位文本，每一位取 `0`、`1` 或 `X`，长度必须等于所在端口的位宽。`set_input`、`get_signal`、`signal_result` 与 `ticked` 的 `signals[].value` 都遵循这一条，数字形式不再被接受。
 
-[ADR 0015](decisions/0015-width-as-port-attribute.md) 决定 Phase 4.5 起把信号值统一为字符串（`"0"`、`"1"`、`"X"`、`"1010"`、`"X1X0"`），长度必须等于端口位宽。在那之前，`set_input` 和 `get_signal` 的值仍按上面的混用形式理解。
+一位信号因此写作 `"0"`、`"1"` 或 `"X"`；多位信号是同样规则的连接，例如 `"1010"` 与 `"X1X0"`——某一位未知不影响其余位，用户看到的是哪几位未知，而不需要把整个值当成未知（[ADR 0015](decisions/0015-width-as-port-attribute.md)）。
+
+本版本之前这里混用两种表示（`0` 和 `1` 是 JSON 数字，`X` 是字符串），那不是有意设计而是历史实现。`value` 现在必须是 JSON 字符串字面量：传数字时 `set_input` 读不到这个字段，报 `bad_request`。
+
+长度与端口位宽不符的值本身是合法的逐位文本，只是放不进这个端口：`set_input` 报 `invalid_width`，并且不写入任何状态。空串与含其它字符（包括小写 `x`）的值连信号值都不是，报 `invalid_signal`。当前所有元件的端口位宽都是 1，因此长度恒为 1；位宽本身是 Phase 4.5 的后续切片。
 
 所有 `componentId` 和 `connectionId` 都从 `1` 开始。渲染进程传入删除接口的 ID 必须是正安全整数；C++ 删除处理还会拒绝零，以及负数、小数、指数形式、字符串和超出无符号整数范围的值。
 
@@ -25,18 +29,18 @@ Electron 主进程与 C++ 引擎通过 stdin/stdout 建立一条长连接。双�
 | `add_connection` | `sourceComponentId`、`sourcePort`、`targetComponentId`、`targetPort` | 返回 `connectionId` |
 | `remove_component` | `componentId` | 删除 Component，并保留相关悬空 Connection |
 | `remove_connection` | `connectionId` | 删除指定 Connection |
-| `set_input` | `componentId`、`value`：`0`、`1` 或 `X` | 设置 Input 元件的输出 |
+| `set_input` | `componentId`、`value`：逐位字符串，如 `"0"`、`"1"`、`"X"` | 设置 Input 元件的输出；长度必须等于端口位宽 |
 | `settle` | 无 | 求值到稳定状态 |
 | `tick` | 无 | 推进一个 tick，返回当前步数与全部输出端口、Output 接收端的值 |
 | `reset` | 无 | 把仿真恢复成刚建立时的状态，`Circuit` 结构不变 |
-| `get_signal` | `componentId`、`port` | 返回 `value`：`0`、`1` 或 `X` |
+| `get_signal` | `componentId`、`port` | 返回 `value`：逐位字符串 |
 
 示例：
 
 ```json
 {"type":"add_component","requestId":"r1","kind":"and"}
 {"type":"add_connection","requestId":"r2","sourceComponentId":1,"sourcePort":"out","targetComponentId":3,"targetPort":"in1"}
-{"type":"set_input","requestId":"r3","componentId":1,"value":1}
+{"type":"set_input","requestId":"r3","componentId":1,"value":"1"}
 {"type":"settle","requestId":"r4"}
 {"type":"get_signal","requestId":"r5","componentId":3,"port":"out"}
 {"type":"remove_component","requestId":"r6","componentId":3}
@@ -48,7 +52,7 @@ Electron 主进程与 C++ 引擎通过 stdin/stdout 建立一条长连接。双�
 `tick` 是推进时间的唯一入口，响应是一次推进后的**全部输出端口**快照，外加**每个 `Output` 元件的接收端**：
 
 ```json
-{"type":"ticked","requestId":"r8","step":7,"signals":[{"componentId":3,"port":"out","value":1},{"componentId":5,"port":"q","value":"X"},{"componentId":7,"port":"in","value":1}]}
+{"type":"ticked","requestId":"r8","step":7,"signals":[{"componentId":3,"port":"out","value":"1"},{"componentId":5,"port":"q","value":"X"},{"componentId":7,"port":"in","value":"1"}]}
 ```
 
 `signals` 的前半段直接来自仿真内部的输出信号表，覆盖每一个输出端口；后半段是每个 `Output` 元件 `in` 端口的当前值。带上接收端的原因是 `Output` 的读数来自它的 `in`——只带输出端口的话，调用方无法在一次往返内得到 Output 的展示值，只能逐端口 `get_signal` 或自己沿 Connection 推导。因此连续推进时每步只需一次跨进程往返，往返次数不随电路规模增长。
@@ -79,7 +83,7 @@ reset 之后引擎里的 Input 也回到初值 `X`，因此调用方需要重新
 - `settled`：`status` 为 `ok`；
 - `ticked`：`step` 为引擎当前 `Simulation` 的累计推进步数，`signals` 为每个输出端口与每个 `Output` 接收端的 `componentId`、`port` 与 `value`；
 - `reset_done`：`status` 为 `ok`，表示运行时状态已回到初始状态；
-- `signal_result`：`value` 为 `0`、`1` 或 `X`。
+- `signal_result`：`value` 为逐位字符串。
 
 失败响应统一为：
 
@@ -87,7 +91,7 @@ reset 之后引擎里的 Input 也回到初值 `X`，因此调用方需要重新
 {"type":"error","requestId":"r4","code":"combinational_loop","message":"检测到组合逻辑环路"}
 ```
 
-当前可能出现的错误代码包括 `bad_json`、`bad_request`、`invalid_kind`、`invalid_connection`、`component_not_found`、`connection_not_found`、`invalid_signal`、`invalid_input`、`port_not_found`、`combinational_loop` 和 `unsupported_message`。Phase 4.5 会加入位宽不匹配与位区间非法的错误代码（[ADR 0016](decisions/0016-strict-port-width.md)、[ADR 0017](decisions/0017-paired-splitter-and-merger.md)）。
+当前可能出现的错误代码包括 `bad_json`、`bad_request`、`invalid_kind`、`invalid_connection`、`component_not_found`、`connection_not_found`、`invalid_signal`、`invalid_width`、`invalid_input`、`port_not_found`、`combinational_loop` 和 `unsupported_message`。`invalid_width` 目前只由 `set_input` 的长度校验产生（按常量 1）；Phase 4.5 还会加入连接两端位宽不匹配与位区间非法的错误代码（[ADR 0016](decisions/0016-strict-port-width.md)、[ADR 0017](decisions/0017-paired-splitter-and-merger.md)）。
 
 ## 生命周期约定
 
@@ -110,10 +114,10 @@ reset 之后引擎里的 Input 也回到初值 `X`，因此调用方需要重新
 
 以下变更已由 [ADR 0015](decisions/0015-width-as-port-attribute.md)、[ADR 0016](decisions/0016-strict-port-width.md) 和 [ADR 0017](decisions/0017-paired-splitter-and-merger.md) 决定，但尚未实现。列在这里以免与上面的当前协议混淆：
 
+- `Port` 增加位宽，位宽成为端口清单的一部分。逐位值与字符串协议**已经落地**（见上面的「信号值的表示」），但位宽本身还没有：所有端口的位宽恒为 1，`set_input` 的长度校验因此按常量 1 做，之后改为读目标端口声明的位宽；
 - `add_component` 的 `kind` 增加 `splitter` 与 `merger`；请求可选携带端口清单（含位宽与位区间），省略时引擎回退到内置定义；
 - `component_added` 回传该 Component 实际的端口清单，前端不再内置一份端口定义；
 - 新增 `set_port_width`（或等价的 `update_component`）修改既有元件的位宽。Component 与 Connection 的引擎身份保留，改宽后不再匹配的 Connection 转为悬空连接；
-- `set_input` 与 `get_signal` 的信号值统一为字符串，长度等于端口位宽；
 - `add_connection` 增加位宽校验，两端位宽不同直接拒绝，不做隐式扩展或截断。
 
 ## 实现约束

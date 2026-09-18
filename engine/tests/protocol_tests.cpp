@@ -37,6 +37,18 @@ int main() {
     assert(signalRequest.has_value());
     assert(signalRequest->value == "X");
 
+    // 信号值统一是字符串：数字形式不再被接受，`value` 因此读不到。
+    const auto numericValue = circuit::protocol::parseRequest(
+        R"({"type":"set_input","requestId":"req-11","componentId":3,"value":1})");
+    assert(numericValue.has_value());
+    assert(!numericValue->value.has_value());
+
+    // 字段层只要求是字符串；长度是否等于端口位宽由请求处理器判定，因此多位值在这里读得出来。
+    const auto multiBitValue = circuit::protocol::parseRequest(
+        R"({"type":"set_input","requestId":"req-12","componentId":3,"value":"10X"})");
+    assert(multiBitValue.has_value());
+    assert(multiBitValue->value == "10X");
+
     const auto removeConnectionRequest = circuit::protocol::parseRequest(
         R"({"type":"remove_connection","requestId":"req-10","connectionId":7})");
     assert(removeConnectionRequest.has_value());
@@ -90,11 +102,11 @@ int main() {
                .find("\"connectionId\":3") != std::string::npos);
 
     assert(dispatch(
-               R"({"type":"set_input","requestId":"set-a","componentId":1,"value":1})",
+               R"({"type":"set_input","requestId":"set-a","componentId":1,"value":"1"})",
                circuit, simulation)
                .find("\"type\":\"input_set\"") != std::string::npos);
     assert(dispatch(
-               R"({"type":"set_input","requestId":"set-b","componentId":2,"value":1})",
+               R"({"type":"set_input","requestId":"set-b","componentId":2,"value":"1"})",
                circuit, simulation)
                .find("\"type\":\"input_set\"") != std::string::npos);
     assert(dispatch(
@@ -103,7 +115,7 @@ int main() {
     assert(dispatch(
                R"({"type":"get_signal","requestId":"read-before-delete","componentId":4,"port":"in"})",
                circuit, simulation)
-               .find("\"value\":1") != std::string::npos);
+               .find("\"value\":\"1\"") != std::string::npos);
 
     const auto missingComponentId = dispatch(
         R"({"type":"remove_component","requestId":"remove-missing"})", circuit, simulation);
@@ -164,9 +176,9 @@ int main() {
         {connectedInput, "out"}, {connectedOutput, "in"});
     assert(connected.succeeded());
     std::optional<circuit::Simulation> connectedSimulation{connectedCircuit};
-    assert(connectedSimulation->setInput(connectedInput, circuit::SignalValue::One));
+    assert(connectedSimulation->setInput(connectedInput, circuit::SignalValue::one()));
     assert(connectedSimulation->settle().succeeded());
-    assert(connectedSimulation->signal({connectedOutput, "in"}) == circuit::SignalValue::One);
+    assert(connectedSimulation->signal({connectedOutput, "in"}) == circuit::SignalValue::one());
 
     const auto removedLiveConnection = dispatch(
         R"({"type":"remove_connection","requestId":"remove-live-connection","connectionId":1})",
@@ -175,7 +187,7 @@ int main() {
            R"({"type":"connection_removed","requestId":"remove-live-connection","connectionId":1})");
     assert(connectedCircuit.component(connectedInput).has_value());
     assert(connectedCircuit.component(connectedOutput).has_value());
-    assert(connectedSimulation->signal({connectedOutput, "in"}) == circuit::SignalValue::Unknown);
+    assert(connectedSimulation->signal({connectedOutput, "in"}) == circuit::SignalValue::unknown());
 
     // 一次推进把全部输出端口的当前值与步数一起带回，取代按端口逐条 get_signal。
     circuit::Circuit clockCircuit;
@@ -192,27 +204,27 @@ int main() {
     assert(firstTick.find("\"requestId\":\"tick-1\"") != std::string::npos);
     assert(firstTick.find("\"step\":1") != std::string::npos);
     assert(firstTick.find(
-               "{\"componentId\":1,\"port\":\"out\",\"value\":1}") != std::string::npos);
+               "{\"componentId\":1,\"port\":\"out\",\"value\":\"1\"}") != std::string::npos);
     assert(firstTick.find(
-               "{\"componentId\":2,\"port\":\"out\",\"value\":0}") != std::string::npos);
+               "{\"componentId\":2,\"port\":\"out\",\"value\":\"0\"}") != std::string::npos);
 
     // 快照同时覆盖 Output 元件的接收端，调用方因此不必再逐端口 get_signal 就能拿到它的读数。
     assert(firstTick.find(
-               "{\"componentId\":3,\"port\":\"in\",\"value\":0}") != std::string::npos);
+               "{\"componentId\":3,\"port\":\"in\",\"value\":\"0\"}") != std::string::npos);
 
     const auto secondTick = dispatch(
         R"({"type":"tick","requestId":"tick-2"})", clockCircuit, clockSimulation);
     assert(secondTick.find("\"step\":2") != std::string::npos);
     assert(secondTick.find(
-               "{\"componentId\":1,\"port\":\"out\",\"value\":0}") != std::string::npos);
+               "{\"componentId\":1,\"port\":\"out\",\"value\":\"0\"}") != std::string::npos);
     assert(secondTick.find(
-               "{\"componentId\":2,\"port\":\"out\",\"value\":1}") != std::string::npos);
+               "{\"componentId\":2,\"port\":\"out\",\"value\":\"1\"}") != std::string::npos);
     assert(secondTick.find(
-               "{\"componentId\":3,\"port\":\"in\",\"value\":1}") != std::string::npos);
+               "{\"componentId\":3,\"port\":\"in\",\"value\":\"1\"}") != std::string::npos);
     assert(dispatch(
                R"({"type":"get_signal","requestId":"read-after-tick","componentId":3,"port":"in"})",
                clockCircuit, clockSimulation)
-               .find("\"value\":1") != std::string::npos);
+               .find("\"value\":\"1\"") != std::string::npos);
 
     // 一整条时序链路走 JSON：Clock 驱动 clock 端口，Input 驱动 d，q 接到 Output。
     circuit::Circuit flipFlopCircuit;
@@ -235,11 +247,11 @@ int main() {
         R"({"type":"tick","requestId":"tick-rising"})", flipFlopCircuit, flipFlopSimulation);
     assert(risingEdge.find("\"step\":1") != std::string::npos);
     assert(risingEdge.find(
-               "{\"componentId\":3,\"port\":\"q\",\"value\":1}") != std::string::npos);
+               "{\"componentId\":3,\"port\":\"q\",\"value\":\"1\"}") != std::string::npos);
     assert(dispatch(
                R"({"type":"get_signal","requestId":"read-q","componentId":4,"port":"in"})",
                flipFlopCircuit, flipFlopSimulation)
-               .find("\"value\":1") != std::string::npos);
+               .find("\"value\":\"1\"") != std::string::npos);
 
     // 第二次推进是下降沿：d 已经变成 0，q 仍然按住 1。
     assert(dispatch(
@@ -250,14 +262,14 @@ int main() {
         R"({"type":"tick","requestId":"tick-falling"})", flipFlopCircuit, flipFlopSimulation);
     assert(fallingEdge.find("\"step\":2") != std::string::npos);
     assert(fallingEdge.find(
-               "{\"componentId\":3,\"port\":\"q\",\"value\":1}") != std::string::npos);
+               "{\"componentId\":3,\"port\":\"q\",\"value\":\"1\"}") != std::string::npos);
 
     // 第三次推进又是上升沿：这次把 d = 0 采样进 q。
     const auto secondRisingEdge = dispatch(
         R"({"type":"tick","requestId":"tick-rising-again"})", flipFlopCircuit, flipFlopSimulation);
     assert(secondRisingEdge.find("\"step\":3") != std::string::npos);
     assert(secondRisingEdge.find(
-               "{\"componentId\":3,\"port\":\"q\",\"value\":0}") != std::string::npos);
+               "{\"componentId\":3,\"port\":\"q\",\"value\":\"0\"}") != std::string::npos);
 
     // 重置把这份仿真恢复到刚建立时的状态；它是一条独立请求，没有业务失败分支。
     const auto resetResponse = dispatch(
@@ -270,7 +282,7 @@ int main() {
     assert(dispatch(
                R"({"type":"get_signal","requestId":"read-clock-after-reset","componentId":1,"port":"out"})",
                flipFlopCircuit, flipFlopSimulation)
-               .find("\"value\":0") != std::string::npos);
+               .find("\"value\":\"0\"") != std::string::npos);
     assert(dispatch(
                R"({"type":"get_signal","requestId":"read-d-after-reset","componentId":2,"port":"out"})",
                flipFlopCircuit, flipFlopSimulation)
@@ -285,7 +297,7 @@ int main() {
         R"({"type":"tick","requestId":"tick-after-reset"})", flipFlopCircuit, flipFlopSimulation);
     // 步数从 0 重新计数，q 与刚建立时一样在第一个 0 → 1 上升沿采到 d = 1。
     assert(tickAfterReset.find("\"step\":1") != std::string::npos);
-    assert(tickAfterReset.find("{\"componentId\":3,\"port\":\"q\",\"value\":1}") != std::string::npos);
+    assert(tickAfterReset.find("{\"componentId\":3,\"port\":\"q\",\"value\":\"1\"}") != std::string::npos);
 
     // 重置不触碰 Circuit：元件、连接与它们的引擎身份原样保留，新元件仍拿到递增的身份。
     assert(flipFlopCircuit.component(flipFlopClock).has_value());
@@ -324,11 +336,11 @@ int main() {
     std::optional<circuit::Simulation> keepSimulation;
 
     assert(dispatch(
-               R"({"type":"set_input","requestId":"keep-a","componentId":1,"value":1})",
+               R"({"type":"set_input","requestId":"keep-a","componentId":1,"value":"1"})",
                keepCircuit, keepSimulation)
                .find("\"type\":\"input_set\"") != std::string::npos);
     assert(dispatch(
-               R"({"type":"set_input","requestId":"keep-b","componentId":2,"value":1})",
+               R"({"type":"set_input","requestId":"keep-b","componentId":2,"value":"1"})",
                keepCircuit, keepSimulation)
                .find("\"type\":\"input_set\"") != std::string::npos);
     assert(dispatch(R"({"type":"settle","requestId":"keep-settle"})", keepCircuit, keepSimulation)
@@ -336,7 +348,7 @@ int main() {
     assert(dispatch(
                R"({"type":"get_signal","requestId":"keep-read-before","componentId":4,"port":"in"})",
                keepCircuit, keepSimulation)
-               .find("\"value\":1") != std::string::npos);
+               .find("\"value\":\"1\"") != std::string::npos);
 
     // 删掉一个与读数路径无关的 Output：它不参与求值，也不是任何状态的载体。
     assert(dispatch(
@@ -349,15 +361,15 @@ int main() {
     assert(dispatch(
                R"({"type":"get_signal","requestId":"keep-read-a","componentId":1,"port":"out"})",
                keepCircuit, keepSimulation)
-               .find("\"value\":1") != std::string::npos);
+               .find("\"value\":\"1\"") != std::string::npos);
     assert(dispatch(
                R"({"type":"get_signal","requestId":"keep-read-b","componentId":2,"port":"out"})",
                keepCircuit, keepSimulation)
-               .find("\"value\":1") != std::string::npos);
+               .find("\"value\":\"1\"") != std::string::npos);
     assert(dispatch(
                R"({"type":"get_signal","requestId":"keep-read-after","componentId":4,"port":"in"})",
                keepCircuit, keepSimulation)
-               .find("\"value\":1") != std::string::npos);
+               .find("\"value\":\"1\"") != std::string::npos);
 
     // 添加元件同样按身份保留：新增元件的输出按初始值建立，不碰既有 Input 的当前值。
     assert(dispatch(
@@ -367,7 +379,7 @@ int main() {
     assert(dispatch(
                R"({"type":"get_signal","requestId":"keep-read-a-after-add","componentId":1,"port":"out"})",
                keepCircuit, keepSimulation)
-               .find("\"value\":1") != std::string::npos);
+               .find("\"value\":\"1\"") != std::string::npos);
 
     // 时序元件保存的位与它 clock 端口上的前值同样按身份保留。
     circuit::Circuit holdCircuit;
@@ -380,11 +392,11 @@ int main() {
     std::optional<circuit::Simulation> holdSimulation;
 
     assert(dispatch(
-               R"({"type":"set_input","requestId":"hold-data","componentId":2,"value":1})",
+               R"({"type":"set_input","requestId":"hold-data","componentId":2,"value":"1"})",
                holdCircuit, holdSimulation)
                .find("\"type\":\"input_set\"") != std::string::npos);
     assert(dispatch(
-               R"({"type":"set_input","requestId":"hold-clock-low","componentId":1,"value":0})",
+               R"({"type":"set_input","requestId":"hold-clock-low","componentId":1,"value":"0"})",
                holdCircuit, holdSimulation)
                .find("\"type\":\"input_set\"") != std::string::npos);
     assert(dispatch(R"({"type":"tick","requestId":"hold-tick-idle"})", holdCircuit, holdSimulation)
@@ -397,7 +409,7 @@ int main() {
     // 时钟电平在两次 tick 之间抬起来。这一次 0 → 1 只有靠跨 tick 保留的时钟前值才认得出来，
     // 因此下面的断言同时守住「q 被保留」与「clock 端口的前值被保留」。
     assert(dispatch(
-               R"({"type":"set_input","requestId":"hold-clock-high","componentId":1,"value":1})",
+               R"({"type":"set_input","requestId":"hold-clock-high","componentId":1,"value":"1"})",
                holdCircuit, holdSimulation)
                .find("\"type\":\"input_set\"") != std::string::npos);
     assert(dispatch(
@@ -409,7 +421,7 @@ int main() {
     assert(dispatch(
                R"({"type":"get_signal","requestId":"hold-q-after","componentId":3,"port":"q"})",
                holdCircuit, holdSimulation)
-               .find("\"value\":1") != std::string::npos);
+               .find("\"value\":\"1\"") != std::string::npos);
 
     // 再添加一个元件：已积累的时序状态同样不受影响。
     assert(dispatch(
@@ -419,11 +431,11 @@ int main() {
     assert(dispatch(
                R"({"type":"get_signal","requestId":"hold-q-after-add","componentId":3,"port":"q"})",
                holdCircuit, holdSimulation)
-               .find("\"value\":1") != std::string::npos);
+               .find("\"value\":\"1\"") != std::string::npos);
 
     // 下一次推进是下降沿：q 按住不动，保留下来的前值继续参与上升沿判定。
     assert(dispatch(
-               R"({"type":"set_input","requestId":"hold-clock-low-again","componentId":1,"value":0})",
+               R"({"type":"set_input","requestId":"hold-clock-low-again","componentId":1,"value":"0"})",
                holdCircuit, holdSimulation)
                .find("\"type\":\"input_set\"") != std::string::npos);
     assert(dispatch(R"({"type":"tick","requestId":"hold-tick-falling"})", holdCircuit, holdSimulation)
@@ -431,7 +443,7 @@ int main() {
     assert(dispatch(
                R"({"type":"get_signal","requestId":"hold-q-falling","componentId":3,"port":"q"})",
                holdCircuit, holdSimulation)
-               .find("\"value\":1") != std::string::npos);
+               .find("\"value\":\"1\"") != std::string::npos);
 
     // 删除时序元件本身：它保存的状态被丢弃，其余元件的状态不受影响。
     assert(dispatch(
@@ -445,11 +457,49 @@ int main() {
     assert(dispatch(
                R"({"type":"get_signal","requestId":"hold-clock-value","componentId":1,"port":"out"})",
                holdCircuit, holdSimulation)
-               .find("\"value\":0") != std::string::npos);
+               .find("\"value\":\"0\"") != std::string::npos);
     assert(dispatch(
                R"({"type":"get_signal","requestId":"hold-data-value","componentId":2,"port":"out"})",
                holdCircuit, holdSimulation)
-               .find("\"value\":1") != std::string::npos);
+               .find("\"value\":\"1\"") != std::string::npos);
+
+    // set_input 的长度必须等于端口位宽。本票所有端口的位宽恒为 1，因此多位值一律被拒绝，
+    // 而且不写入任何状态：被拒之后那个 Input 仍然保持原值。
+    circuit::Circuit widthCircuit;
+    widthCircuit.addComponent(circuit::ComponentKind::Input);
+    std::optional<circuit::Simulation> widthSimulation;
+    assert(dispatch(
+               R"({"type":"set_input","requestId":"width-one","componentId":1,"value":"1"})",
+               widthCircuit, widthSimulation)
+               .find("\"type\":\"input_set\"") != std::string::npos);
+
+    const auto tooWide = dispatch(
+        R"({"type":"set_input","requestId":"width-two","componentId":1,"value":"10"})",
+        widthCircuit, widthSimulation);
+    assert(tooWide.find("\"code\":\"invalid_width\"") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"get_signal","requestId":"width-read-after-reject","componentId":1,"port":"out"})",
+               widthCircuit, widthSimulation)
+               .find("\"value\":\"1\"") != std::string::npos);
+
+    // 空串与含其它字符的值连信号值都不是，报的是 invalid_signal 而不是 invalid_width。
+    for (const auto& invalidValue : {
+             R"({"type":"set_input","requestId":"width-empty","componentId":1,"value":""})",
+             R"({"type":"set_input","requestId":"width-digit","componentId":1,"value":"2"})",
+             R"({"type":"set_input","requestId":"width-case","componentId":1,"value":"x"})"}) {
+        assert(dispatch(invalidValue, widthCircuit, widthSimulation)
+                   .find("\"code\":\"invalid_signal\"") != std::string::npos);
+    }
+    assert(dispatch(
+               R"({"type":"get_signal","requestId":"width-charset-read","componentId":1,"port":"out"})",
+               widthCircuit, widthSimulation)
+               .find("\"value\":\"1\"") != std::string::npos);
+
+    // 数字形式在解析层就已经不被接受，因此到不了位宽校验，报的是请求缺字段。
+    assert(dispatch(
+               R"({"type":"set_input","requestId":"width-numeric","componentId":1,"value":1})",
+               widthCircuit, widthSimulation)
+               .find("\"code\":\"bad_request\"") != std::string::npos);
 
     return 0;
 }

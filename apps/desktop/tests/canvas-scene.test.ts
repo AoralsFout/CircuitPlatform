@@ -79,7 +79,7 @@ test("projects a connection onto the d flip-flop clock port", () => {
     canRedo: false,
     confirmation: null,
     error: null,
-  }, { signals: { "clock-1:out": 1 } });
+  }, { signals: { "clock-1:out": "1" } });
 
   const clockPort = scene.nodes.find((node) => node.id === "dff-1")?.ports.find((port) => port.id === "clock");
   assert.equal(clockPort?.direction, "input");
@@ -88,10 +88,10 @@ test("projects a connection onto the d flip-flop clock port", () => {
 });
 
 test("projects non-default editor identities through explicit routes and signal state", () => {
-  const scene = projectCanvasScene(snapshot(), { signals: { "source-17:out": 1, "or-99:out": "X", "sink-4:in": "X" } }, createComponentDefinitionRegistry());
+  const scene = projectCanvasScene(snapshot(), { signals: { "source-17:out": "1", "or-99:out": "X", "sink-4:in": "X" } }, createComponentDefinitionRegistry());
   assert.deepEqual(scene.nodes.map((node) => node.id), ["source-17", "or-99", "sink-4"]);
   assert.equal(scene.nodes.find((node) => node.id === "or-99")?.selected, true);
-  assert.equal(scene.nodes.find((node) => node.id === "source-17")?.ports[0].signal, 1);
+  assert.equal(scene.nodes.find((node) => node.id === "source-17")?.ports[0].signal, "1");
   assert.deepEqual(scene.wires[0].route, snapshot().document.connections[0].route);
   assert.deepEqual(scene.wires[0].danglingEndpoints, ["target"]);
   assert.equal(scene.wires[0].color, "blue");
@@ -122,7 +122,7 @@ test("a signal update replaces only the entities carrying that signal", () => {
   const base = snapshot();
   const first = projector.project(base, { signals: {} });
 
-  const signalled = projector.project(base, { signals: { "source-17:out": 1 } });
+  const signalled = projector.project(base, { signals: { "source-17:out": "1" } });
   assert.notEqual(signalled, first);
   assert.notEqual(signalled.wires[0], first.wires[0]);
   assert.notEqual(signalled.nodes.find((node) => node.id === "source-17"), first.nodes.find((node) => node.id === "source-17"));

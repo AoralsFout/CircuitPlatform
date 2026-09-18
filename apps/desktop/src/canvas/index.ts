@@ -277,7 +277,7 @@ function getSignal(snapshot: SimulationSnapshot, componentId: string, portId: st
 
 function defaultPortSignal(component: EditorComponent, port: PortDefinition): Signal {
   // 新建 Input 的输出从 0 开始；其它端口在首次求值前保持 X。
-  return component.kind === "input" && port.direction === "output" ? 0 : "X";
+  return component.kind === "input" && port.direction === "output" ? "0" : "X";
 }
 
 function routeFor(connection: EditorConnection): readonly Point[] {

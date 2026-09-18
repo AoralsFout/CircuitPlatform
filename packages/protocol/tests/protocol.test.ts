@@ -22,11 +22,21 @@ test("creates a health check request", () => {
   });
 });
 
-test("recognizes the initial digital signal values", () => {
-  assert.equal(isSignal(0), true);
-  assert.equal(isSignal(1), true);
+test("recognizes a signal value as a non-empty run of 0, 1 and X", () => {
+  assert.equal(isSignal("0"), true);
+  assert.equal(isSignal("1"), true);
   assert.equal(isSignal("X"), true);
-  assert.equal(isSignal(2), false);
+  // 多位值同样是合法信号值：长度由端口位宽决定，协议层判不了，因此不在这里限制。
+  assert.equal(isSignal("10X0"), true);
+  // 数字形式已经不再是信号值。
+  assert.equal(isSignal(0), false);
+  assert.equal(isSignal(1), false);
+  // 空串、其它字符与小写 x 都不是。
+  assert.equal(isSignal(""), false);
+  assert.equal(isSignal("2"), false);
+  assert.equal(isSignal("x"), false);
+  // 只含 0/1/X 的子串不算：整串必须都是这三个字符。
+  assert.equal(isSignal("1 0"), false);
 });
 
 test("serializes component and connection removal requests", () => {
@@ -70,7 +80,7 @@ test("recognizes a ticked response carrying the step and every output port", () 
       requestId: "request-13",
       step: 7,
       signals: [
-        { componentId: 3, port: "out", value: 1 },
+        { componentId: 3, port: "out", value: "1" },
         { componentId: 5, port: "q", value: "X" },
       ],
     }),
@@ -98,7 +108,7 @@ test("rejects malformed ticked responses", () => {
       type: "ticked",
       requestId: "request-18",
       step: 1,
-      signals: [{ componentId: 0, port: "out", value: 1 }],
+      signals: [{ componentId: 0, port: "out", value: "1" }],
     }),
     false,
   );
@@ -107,7 +117,7 @@ test("rejects malformed ticked responses", () => {
       type: "ticked",
       requestId: "request-19",
       step: 1,
-      signals: [{ componentId: 3, port: "out", value: 2 }],
+      signals: [{ componentId: 3, port: "out", value: "2" }],
     }),
     false,
   );
@@ -116,7 +126,7 @@ test("rejects malformed ticked responses", () => {
       type: "ticked",
       requestId: "request-20",
       step: 1,
-      signals: [{ componentId: 3, value: 1 }],
+      signals: [{ componentId: 3, value: "1" }],
     }),
     false,
   );
