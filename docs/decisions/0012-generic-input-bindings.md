@@ -28,6 +28,8 @@
 
 2026-09-18 在 Phase 4 切片 2 落地：重置接入工具栏与键盘，键位取运行控制功能键簇的下一个空位 `F8`，与既有绑定没有冲突。它与「单步」并列，把仿真恢复到初始状态而不是推进它。
 
+2026-09-18 在 Phase 4.5 切片 6 落地（issue #31）：**波形不再是旧字段的拷贝。** `WaveformPoint` 从 `{step, a, b, output}` 改为 `{step, signals}`，一次推进记录的是这一拍全部端口读数的快照，键为 `${editorComponentId}:${portId}`，行由场景投影生成。`inputA`、`inputB` 与 `outputValue` 仍作为示例电路与画布的兼容投影保留，但波形已经不再依赖它们，本文档开头所说的「旧波形字段作为兼容投影保留」到此结束。
+
 ## 键位表
 
 编辑器级快捷键集中登记在这里，新增绑定前先查表避免冲突。解析器在 `src/editor/keyboard.ts`，全局分发在 `App.vue`，画布内的按键由 `CircuitCanvas.vue` 处理；被 Electron 默认加速键占用的组合在 `electron/main.cjs` 的 `before-input-event` 里处置。
