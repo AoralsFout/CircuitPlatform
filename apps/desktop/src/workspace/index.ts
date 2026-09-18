@@ -44,6 +44,12 @@ export interface TickScheduler {
 /** 连续运行两次推进之间的默认间隔；下一次推进总在上一次响应之后才排定，因此它是下限而不是频率。 */
 export const TICK_INTERVAL_MS = 100;
 
+/**
+ * 波形历史上限：超出后丢弃最旧的点，长时间连续运行不会耗尽内存。
+ * 第一版固定为常量，不提供配置；记录的键空间与行投影不受裁剪影响。
+ */
+const WAVEFORM_HISTORY_LIMIT = 1000;
+
 const defaultTickScheduler: TickScheduler = {
   schedule(delayMs, run) {
     const handle = setTimeout(run, delayMs);
@@ -172,6 +178,10 @@ export interface WorkspaceSnapshot {
    * 重置才归零。
    */
   simulationStep: number;
+  /**
+   * 波形历史：每一拍推进（用户单步、输入切换与连续运行的自动 tick）各追加一个点。
+   * 上限 1,000 点，超出丢弃最旧的点；重置清空，下一次推进从第 0 步重新记录。
+   */
   waveform: readonly WaveformPoint[];
   /** 可以让电路从停止态开始连续运行。 */
   canStart: boolean;
@@ -637,8 +647,8 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
   async function advanceOnce(): Promise<void> {
     const bindings = state.runtimeBindings;
     if (state.simulationState !== "running" || bindings === null) return;
-    // 自动推进不追加波形记录：波形历史只记录用户发起的推进。
-    const advanced = await queue.enqueue(() => stepInternal(bindings, { record: false }));
+    // 自动推进与用户单步走同一条「计数 + 追加波形点」路径：连续运行的每一拍都是波形历史里的一个点。
+    const advanced = await queue.enqueue(() => stepInternal(bindings));
     if (!advanced) {
       // 推进失败时不继续排定，避免每一拍都重复报同一个错误；用户修好电路后可以继续。
       state.simulationState = "paused";
@@ -663,6 +673,19 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
     const [first, second] = bindings.inputs;
     if (first !== undefined) state.inputA = values[first.key] ?? state.inputA;
     if (second !== undefined) state.inputB = values[second.key] ?? state.inputB;
+  }
+
+  /**
+   * 把当前这一拍记成一个波形点，并维持历史上限。
+   *
+   * 用户单步、输入切换与连续运行的自动 tick 都经这里记录：每一拍推进各占一个点。
+   * 点从数组尾部追加，因此最旧的点在头部；超出上限时只裁掉头部，记录的键空间与行投影不受影响。
+   */
+  function recordWaveformPoint(): void {
+    state.waveform.push({ step: state.simulationStep, signals: { ...state.signals } });
+    if (state.waveform.length > WAVEFORM_HISTORY_LIMIT) {
+      state.waveform.splice(0, state.waveform.length - WAVEFORM_HISTORY_LIMIT);
+    }
   }
 
   async function checkEngine(): Promise<WorkspaceSnapshot> {
@@ -772,7 +795,7 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
         state.simulationStep += 1;
         // 记录的是这一拍全部端口读数的快照（Input 的驱动值、其余元件的输出、每个 Output 的
         // 接收端），而不是写死的三行；键与画布、检查器共用同一套 `${componentId}:${port}`。
-        state.waveform.push({ step: state.simulationStep, signals: { ...state.signals } });
+        recordWaveformPoint();
       }
       state.message = "仿真已稳定，信号已更新。";
       return true;
@@ -902,15 +925,15 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
   }
 
   /**
-   * 推进一个 tick。响应一次带回电路中全部输出 Port 与每个 Output 元件接收端的当前值，
+   * 推进一个 tick，并追加这一拍的波形记录。
+   * 响应一次带回电路中全部输出 Port 与每个 Output 元件接收端的当前值，
    * 因此每步只有一次跨进程往返，往返次数不随电路规模增长，波形也能记录这一拍的真实读数。
+   * 连续运行的自动 tick 与用户单步共用这条路径，每一拍都计一次步数、追加一个波形点；
+   * 不推进的求值（加载、重置后的重新求值、结构变更后的读数刷新）走 `submitInputsAndSettle`
+   * 的 `countAsAdvance: false`，既不加步数也不进波形历史。
    * @param bindings 本次会话的运行时身份绑定。
-   * @param options `record` 为真时追加一条波形记录；自动推进不追加，波形只记录用户发起的推进。
    */
-  async function stepInternal(
-    bindings: RuntimeSimulationBindings,
-    options: { record: boolean },
-  ): Promise<boolean> {
+  async function stepInternal(bindings: RuntimeSimulationBindings): Promise<boolean> {
     state.operationError = null;
     try {
       const ticked = expectResponse(await adapter.tick(), "ticked");
@@ -946,11 +969,9 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
         state.outputValue = outputSignals[bindings.outputs[0].key] ?? state.outputValue;
       }
       state.simulationStep += 1;
-      if (options.record) {
-        // 与输入切换路径同一条记录：这一拍的全部端口读数，键为 `${componentId}:${port}`。
-        // 记录的形状变了，但记录的时机没变——`record` 只在用户发起的推进上为真。
-        state.waveform.push({ step: state.simulationStep, signals: { ...state.signals } });
-      }
+      // 每一拍推进都进波形历史：连续运行的自动 tick 与用户单步在这里没有区别；
+      // 超出历史上限时由记录点统一丢弃最旧的点。
+      recordWaveformPoint();
       // 引用工作区自己的步数：引擎的 `ticked.step` 属于当前那份引擎仿真状态，结构变更后会归零。
       state.message = `已推进到第 ${state.simulationStep} 步。`;
       return true;
@@ -967,7 +988,7 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
       if (bindings === null) return createWorkspaceSnapshot(state);
       state.isBusy = true;
       try {
-        await stepInternal(bindings, { record: true });
+        await stepInternal(bindings);
       } finally {
         state.isBusy = false;
       }

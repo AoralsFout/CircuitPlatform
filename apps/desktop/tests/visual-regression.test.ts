@@ -196,7 +196,7 @@ test("keyboard equivalents for run control are wired end to end", async () => {
   assert.match(app, /@reset-simulation="reset"/);
 
   // 运行循环排定下一次推进之前必须等上一次响应，且下一次推进只能由调度器排定。
-  assert.match(workspace, /const advanced = await queue\.enqueue\(\(\) => stepInternal\(bindings, \{ record: false \}\)\)/);
+  assert.match(workspace, /const advanced = await queue\.enqueue\(\(\) => stepInternal\(bindings\)\)/);
   assert.match(workspace, /scheduleTick\(\);\n    notifyAdvanced\(\);/);
   // 暂停要取消已经排定的下一次推进。
   assert.match(workspace, /cancelTick\(\);\n      state\.simulationState = "paused"/);
