@@ -21,7 +21,7 @@ import {
   type WorkspaceSnapshot,
 } from "../workspace/index.ts";
 import { createEngineCallQueue } from "../workspace/engineQueue.ts";
-import type { ComponentKindName } from "@circuit-platform/protocol";
+import type { ComponentKindName, PortSpec } from "@circuit-platform/protocol";
 
 interface WorkspaceBinding {
   state: DeepReadonly<Ref<WorkspaceSnapshot>>;
@@ -52,6 +52,11 @@ interface WorkspaceBinding {
   deleteSelection(): Promise<void>;
   /** 删除指定 Component，供对象右键菜单直接复用稳定编辑器身份。 */
   deleteComponent(componentId: EditorComponentId): Promise<void>;
+  /**
+   * 整份替换一个元件的端口清单；改宽是一次可撤销的结构提交，排在共享的引擎调用队列里，
+   * 因此不会与推进交错。
+   */
+  setPortWidthCommand(componentId: EditorComponentId, ports: readonly PortSpec[]): Promise<void>;
   /** 删除指定 Connection 对应的 Wire，供对象右键菜单使用。 */
   deleteConnection(connectionId: string): Promise<void>;
   /** 请求显示清空确认；此步骤不会调用引擎。 */
@@ -74,7 +79,8 @@ interface WorkspaceBinding {
 }
 
 function toEditorBindings(bindings: SimulationBindings): EditorBindings {
-  return { components: bindings.components, connections: bindings.connections ?? {}, componentKinds: bindings.componentKinds };
+  // 端口清单一并转交：编辑器文档里的元件靠它拿到自己的端口几何，运行时要读哪些端口也由它推导。
+  return { components: bindings.components, connections: bindings.connections ?? {}, componentKinds: bindings.componentKinds, ports: bindings.ports };
 }
 
 /**
@@ -183,6 +189,11 @@ export function useWorkspace(): WorkspaceBinding {
     await refreshSimulationAfterBindingsChange();
   }
 
+  /** 改宽走与其它结构提交同一条路径：先发命令，再按响应刷新编辑器与仿真。 */
+  async function setPortWidthCommand(componentId: EditorComponentId, ports: readonly PortSpec[]): Promise<void> {
+    await dispatch({ type: "set-port-width", componentId, ports });
+  }
+
   /** 右键菜单直接复用 EditorSession 的 add-component 命令；成功才返回 true。 */
   async function addComponent(kind: ComponentKindName, center: Point, altKey = false, continuous = false): Promise<boolean> {
     if (!editor) return false;
@@ -269,6 +280,7 @@ export function useWorkspace(): WorkspaceBinding {
     deleteWaypoint: (connectionId, pointIndex) => dispatch({ type: "delete-waypoint", connectionId, pointIndex }),
     deleteSelection: () => dispatch({ type: "delete-selected" }),
     deleteComponent: (componentId) => dispatch({ type: "delete-component", componentId }),
+    setPortWidthCommand,
     deleteConnection: (connectionId) => dispatch({ type: "delete-connection", connectionId }),
     requestClear: () => dispatch({ type: "request-clear" }),
     confirmClear: () => dispatch({ type: "confirm-clear" }),

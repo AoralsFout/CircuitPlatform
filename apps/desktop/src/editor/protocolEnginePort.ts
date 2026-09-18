@@ -57,9 +57,18 @@ export function createProtocolEnginePort(adapter: EngineAdapter, queue: EngineCa
     read: (response: EngineResponse) => T | null,
   ): Promise<EngineResult<T>> => serializedCall(queue, action, read);
   return {
-    addComponent: (kind) => call(
-      () => adapter.addComponent(kind),
-      (response) => response.type === "component_added" ? { componentId: response.componentId } : null,
+    addComponent: (kind, ports) => call(
+      () => adapter.addComponent(kind, ports),
+      // 端口清单随响应进入调用方：它是端口名与位宽的唯一权威来源，前端不再内置一份副本。
+      (response) => response.type === "component_added"
+        ? { componentId: response.componentId, ports: response.ports }
+        : null,
+    ),
+    setPortWidth: (componentId, ports) => call(
+      () => adapter.setPortWidth(componentId, ports),
+      (response) => response.type === "port_width_set"
+        ? { ports: response.ports, danglingConnectionIds: response.danglingConnectionIds }
+        : null,
     ),
     addConnection: (input) => call(
       () => adapter.addConnection(

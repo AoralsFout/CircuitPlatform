@@ -152,8 +152,8 @@ function keyboardMenuAnchor(target: EventTarget | null): { x: number; y: number 
 /** 稠密判定只取决于场景规模；逐 Wire 重复计算会放大整树重渲染的成本。 */
 const denseScene = computed(() => isDenseCanvasScene(props.scene));
 
-// 信号值是逐位文本，因此这里比的是字符串。多位值还没有自己的渲染（Phase 4.5 的后续切片），
-// 落到未知一档；位宽为 1 的电路与改造前完全相同。
+// 信号值是逐位文本，因此这里比的是字符串。多位值按逐位文本显示（`1010`、`X1X0`），
+// 颜色只表达「确定的 0 / 确定的 1 / 其余」这三档，位宽为 1 时与改造前完全相同。
 function signalClass(value: Signal): string {
   if (value === "1") return "signal-state--high";
   if (value === "0") return "signal-state--low";
@@ -974,7 +974,7 @@ watch(() => props.scene.wires, async () => {
           <!-- v-memo：Wire 自身与焦点/稠密标记都没变时，跳过 vnode 重建与 DOM patch。
                目标规模下这是整树重渲染的主要成本，投影器会为未变化的 Wire 保留对象身份。 -->
           <template v-for="wire in scene.wires" :key="wire.id" v-memo="[wire, interaction.focusedId, denseScene]">
-            <path class="signal-wire-hit" :d="pathFor(wire.route)" role="button" tabindex="0" data-canvas-focus data-focus-kind="connection" :data-focus-id="wire.id" :class="{ 'signal-wire-hit--focused': interaction.focusedId === wire.id }" :aria-label="`${wire.danglingEndpoints.length > 0 ? '悬空' : '正常'}连线 ${wire.id}，信号 ${wire.signal}`" @focus="emit('focusChange', wire.id)" @click.stop="emit('selectConnection', wire.id)" />
+            <path class="signal-wire-hit" :d="pathFor(wire.route)" role="button" tabindex="0" data-canvas-focus data-focus-kind="connection" :data-focus-id="wire.id" :class="{ 'signal-wire-hit--focused': interaction.focusedId === wire.id }" :aria-label="`${wire.dangling ? '悬空' : '正常'}连线 ${wire.id}，信号 ${wire.signal}`" @focus="emit('focusChange', wire.id)" @click.stop="emit('selectConnection', wire.id)" />
             <template v-if="wire.selected" v-for="(_, segmentIndex) in wire.route.slice(0, -1)" :key="`${wire.id}-segment-${segmentIndex}`">
               <path v-if="segmentIndex > 0 && segmentIndex < wire.route.length - 2" class="route-segment-hit" :d="segmentPath(wire.route, segmentIndex)" role="button" tabindex="0" data-canvas-arrow-focus data-focus-kind="route-segment" :data-focus-id="`route:${wire.id}:segment:${segmentIndex}`" :aria-label="`移动连线 ${wire.id} 线段 ${segmentIndex + 1}，方向键微调`" @focus="focusRouteHandle(wire.id, { kind: 'segment', index: segmentIndex }, `route:${wire.id}:segment:${segmentIndex}`)" @blur="blurRouteHandle" @pointerdown.stop="onRouteSegmentPointerDown($event, wire, segmentIndex)" />
             </template>
@@ -982,8 +982,8 @@ watch(() => props.scene.wires, async () => {
               <circle class="route-waypoint-handle" :cx="point.x" :cy="point.y" r="7" role="button" tabindex="0" data-canvas-arrow-focus data-focus-kind="route-waypoint" :data-focus-id="`route:${wire.id}:waypoint:${pointIndex + 1}`" :aria-label="`编辑连线 ${wire.id} 折点 ${pointIndex + 1}，方向键微调`" @focus="focusRouteHandle(wire.id, { kind: 'waypoint', index: pointIndex + 1 }, `route:${wire.id}:waypoint:${pointIndex + 1}`)" @blur="blurRouteHandle" @pointerdown.stop="onRouteWaypointPointerDown($event, wire, pointIndex + 1)" />
             </template>
             <path v-if="wire.selected" class="signal-wire-outline" :d="pathFor(wire.route)" aria-hidden="true" />
-            <path :id="wirePathId(wire.id)" class="signal-wire" :class="[wireColorClass(wire.color), { 'signal-wire--dangling': wire.danglingEndpoints.length > 0 }]" :data-signal="wire.signal" :data-wire-color="wire.color ?? DEFAULT_WIRE_COLOR" :data-dangling="wire.danglingEndpoints.length > 0 ? 'true' : 'false'" :d="pathFor(wire.route)" />
-            <template v-if="wire.danglingEndpoints.length === 0">
+            <path :id="wirePathId(wire.id)" class="signal-wire" :class="[wireColorClass(wire.color), { 'signal-wire--dangling': wire.dangling }]" :data-signal="wire.signal" :data-wire-color="wire.color ?? DEFAULT_WIRE_COLOR" :data-dangling="wire.dangling ? 'true' : 'false'" :d="pathFor(wire.route)" />
+            <template v-if="!wire.dangling">
               <path v-if="!denseScene" class="wire-signal-flow" :class="wireColorClass(wire.color)" :d="pathFor(wire.route)" aria-hidden="true" />
               <text class="wire-signal-label" :class="wireColorClass(wire.color)" aria-hidden="true"><textPath :href="`#${wirePathId(wire.id)}`" startOffset="50%">{{ wire.signal }}</textPath></text>
             </template>
@@ -994,7 +994,7 @@ watch(() => props.scene.wires, async () => {
         </svg>
         <article v-for="node in scene.nodes" :key="node.id" v-memo="[node, interaction.focusedId, interaction.draggingComponentId, hoveredConnectionTarget]" class="circuit-node" :class="{ 'circuit-node--selected': node.selected, 'circuit-node--focused': interaction.focusedId === node.id, 'circuit-node--dragging': interaction.draggingComponentId === node.id }" :style="nodeStyle(node)" role="button" tabindex="0" data-canvas-focus data-focus-kind="component" :data-focus-id="node.id" :data-selected="node.selected ? 'true' : 'false'" :aria-label="`选择${node.kind.toUpperCase()} 元件`" @focus="emit('focusChange', node.id)" @pointerdown.stop="onNodePointerDown($event, node)" @click="onNodeClick(node.id)">
           <strong>{{ node.kind.toUpperCase() }}</strong>
-          <span v-for="port in node.ports" :key="port.id" class="node-port" :class="[port.direction === 'input' ? 'node-port--left' : 'node-port--right', signalClass(port.signal), { 'node-port--dangling': port.dangling, 'node-port--connection-target': isHoveredConnectionTarget(node.id, port.id) }]" :style="{ top: `${port.offset.y}px` }" :data-port-id="port.id" :data-node-id="node.id" :data-signal="port.signal" :data-dangling="port.dangling ? 'true' : 'false'" :data-focus-id="`port:${node.id}:${port.id}`" data-focus-kind="port" data-canvas-focus role="button" tabindex="0" :aria-label="`${port.direction === 'input' ? '输入' : '输出'}端口 ${port.name}，信号 ${port.signal}${port.dangling ? '，悬空' : ''}`" @focus="emit('focusChange', `port:${node.id}:${port.id}`)" @pointerdown.stop="onPortPointerDown($event, node, port)" @pointerup.stop="onPortPointerUp($event, node, port)" @click.stop="onPortClick($event)"><span class="node-port__anchor" aria-hidden="true"></span><span class="node-port__label">{{ port.name }}</span></span>
+          <span v-for="port in node.ports" :key="port.id" class="node-port" :class="[port.direction === 'input' ? 'node-port--left' : 'node-port--right', signalClass(port.signal), { 'node-port--dangling': port.dangling, 'node-port--connection-target': isHoveredConnectionTarget(node.id, port.id) }]" :style="{ top: `${port.offset.y}px` }" :data-port-id="port.id" :data-node-id="node.id" :data-signal="port.signal" :data-dangling="port.dangling ? 'true' : 'false'" :data-focus-id="`port:${node.id}:${port.id}`" data-focus-kind="port" data-canvas-focus role="button" tabindex="0" :aria-label="`${port.direction === 'input' ? '输入' : '输出'}端口 ${port.label}，信号 ${port.signal}${port.dangling ? '，悬空' : ''}`" @focus="emit('focusChange', `port:${node.id}:${port.id}`)" @pointerdown.stop="onPortPointerDown($event, node, port)" @pointerup.stop="onPortPointerUp($event, node, port)" @click.stop="onPortClick($event)"><span class="node-port__anchor" aria-hidden="true"></span><span class="node-port__label">{{ port.label }}</span></span>
         </article>
         <article v-if="interaction.pendingPlacement" class="circuit-node circuit-node--pending" :class="{ 'circuit-node--error': interaction.pendingPlacement.error }" :style="{ left: `${interaction.pendingPlacement.position.x}px`, top: `${interaction.pendingPlacement.position.y}px`, width: `${interaction.pendingPlacement.size.width}px`, height: `${interaction.pendingPlacement.size.height}px` }" role="status" :aria-label="`${interaction.pendingPlacement.error ? '放置失败' : '正在放置'} ${interaction.pendingPlacement.kind} 元件`">
           <span class="node-tag">{{ interaction.pendingPlacement.error ? '放置失败' : '待放置' }}</span><strong>{{ interaction.pendingPlacement.kind.toUpperCase() }}</strong>

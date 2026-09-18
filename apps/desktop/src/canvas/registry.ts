@@ -4,5 +4,5 @@ export {
   DEFAULT_COMPONENT_DEFINITIONS,
   defaultComponentDefinitionRegistry,
   type ComponentDefinition,
-  type PortDefinition,
+  type PortLayout,
 } from "./index";

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ComponentKindName, EngineResponse, Signal } from "@circuit-platform/protocol";
+import type { ComponentKindName, EngineResponse, PortSpec, Signal } from "@circuit-platform/protocol";
 import { createComponentDefinitionRegistry, projectCanvasScene } from "../src/canvas/index.ts";
 import {
   createAndDemoDocument,
@@ -19,10 +19,12 @@ import {
   type SimulationBindings,
 } from "../src/workspace/index.ts";
 import { drain, FakeScheduler } from "./fake-scheduler.ts";
+import { builtInPortsById, portsForAddComponent } from "./fake-ports.ts";
 
 type Call =
   | { type: "checkEngine" }
   | { type: "addComponent"; kind: ComponentKindName }
+  | { type: "setPortWidth"; componentId: number; ports: readonly PortSpec[] }
   | { type: "addConnection"; sourceComponentId: number; sourcePort: string; targetComponentId: number; targetPort: string }
   | { type: "removeComponent"; componentId: number }
   | { type: "removeConnection"; connectionId: number }
@@ -47,6 +49,7 @@ class FakeEngine implements EngineAdapter {
   /** Clock 的输出初值为 0，每推进一次翻转一次。 */
   private readonly clocks = new Map<number, Signal>();
   private readonly kinds = new Map<number, ComponentKindName>();
+  private readonly ports = new Map<number, readonly PortSpec[]>();
   private readonly inputs = new Map<number, Signal>();
   private readonly connections: { source: { componentId: number; port: string }; target: { componentId: number; port: string } }[] = [];
 
@@ -55,12 +58,22 @@ class FakeEngine implements EngineAdapter {
     return { status: "ok" as const, engine: "fake-engine" };
   }
 
-  async addComponent(kind: ComponentKindName): Promise<EngineResponse> {
+  async addComponent(kind: ComponentKindName, ports?: readonly PortSpec[]): Promise<EngineResponse> {
     this.calls.push({ type: "addComponent", kind });
     if (this.errorOn === "addComponent") return this.error("创建元件失败");
     const componentId = this.nextComponentId++;
     this.kinds.set(componentId, kind);
-    return { type: "component_added", requestId: "fake", componentId };
+    // 与真实引擎同一条回退规则：省略端口清单时用内置定义，并把实际清单回传。
+    const resolved = portsForAddComponent(kind, ports);
+    this.ports.set(componentId, resolved);
+    return { type: "component_added", requestId: "fake", componentId, ports: resolved };
+  }
+
+  async setPortWidth(componentId: number, ports: readonly PortSpec[]): Promise<EngineResponse> {
+    this.calls.push({ type: "setPortWidth", componentId, ports });
+    if (this.errorOn === "setPortWidth") return this.error("改位宽失败");
+    this.ports.set(componentId, ports);
+    return { type: "port_width_set", requestId: "fake", componentId, ports, danglingConnectionIds: [] };
   }
 
   async addConnection(source: { componentId: number; port: string }, target: { componentId: number; port: string }): Promise<EngineResponse> {
@@ -184,6 +197,23 @@ function bindingsFrom(loaded: SimulationBindings): EditorBindings {
     components: loaded.components,
     connections: loaded.connections ?? {},
     componentKinds: loaded.componentKinds,
+    ports: loaded.ports,
+  };
+}
+
+/**
+ * 给手工造的测试文档补上内置端口清单。
+ *
+ * 真实路径里这份清单由 `component_added` 回传；用例直接投影文档时没有引擎可问，因此在这里
+ * 用同一份夹具内置定义填好。
+ */
+function withBuiltInPorts(document: EditorDocument): EditorDocument {
+  return {
+    ...document,
+    components: document.components.map((component) => ({
+      ...component,
+      ports: component.ports ?? portsForAddComponent(component.kind),
+    })),
   };
 }
 
@@ -213,6 +243,8 @@ test("creates and runs the example circuit through the generic document path", a
     components: { "input-a": 1, "input-b": 2, "and-gate": 3, output: 4 },
     connections: { "wire-a": 1, "wire-b": 2, "wire-output": 3 },
     componentKinds: { "input-a": "input", "input-b": "input", "and-gate": "and", output: "output" },
+    // 端口清单由 component_added 回传，编辑器文档靠它拿到端口几何。
+    ports: builtInPortsById({ "input-a": "input", "input-b": "input", "and-gate": "and", output: "output" }),
   });
   assert.equal(state.outputValue, "1");
   // 加载后的首次稳定求值不是一次推进：步数停在 0，波形历史也还是空的。
@@ -283,8 +315,8 @@ test("projects the settled AND result onto the gate output wire", async () => {
 
   const state = await workspace.toggleInput("input-b");
   const registry = createComponentDefinitionRegistry();
-  const editorSnapshot = editorSnapshotOf(createAndDemoDocument());
-  const simulation = createSimulationSnapshot(editorSnapshot, registry, {
+  const editorSnapshot = editorSnapshotOf(withBuiltInPorts(createAndDemoDocument()));
+  const simulation = createSimulationSnapshot(editorSnapshot, {
     inputA: state.inputA,
     inputB: state.inputB,
     inputValues: state.inputValues,
@@ -362,13 +394,13 @@ test("reads every Output component's own signal instead of reusing the first one
   );
 
   const registry = createComponentDefinitionRegistry();
-  const simulation = createSimulationSnapshot(editorSnapshotOf(document), registry, {
+  const simulation = createSimulationSnapshot(editorSnapshotOf(withBuiltInPorts(document)), {
     inputA: state.inputA,
     inputB: state.inputB,
     inputValues: state.inputValues,
     signals: state.signals,
   });
-  const scene = projectCanvasScene(editorSnapshotOf(document), simulation, registry);
+  const scene = projectCanvasScene(editorSnapshotOf(withBuiltInPorts(document)), simulation, registry);
   const signalAt = (id: string): Signal | undefined =>
     scene.nodes.find((node) => node.id === id)?.ports.find((port) => port.direction === "input")?.signal;
 
@@ -393,7 +425,7 @@ test("advances the clock one tick per single step with a single round trip", asy
   const engine = new FakeEngine();
   const workspace = createWorkspace(engine);
   await workspace.checkEngine();
-  const document = clockDocument();
+  const document = withBuiltInPorts(clockDocument());
   const loaded = await workspace.loadCircuit(document);
   const registry = createComponentDefinitionRegistry();
 
@@ -409,7 +441,7 @@ test("advances the clock one tick per single step with a single round trip", asy
 
   const scene = projectCanvasScene(
     editorSnapshotOf(document),
-    createSimulationSnapshot(editorSnapshotOf(document), registry, {
+    createSimulationSnapshot(editorSnapshotOf(document), {
       inputA: first.inputA,
       inputB: first.inputB,
       inputValues: first.inputValues,
@@ -611,6 +643,7 @@ test("pauses continuous running when the circuit structure changes", async () =>
   const rebound = workspace.rebindSimulation({
     components: { clock: 1, monitor: 2 },
     componentKinds: { clock: "clock", monitor: "output" },
+    ports: builtInPortsById({ clock: "clock", monitor: "output" }),
   });
 
   // 结构修改把运行切到暂停，并要求用户显式继续；已排定的推进被取消。
@@ -636,6 +669,7 @@ test("keeps the accumulated readings when the circuit structure changes", async 
     components: { clock: 1 },
     connections: { wire: 1 },
     componentKinds: { clock: "clock" },
+    ports: builtInPortsById({ clock: "clock" }),
   });
 
   assert.equal(rebound.simulationState, "paused");
@@ -669,6 +703,7 @@ test("distinguishes a real topology change from a geometry-only update", async (
   const rebound = workspace.rebindSimulation({
     components: { clock: 1, monitor: 2 },
     componentKinds: { clock: "clock", monitor: "output" },
+    ports: builtInPortsById({ clock: "clock", monitor: "output" }),
   });
   assert.equal(rebound.simulationState, "paused");
   assert.equal(scheduler.cancelled, 1);
@@ -855,7 +890,7 @@ test("refreshes the AND output signal immediately after creating its output wire
     const editorSnapshot = binding.editorState.value as EditorSnapshot;
     const state = binding.state.value;
     const registry = createComponentDefinitionRegistry();
-    const simulation = createSimulationSnapshot(editorSnapshot, registry, {
+    const simulation = createSimulationSnapshot(editorSnapshot, {
       inputA: state.inputA,
       inputB: state.inputB,
       inputValues: state.inputValues,
@@ -955,6 +990,7 @@ test("recognizes every input component in generic editor bindings", async () => 
   workspace.rebindSimulation({
     components: { "input-a": 1, "input-b": 2, "input-c": 3, "and-gate": 4, output: 5 },
     componentKinds: { "input-a": "input", "input-b": "input", "input-c": "input", "and-gate": "and", output: "output" },
+    ports: builtInPortsById({ "input-a": "input", "input-b": "input", "input-c": "input", "and-gate": "and", output: "output" }),
   });
 
   assert.equal(workspace.snapshot().canStep, true);

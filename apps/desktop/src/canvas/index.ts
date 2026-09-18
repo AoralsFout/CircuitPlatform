@@ -1,4 +1,4 @@
-import type { ComponentKindName, Signal } from "@circuit-platform/protocol";
+import type { ComponentKindName, PortSpec, Signal } from "@circuit-platform/protocol";
 import type {
   EditorComponent,
   EditorConnection,
@@ -7,16 +7,25 @@ import type {
   Point,
 } from "../editor";
 import { createDefaultOrthogonalRoute, routeFromWaypoints } from "../editor/route.ts";
+import { isProjectedDangling } from "../editor/port-width.ts";
 import { DEFAULT_WIRE_COLOR, isWireColorId, type WireColorId } from "../editor/wire-appearance.ts";
 
 export type PortDirection = "input" | "output";
 
-export interface PortDefinition {
-  id: string;
-  name: string;
-  direction: PortDirection;
+/**
+ * 一个端口的展示几何：画在哪、显示成什么。
+ *
+ * 它只描述展示，**不声明端口是否存在**——端口清单与位宽由引擎回传，这里不保留第二份。
+ */
+export interface PortLayout {
+  /** 端口标签；省略时直接用引擎的端口名。 */
+  label?: string;
+  /** 锚点相对元件左上角的偏移。 */
   offset: Point;
 }
+
+/** 同一方向上相邻端口的纵向间距；与既有元件的端口间距一致。 */
+export const PORT_LAYOUT_PITCH = 24;
 
 export interface ComponentDefinition {
   kind: ComponentKindName;
@@ -26,10 +35,65 @@ export interface ComponentDefinition {
   displayName: string;
   description: string;
   size: { width: number; height: number };
-  ports: readonly PortDefinition[];
+  /**
+   * 按引擎端口名索引的展示布局。
+   *
+   * 通用排布规则（同向端口在元件垂直中线上按 `PORT_LAYOUT_PITCH` 均分、输入贴左、输出贴右）
+   * 复现了既有元件的全部端口坐标，因此这里只列规则复现不了的那几项：D Flip-Flop 的 `q` 与
+   * `d` 对齐而不是垂直居中，它的三个端口显示的也不是端口名。
+   *
+   * 没有条目的端口一律走规则，所以数据驱动的元件（拆线器、合线器）不需要在这里登记——
+   * 展示定义不是端口清单，端口从哪来、有多宽都由引擎说了算。
+   */
+  portLayout: Readonly<Record<string, PortLayout>>;
   available: boolean;
   disabledReason: string | null;
   searchAliases: readonly string[];
+}
+
+/**
+ * 解析一个端口在画布上的展示几何。
+ *
+ * 先看展示定义里有没有为这个端口名登记的布局，没有就回退到通用规则：同方向的端口在元件
+ * 垂直中线上等距排开，输入贴左边、输出贴右边。规则给出的坐标与既有元件逐个吻合，因此
+ * 回退不是「降级」，而是这些元件本来就没有需要特别登记的形状。
+ * @param definition 元件展示定义。
+ * @param portName 引擎端口名。
+ * @param direction 端口方向，决定它贴哪一边。
+ * @param sideIndex 同一方向上这一项的下标。
+ * @param sideCount 同一方向上的端口总数。
+ * @returns 该端口的标签与偏移。
+ */
+export function portLayoutFor(
+  definition: ComponentDefinition,
+  portName: string,
+  direction: PortDirection,
+  sideIndex: number,
+  sideCount: number,
+): PortLayout {
+  const explicit = definition.portLayout[portName];
+  const centered = definition.size.height / 2 + (sideIndex - (sideCount - 1) / 2) * PORT_LAYOUT_PITCH;
+  return {
+    label: explicit?.label ?? portName,
+    offset: explicit?.offset ?? {
+      x: direction === "input" ? 0 : definition.size.width,
+      y: centered,
+    },
+  };
+}
+
+/**
+ * 端口标签上的文本：带位区间或位宽大于 1 时写成 `out[7:0]`，否则就是端口名本身。
+ *
+ * 位宽为 1 且没有位区间的端口因此与引入位宽之前显示得一模一样——这是「既有 1 位电路外观不变」
+ * 在端口标注上的落点。
+ * @param label 端口的展示标签（通常是端口名）。
+ * @param port 引擎回传的端口声明。
+ * @returns 画布与检查器共用的端口标注文本。
+ */
+export function circuitPortLabel(label: string, port: Pick<PortSpec, "width" | "bitRange">): string {
+  if (port.bitRange) return `${label}[${port.bitRange.msb}:${port.bitRange.lsb}]`;
+  return port.width > 1 ? `${label}[${port.width - 1}:0]` : label;
 }
 
 /**
@@ -67,12 +131,9 @@ export class ComponentDefinitionRegistry {
 }
 
 const size = { width: 148, height: 84 } as const;
-const port = (id: string, name: string, direction: PortDirection, x: number, y: number): PortDefinition => ({
-  id,
-  name,
-  direction,
-  offset: { x, y },
-});
+
+/** 没有条目的端口走通用规则；`{}` 因此是一个完整而正确的展示布局。 */
+const noPortLayout: Readonly<Record<string, PortLayout>> = {};
 
 /** 默认支持的元件展示定义，供画布、元件库和检查器共享。 */
 export const DEFAULT_COMPONENT_DEFINITIONS: readonly ComponentDefinition[] = [
@@ -84,7 +145,7 @@ export const DEFAULT_COMPONENT_DEFINITIONS: readonly ComponentDefinition[] = [
     displayName: "输入",
     description: "产生 0 或 1 的数字输入。",
     size,
-    ports: [port("out", "out", "output", size.width, size.height / 2)],
+    portLayout: noPortLayout,
     available: true,
     disabledReason: null,
     searchAliases: ["source", "input", "输入端"],
@@ -97,7 +158,7 @@ export const DEFAULT_COMPONENT_DEFINITIONS: readonly ComponentDefinition[] = [
     displayName: "输出",
     description: "显示一个输入信号。",
     size,
-    ports: [port("in", "in", "input", 0, size.height / 2)],
+    portLayout: noPortLayout,
     available: true,
     disabledReason: null,
     searchAliases: ["monitor", "output", "输出端"],
@@ -110,7 +171,7 @@ export const DEFAULT_COMPONENT_DEFINITIONS: readonly ComponentDefinition[] = [
     displayName: "AND 门",
     description: "所有输入为 1 时输出 1。",
     size,
-    ports: [port("in1", "in1", "input", 0, 30), port("in2", "in2", "input", 0, 54), port("out", "out", "output", size.width, size.height / 2)],
+    portLayout: noPortLayout,
     available: true,
     disabledReason: null,
     searchAliases: ["and", "与门"],
@@ -123,13 +184,12 @@ export const DEFAULT_COMPONENT_DEFINITIONS: readonly ComponentDefinition[] = [
     displayName: "OR 门",
     description: "任一输入为 1 时输出 1。",
     size,
-    ports: [port("in1", "in1", "input", 0, 30), port("in2", "in2", "input", 0, 54), port("out", "out", "output", size.width, size.height / 2)],
+    portLayout: noPortLayout,
     available: true,
     disabledReason: null,
     searchAliases: ["or", "或门"],
   },
   ...["nand", "nor", "xor", "xnor", "not"].map((kind, index): ComponentDefinition => {
-    const binary = kind !== "not";
     return {
       kind: kind as ComponentKindName,
       category: "logic",
@@ -138,10 +198,7 @@ export const DEFAULT_COMPONENT_DEFINITIONS: readonly ComponentDefinition[] = [
       displayName: `${kind.toUpperCase()} 门`,
       description: `${kind.toUpperCase()} 逻辑元件。`,
       size,
-      ports: [
-        ...(binary ? [port("in1", "in1", "input", 0, 30), port("in2", "in2", "input", 0, 54)] : [port("in", "in", "input", 0, size.height / 2)]),
-        port("out", "out", "output", size.width, size.height / 2),
-      ],
+      portLayout: noPortLayout,
       available: true,
       disabledReason: null,
       searchAliases: [kind],
@@ -155,7 +212,7 @@ export const DEFAULT_COMPONENT_DEFINITIONS: readonly ComponentDefinition[] = [
     displayName: "Clock",
     description: "初值为 0，每推进一次在 0 与 1 之间翻转一次。",
     size,
-    ports: [port("out", "out", "output", size.width, size.height / 2)],
+    portLayout: noPortLayout,
     available: true,
     disabledReason: null,
     searchAliases: ["clock", "时钟"],
@@ -168,8 +225,13 @@ export const DEFAULT_COMPONENT_DEFINITIONS: readonly ComponentDefinition[] = [
     displayName: "D Flip-Flop",
     description: "在 clock 端口的上升沿把 D 采样进 Q，其余推进保持不变；第一次有效上升沿之前 Q 为 X。",
     size,
-    // 端口 id 原样发给引擎，因此时钟端口必须叫 `clock`（领域语言），`CLK` 只作为显示标签。
-    ports: [port("d", "D", "input", 0, 30), port("clock", "CLK", "input", 0, 54), port("q", "Q", "output", size.width, 30)],
+    // 端口名原样发给引擎，因此时钟端口必须叫 `clock`（领域语言），`CLK` 只作为显示标签。
+    // 通用规则会把唯一的输出端口摆在垂直中线上，而这个元件把 `q` 与 `d` 对齐，所以单独登记。
+    portLayout: {
+      d: { label: "D", offset: { x: 0, y: 30 } },
+      clock: { label: "CLK", offset: { x: 0, y: 54 } },
+      q: { label: "Q", offset: { x: size.width, y: 30 } },
+    },
     available: true,
     disabledReason: null,
     searchAliases: ["dff", "flip flop", "触发器"],
@@ -192,9 +254,17 @@ export interface SimulationSnapshot {
 }
 
 export interface CanvasPort {
+  /** 引擎端口名；信号键与连接端点都用它。 */
   id: string;
+  /** 展示标签，通常与端口名相同；D Flip-Flop 的 `CLK` 这类仅展示的名字在这里。 */
   name: string;
   direction: PortDirection;
+  /** 位宽；来自引擎回传的端口清单。 */
+  width: number;
+  /** 可选的位区间；只有落在某条宿主总线某一段上的端口会带上它。 */
+  bitRange?: { msb: number; lsb: number };
+  /** 端口标签上显示的文本，带位区间时形如 `out[7:0]`。 */
+  label: string;
   point: Point;
   offset: Point;
   signal: Signal;
@@ -229,7 +299,13 @@ export interface CanvasWire {
   signal: Signal;
   /** 与信号状态无关的线路外观预设。 */
   color?: WireColorId;
+  /** 端点缺失的边；位宽不匹配只让整条线悬空，不会给某一侧单独定性。 */
   danglingEndpoints: readonly EditorEndpointSide[];
+  /**
+   * 整条连接是否悬空：端点缺失，或两端位宽不再相同。
+   * 悬空只有一种表达，因此画布的外观与读数只认这一个布尔量。
+   */
+  dangling: boolean;
   selected: boolean;
 }
 
@@ -262,7 +338,12 @@ function freezeDefinition(definition: ComponentDefinition): ComponentDefinition 
   return {
     ...definition,
     size: { ...definition.size },
-    ports: definition.ports.map((item) => ({ ...item, offset: { ...item.offset } })),
+    portLayout: Object.fromEntries(
+      Object.entries(definition.portLayout).map(([name, layout]) => [
+        name,
+        { ...layout, offset: { ...layout.offset } },
+      ]),
+    ),
     searchAliases: [...definition.searchAliases],
   };
 }
@@ -275,9 +356,34 @@ function getSignal(snapshot: SimulationSnapshot, componentId: string, portId: st
   return snapshot.signals[endpointKey(componentId, portId)] ?? "X";
 }
 
-function defaultPortSignal(component: EditorComponent, port: PortDefinition): Signal {
-  // 新建 Input 的输出从 0 开始；其它端口在首次求值前保持 X。
-  return component.kind === "input" && port.direction === "output" ? "0" : "X";
+function defaultPortSignal(component: EditorComponent, port: PortSpec): Signal {
+  // 新建 Input 的输出从 0 开始；其它端口在首次求值前保持未知。长度按端口自己的位宽构造，
+  // 因此宽端口不会拿到一个长度对不上的兜底值。
+  if (component.kind === "input" && port.direction === "output") return "0".repeat(port.width);
+  return "X".repeat(port.width);
+}
+
+/**
+ * 在元件的端口清单里找出某个端口的展示偏移。
+ *
+ * 已连接端点的几何必须由当前元件位置与端口偏移推导，不能沿用持久化的端点坐标；而偏移来自
+ * 展示定义按端口名登记的布局，或通用排布规则。端口不在清单里时返回空值，调用方据此保留
+ * 冻结的端点位置。
+ * @param component 端点所属的编辑器元件。
+ * @param definition 该元件的展示定义。
+ * @param portName 要解析的引擎端口名。
+ * @returns 该端口的展示布局；端口不在清单里时返回 undefined。
+ */
+function portLayoutOf(
+  component: EditorComponent,
+  definition: ComponentDefinition,
+  portName: string,
+): PortLayout | undefined {
+  const ports = component.ports ?? [];
+  const port = ports.find((candidate) => candidate.name === portName);
+  if (!port) return undefined;
+  const sameSide = ports.filter((candidate) => candidate.direction === port.direction);
+  return portLayoutFor(definition, port.name, port.direction, sameSide.indexOf(port), sameSide.length);
 }
 
 function routeFor(connection: EditorConnection): readonly Point[] {
@@ -300,22 +406,15 @@ function previewEndpoint(
   previewPositions: Readonly<Record<string, Point>> | undefined,
 ): Point {
   // 持久 endpoint.point 只代表 DanglingConnection 的冻结位置。已连接端点
-  // 必须由当前 Component 位置和 registry Port offset 推导，避免移动元件后
+  // 必须由当前 Component 位置和它自己那份端口清单推导，避免移动元件后
   // 旧坐标继续成为第二个几何事实源。
   if (dangling) return { ...endpoint.point };
   const component = components.get(endpoint.componentId);
   const definition = component ? registry.get(component.kind) : undefined;
-  const port = definition?.ports.find((candidate) => candidate.id === endpoint.port);
-  if (!component || !port) return { ...endpoint.point };
+  const layout = component && definition ? portLayoutOf(component, definition, endpoint.port) : undefined;
+  if (!component || !layout) return { ...endpoint.point };
   const position = previewPositions?.[component.id] ?? component.position;
-  return { x: position.x + port.offset.x, y: position.y + port.offset.y };
-}
-
-function portPoint(component: EditorComponent, definition: ComponentDefinition, port: PortDefinition): Point {
-  return {
-    x: component.position.x + port.offset.x,
-    y: component.position.y + port.offset.y,
-  };
+  return { x: position.x + layout.offset.x, y: position.y + layout.offset.y };
 }
 
 function boundsFor(nodes: readonly CanvasNode[], wires: readonly CanvasWire[]): CanvasScene["bounds"] {
@@ -330,6 +429,54 @@ function boundsFor(nodes: readonly CanvasNode[], wires: readonly CanvasWire[]): 
     min: { x: Math.min(...points.map((point) => point.x)), y: Math.min(...points.map((point) => point.y)) },
     max: { x: Math.max(...points.map((point) => point.x)), y: Math.max(...points.map((point) => point.y)) },
   };
+}
+
+/**
+ * 把一个元件的端口清单投影为画布端口。
+ *
+ * 端口的存在与位宽来自编辑器文档里的引擎清单；偏移来自展示定义按端口名登记的布局，缺省时
+ * 走通用排布规则。两件事分开，是因为几何不是端口定义的第二个权威来源——端口名换了，这里
+ * 只会换个位置画，不会凭空多出或少掉一个端口。
+ */
+function projectPorts(
+  component: EditorComponent,
+  definition: ComponentDefinition,
+  nodePosition: Point,
+  connectedPoints: ReadonlyMap<string, Point>,
+  danglingPorts: ReadonlySet<string>,
+  simulationSnapshot: SimulationSnapshot,
+): CanvasPort[] {
+  const ports = component.ports ?? [];
+  const sideCounts: Record<PortDirection, number> = { input: 0, output: 0 };
+  for (const port of ports) sideCounts[port.direction] += 1;
+
+  const sideIndexes: Record<PortDirection, number> = { input: 0, output: 0 };
+  return ports.map((port) => {
+    const layout = portLayoutFor(
+      definition,
+      port.name,
+      port.direction,
+      sideIndexes[port.direction]++,
+      sideCounts[port.direction],
+    );
+    const key = endpointKey(component.id, port.name);
+    return {
+      id: port.name,
+      name: layout.label ?? port.name,
+      direction: port.direction,
+      width: port.width,
+      ...(port.bitRange ? { bitRange: { ...port.bitRange } } : {}),
+      label: circuitPortLabel(layout.label ?? port.name, port),
+      point: connectedPoints.get(key) ?? {
+        x: nodePosition.x + layout.offset.x,
+        y: nodePosition.y + layout.offset.y,
+      },
+      offset: { ...layout.offset },
+      // 未提供仿真快照时，新 Input 的默认驱动值为 0，其余端口保持未知 X。
+      signal: simulationSnapshot.signals[key] ?? defaultPortSignal(component, port),
+      dangling: danglingPorts.has(port.name),
+    } satisfies CanvasPort;
+  });
 }
 
 /**
@@ -377,20 +524,8 @@ export function projectCanvasScene(
       description: definition.description,
       position: { ...nodePosition },
       size: { ...definition.size },
-      ports: definition.ports.map((portDefinition) => ({
-        id: portDefinition.id,
-        name: portDefinition.name,
-        direction: portDefinition.direction,
-        point: connectedPoints.get(endpointKey(component.id, portDefinition.id)) ?? {
-          x: nodePosition.x + portDefinition.offset.x,
-          y: nodePosition.y + portDefinition.offset.y,
-        },
-        offset: { ...portDefinition.offset },
-        // 未提供仿真快照时，新 Input 的默认驱动值为 0，其余端口保持未知 X。
-        signal: simulationSnapshot.signals[endpointKey(component.id, portDefinition.id)]
-          ?? defaultPortSignal(component, portDefinition),
-        dangling: danglingPorts.has(portDefinition.id),
-      })),
+      // 端口清单来自编辑器文档，也就是引擎回传的那一份；展示定义只决定画在哪、显示成什么。
+      ports: projectPorts(component, definition, nodePosition, connectedPoints, danglingPorts, simulationSnapshot),
       selected: selected?.kind === "component" && selected.id === component.id,
     } satisfies CanvasNode;
   }).filter((node) => node !== null) as CanvasNode[];
@@ -420,6 +555,7 @@ export function projectCanvasScene(
     signal: getSignal(simulationSnapshot, connection.source.componentId, connection.source.port),
     color: isWireColorId(connection.color) ? connection.color : DEFAULT_WIRE_COLOR,
     danglingEndpoints: [...connection.danglingEndpoints],
+    dangling: isProjectedDangling(connection, componentsById),
     selected: selected?.kind === "connection" && selected.id === connection.id,
     } satisfies CanvasWire;
   });
@@ -455,7 +591,8 @@ function sameWireContent(left: CanvasWire, right: CanvasWire): boolean {
     && samePoint(left.target.point, right.target.point)
     && samePointList(left.route, right.route)
     && samePointList(left.waypoints, right.waypoints)
-    && sameValueList(left.danglingEndpoints, right.danglingEndpoints);
+    && sameValueList(left.danglingEndpoints, right.danglingEndpoints)
+    && left.dangling === right.dangling;
 }
 
 function sameNodeContent(left: CanvasNode, right: CanvasNode): boolean {
@@ -476,6 +613,10 @@ function sameNodeContent(left: CanvasNode, right: CanvasNode): boolean {
         && port.direction === other.direction
         && port.signal === other.signal
         && port.dangling === other.dangling
+        && port.width === other.width
+        && port.label === other.label
+        && port.bitRange?.msb === other.bitRange?.msb
+        && port.bitRange?.lsb === other.bitRange?.lsb
         && samePoint(port.point, other.point)
         && samePoint(port.offset, other.offset);
     });

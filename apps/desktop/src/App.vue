@@ -45,6 +45,7 @@ const {
   setWireColor,
   deleteWaypoint,
   createConnection,
+  setPortWidthCommand,
 } = useWorkspace();
 const {
   selectedConnection,
@@ -98,7 +99,8 @@ const {
   removeConnectionWaypointOrCancel,
   cancelConnection,
   focusCanvasObject,
-} = useEditorState(state, editorState, select, moveComponent, updatePlacement, editRoute, createConnection);
+  setPortWidth,
+} = useEditorState(state, editorState, select, moveComponent, updatePlacement, editRoute, createConnection, setPortWidthCommand);
 const {
   preference: themePreference,
   label: themeLabel,
@@ -299,6 +301,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           :engine-name="state.engineName"
           :operation-error="editorState?.error?.message ?? editorState?.simulationError?.message ?? state.operationError"
           :inspector="inspector"
+          @set-port-width="setPortWidth"
           :waveform="state.waveform"
           :waveform-rows="waveformRows"
           @select-tab="bottomTab = $event"

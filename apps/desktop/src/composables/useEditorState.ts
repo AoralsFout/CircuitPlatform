@@ -1,5 +1,5 @@
 import { computed, ref, watch, type DeepReadonly, type Ref } from "vue";
-import type { ComponentKindName, Signal } from "@circuit-platform/protocol";
+import type { ComponentKindName, PortSpec, Signal } from "@circuit-platform/protocol";
 import {
   readDefaultWireColor,
   writeDefaultWireColor,
@@ -70,6 +70,7 @@ export function useEditorState(
   updatePlacement?: (center: Point, altKey?: boolean) => Promise<void>,
   editRoute: (connectionId: EditorConnectionId, route: readonly Point[]) => Promise<void> = async () => undefined,
   createConnection: (left: ConnectionDraftPort, right: ConnectionDraftPort, route?: readonly Point[], connectionId?: string, color?: WireColorId) => Promise<{ ok: boolean; error?: string }> = async () => ({ ok: false }),
+  setPortWidthCommand: (componentId: EditorComponentId, ports: readonly PortSpec[]) => Promise<void> = async () => undefined,
 ) {
   const showDetails = ref(false);
   const showSidebar = ref(true);
@@ -147,7 +148,7 @@ export function useEditorState(
   const canvasScene = computed(() => {
     const snapshot = editorState.value;
     if (!snapshot) return emptyCanvasScene();
-    const simulation = createSimulationSnapshot(snapshot, registry, {
+    const simulation = createSimulationSnapshot(snapshot, {
       inputA: workspaceState.value.inputA,
       inputB: workspaceState.value.inputB,
       inputValues: workspaceState.value.inputValues,
@@ -305,6 +306,28 @@ export function useEditorState(
     if (workspaceState.value.engineState === "error") return "连接失败";
     return "连接中";
   });
+  /**
+   * 提交一次位宽编辑。
+   *
+   * 载荷是**整份端口清单**：协议里的改宽是整体替换，因此这里从当前场景取回该元件的端口清单，
+   * 只换掉目标端口的位宽再提交。编辑器因此不必在提交前重算匹配规则，引擎也不必接受一种
+   * 「按单端口下发」的形状。
+   * @param componentId 要改的元件。
+   * @param portName 要改位宽的端口。
+   * @param width 新的位宽。
+   */
+  function setPortWidth(componentId: EditorComponentId, portName: string, width: number): void {
+    const node = canvasScene.value.nodes.find((candidate) => candidate.id === componentId);
+    if (!node) return;
+    const ports = node.ports.map((port) => ({
+      name: port.id,
+      direction: port.direction,
+      width: port.id === portName ? width : port.width,
+      ...(port.bitRange ? { bitRange: { ...port.bitRange } } : {}),
+    }));
+    void setPortWidthCommand(componentId, ports);
+  }
+
   const selectedComponent = computed(() => canvasScene.value.nodes.find((node) => node.id === selectedComponentId.value));
   const selectedComponentName = computed(() => selectedConnection.value ? `Wire ${selectedConnection.value}` : selectedComponent.value?.displayName ?? "未选择");
   const selectedComponentValue = computed<Signal>(() => selectedConnection.value ? canvasScene.value.wires.find((wire) => wire.id === selectedConnection.value)?.signal ?? "X" : selectedComponent.value?.ports.find((port) => port.direction === "output")?.signal ?? selectedComponent.value?.ports[0]?.signal ?? "X");
@@ -436,6 +459,7 @@ export function useEditorState(
     rememberComponentKind,
     selectComponent,
     selectConnection,
+    setPortWidth,
     selectRailPage,
     adjustZoom,
     fitViewport,

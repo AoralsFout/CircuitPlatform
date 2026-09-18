@@ -68,8 +68,8 @@ function createWindow() {
 
 app.whenReady().then(() => {
   ipcMain.handle("engine:health", checkEngineHealth);
-  ipcMain.handle("engine:add-component", (_event, kind) =>
-    requestEngine({ type: "add_component", kind }));
+  ipcMain.handle("engine:add-component", (_event, kind, ports) =>
+    requestEngine({ type: "add_component", kind, ports }));
   ipcMain.handle("engine:add-connection", (_event, source, target) =>
     requestEngine({
       type: "add_connection",
@@ -96,6 +96,12 @@ app.whenReady().then(() => {
   ipcMain.handle("engine:reset", () => requestEngine({ type: "reset" }));
   ipcMain.handle("engine:get-signal", (_event, componentId, port) =>
     requestEngine({ type: "get_signal", componentId, port }));
+  ipcMain.handle("engine:set-port-width", (_event, componentId, ports) =>
+    requestEngine({
+      type: "set_port_width",
+      componentId: requirePositiveId(componentId, "componentId"),
+      ports,
+    }));
   createWindow();
 
   app.on("activate", () => {

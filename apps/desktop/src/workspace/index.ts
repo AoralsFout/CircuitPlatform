@@ -1,4 +1,4 @@
-import type { ComponentKindName, EngineResponse, Signal } from "@circuit-platform/protocol";
+import type { ComponentKindName, EngineResponse, PortSpec, Signal } from "@circuit-platform/protocol";
 import { createEngineCallQueue, type EngineCallQueue } from "./engineQueue.ts";
 
 /** 输入设置项的稳定键；键是编辑器组件 ID，与引擎身份无关。 */
@@ -62,7 +62,10 @@ export interface EngineHealth {
  */
 export interface EngineAdapter {
   checkEngine(): Promise<EngineHealth>;
-  addComponent(kind: ComponentKindName): Promise<EngineResponse>;
+  /** `ports` 省略时引擎回退到内置定义；省略是内置元件的常规路径。 */
+  addComponent(kind: ComponentKindName, ports?: readonly PortSpec[]): Promise<EngineResponse>;
+  /** 整体替换一个 Component 的端口清单，并带回因本次改宽而转为悬空的 Connection 身份。 */
+  setPortWidth(componentId: number, ports: readonly PortSpec[]): Promise<EngineResponse>;
   addConnection(
     source: { componentId: number; port: string },
     target: { componentId: number; port: string },
@@ -81,7 +84,11 @@ export interface EngineAdapter {
  * 工作区不依赖编辑器模块，只接受它理解的结构子集。
  */
 export interface CircuitDocument {
-  components: readonly { id: string; kind: ComponentKindName }[];
+  /**
+   * 端口清单是位宽的唯一权威来源。内置元件省略它，由引擎回退到内置定义并在响应里回传；
+   * 前端只在数据驱动的元件上才自己生成清单，不内置一份无人校验的副本。
+   */
+  components: readonly { id: string; kind: ComponentKindName; ports?: readonly PortSpec[] }[];
   connections: readonly {
     id: string;
     source: { componentId: string; port: string };
@@ -93,12 +100,22 @@ export interface CircuitDocument {
 export interface SimulationBindings {
   components: Readonly<Partial<Record<string, number>>>;
   componentKinds?: Readonly<Partial<Record<string, ComponentKindName>>>;
+  /**
+   * 每个元件由引擎回传的端口清单，键为编辑器元件 ID。
+   * 运行时要读哪些端口由它推导，因此前端不需要再内置一份 kind → 端口名的副本。
+   */
+  ports?: Readonly<Partial<Record<string, readonly PortSpec[]>>>;
   connections?: Readonly<Partial<Record<string, number>>>;
 }
 
 export interface CircuitLoadResult {
   snapshot: WorkspaceSnapshot;
   bindings: SimulationBindings | null;
+  /**
+   * 推送过程中由 `component_added` 收集到的端口清单，键为编辑器元件 ID。
+   * 编辑器文档用它填自己的端口清单，不必在推送前先写一份内置副本。
+   */
+  ports: Readonly<Record<string, readonly PortSpec[]>>;
 }
 
 export interface WaveformPoint {
@@ -233,14 +250,16 @@ interface MutableState {
   waveform: WaveformPoint[];
 }
 
-interface RuntimeInputBinding {
-  key: InputKey;
-  componentId: number;
-}
-
 interface RuntimeSignalBinding {
   key: string;
   componentId: number;
+  port: string;
+}
+
+interface RuntimeInputBinding {
+  key: string;
+  componentId: number;
+  /** Input 元件被驱动的输出端口名；来自引擎回传的端口清单，不是前端写死的常量。 */
   port: string;
 }
 
@@ -250,24 +269,6 @@ interface RuntimeSimulationBindings {
   outputs: readonly RuntimeSignalBinding[];
   observedSignals: readonly RuntimeSignalBinding[];
 }
-
-// 只向引擎读取元件的驱动端；Input 的值来自本次提交，接收端由编辑器沿 Connection 投影。
-const observableOutputPorts: Readonly<Partial<Record<ComponentKindName, readonly string[]>>> = {
-  and: ["out"],
-  or: ["out"],
-  nand: ["out"],
-  nor: ["out"],
-  xor: ["out"],
-  xnor: ["out"],
-  not: ["out"],
-  clock: ["out"],
-  d_flip_flop: ["q"],
-};
-
-// 承载可展示读数的接收端；Output 元件的值来自它的输入 Port。
-const observableInputPorts: Readonly<Partial<Record<ComponentKindName, string>>> = {
-  output: "in",
-};
 
 /**
  * 比较两份「编辑器 ID → 引擎 ID」映射。键集合与取值都一致才算没变。
@@ -304,9 +305,6 @@ function signalKey(editorComponentId: string, port: string): string {
   return `${editorComponentId}:${port}`;
 }
 
-/** Input 元件被驱动的输出端口名；它是引擎内置端口定义的一部分，不是可配置项。 */
-const INPUT_OUTPUT_PORT = "out";
-
 /**
  * 按新的绑定集合裁剪信号读数：仍然存在的键保留当前值，消失的键连同它的值一起丢弃。
  * 这是引擎「结构变更按元件身份保留状态」在编辑器键空间上的同一条规则。
@@ -319,7 +317,7 @@ function pruneSignals(
   bindings: RuntimeSimulationBindings,
 ): Record<string, Signal> {
   const liveKeys = new Set([
-    ...bindings.inputs.map((binding) => signalKey(binding.key, INPUT_OUTPUT_PORT)),
+    ...bindings.inputs.map((binding) => signalKey(binding.key, binding.port)),
     ...bindings.observedSignals.map((binding) => binding.key),
     ...bindings.outputs.map((binding) => binding.key),
   ]);
@@ -399,30 +397,43 @@ function createWorkspaceSnapshot(state: MutableState): WorkspaceSnapshot {
 /**
  * 从编辑器绑定推导本次求值需要提交和读取的运行时身份。
  * 收集文档中全部 Input 与全部 Output 元件，不对电路形状做任何假设。
+ *
+ * 要读哪些端口完全由引擎回传的端口清单推导：Input 被驱动的端口、Output 的接收端，以及其余
+ * 元件自己的输出端口。前端因此不再内置一份 kind → 端口名的副本——那正是 ADR 0016 里
+ * 「前端声明 clk、引擎期望 clock」那类分歧的来源。
  */
 function runtimeBindingsFrom(bindings: SimulationBindings): RuntimeSimulationBindings | null {
   const components = Object.entries(bindings.components)
     .filter((entry): entry is [string, number] => entry[1] !== undefined);
   if (components.length === 0) return null;
 
+  const kindOf = (id: string): ComponentKindName | undefined => bindings.componentKinds?.[id];
+  const portsOf = (id: string): readonly PortSpec[] => bindings.ports?.[id] ?? [];
+  const portsFacing = (id: string, direction: PortSpec["direction"]) =>
+    portsOf(id).filter((port) => port.direction === direction);
+
   const inputs = components
-    .filter(([id]) => bindings.componentKinds?.[id] === "input")
-    .map(([key, componentId]) => ({ key, componentId }));
+    .filter(([id]) => kindOf(id) === "input")
+    .flatMap(([key, componentId]) =>
+      portsFacing(key, "output").map((port) => ({ key, componentId, port: port.name })));
 
   const outputs = components.flatMap(([id, componentId]) => {
-    const kind = bindings.componentKinds?.[id];
-    if (kind === undefined) return [];
-    const port = observableInputPorts[kind];
-    return port === undefined ? [] : [{ key: signalKey(id, port), componentId, port }];
+    if (kindOf(id) !== "output") return [];
+    return portsFacing(id, "input").map((port) => ({
+      key: signalKey(id, port.name),
+      componentId,
+      port: port.name,
+    }));
   });
 
+  // 其余元件的读数来自它们自己的输出端口；Input 的值来自本次提交，不向引擎读。
   const observedSignals = components.flatMap(([key, componentId]) => {
-    const kind = bindings.componentKinds?.[key];
-    if (kind === undefined) return [];
-    return (observableOutputPorts[kind] ?? []).map((port) => ({
-      key: signalKey(key, port),
+    const kind = kindOf(key);
+    if (kind === undefined || kind === "input" || kind === "output") return [];
+    return portsFacing(key, "output").map((port) => ({
+      key: signalKey(key, port.name),
       componentId,
-      port,
+      port: port.name,
     }));
   });
 
@@ -557,8 +568,12 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
     return createWorkspaceSnapshot(state);
   }
 
-  async function addComponent(kind: ComponentKindName): Promise<number> {
-    return expectResponse(await adapter.addComponent(kind), "component_added").componentId;
+  async function addComponent(
+    kind: ComponentKindName,
+    ports?: readonly PortSpec[],
+  ): Promise<{ componentId: number; ports: readonly PortSpec[] }> {
+    const response = expectResponse(await adapter.addComponent(kind, ports), "component_added");
+    return { componentId: response.componentId, ports: response.ports };
   }
 
   async function addConnection(
@@ -624,7 +639,7 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
       state.outputValue = bindings.outputs.length > 0 ? outputSignals[bindings.outputs[0].key] ?? "X" : "X";
       state.signals = {
         ...Object.fromEntries(
-          committedValues.map(({ binding, value }) => [signalKey(binding.key, INPUT_OUTPUT_PORT), value]),
+          committedValues.map(({ binding, value }) => [signalKey(binding.key, binding.port), value]),
         ),
         ...observedSignals,
         ...outputSignals,
@@ -657,14 +672,17 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
     const components: Record<string, number> = {};
     const connections: Record<string, number> = {};
     const componentKinds: Record<string, ComponentKindName> = {};
+    const ports: Record<string, readonly PortSpec[]> = {};
     const createdComponentIds: number[] = [];
     const createdConnectionIds: number[] = [];
     try {
       for (const component of document.components) {
-        const id = await addComponent(component.kind);
-        createdComponentIds.push(id);
-        components[component.id] = id;
+        // 文档带了端口清单就一并送达（数据驱动的元件）；内置元件不带，由引擎回退到内置定义。
+        const added = await addComponent(component.kind, component.ports);
+        createdComponentIds.push(added.componentId);
+        components[component.id] = added.componentId;
         componentKinds[component.id] = component.kind;
+        ports[component.id] = added.ports;
       }
       for (const connection of document.connections) {
         const source = components[connection.source.componentId];
@@ -676,7 +694,7 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
         createdConnectionIds.push(id);
         connections[connection.id] = id;
       }
-      const bindings: SimulationBindings = { components, connections, componentKinds };
+      const bindings: SimulationBindings = { components, connections, componentKinds, ports };
       const runtimeBindings = runtimeBindingsFrom(bindings);
       state.runtimeBindings = runtimeBindings;
       state.lastBindings = bindings;
@@ -689,7 +707,7 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
       // 不追加波形记录。重置之后的重新求值走同一条规则，两者因此都停在「第 0 步」。
       await submitInputsAndSettle(state.runtimeBindings, state.inputValues, { countAsAdvance: false });
       state.isBusy = false;
-      return { snapshot: createWorkspaceSnapshot(state), bindings };
+      return { snapshot: createWorkspaceSnapshot(state), bindings, ports };
     } catch (error) {
       state.message = errorMessage(error, "推送电路结构失败。");
       state.operationError = state.message;
@@ -705,13 +723,13 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
     } finally {
       state.isBusy = false;
     }
-    return { snapshot: createWorkspaceSnapshot(state), bindings: null };
+    return { snapshot: createWorkspaceSnapshot(state), bindings: null, ports: {} };
   }
 
   /** 把整份文档推送到引擎；调用方负责保证它排在引擎调用队列里。 */
   function loadCircuit(document: CircuitDocument): Promise<CircuitLoadResult> {
     if (state.hasCircuit || state.isBusy || state.engineState !== "ready") {
-      return Promise.resolve({ snapshot: createWorkspaceSnapshot(state), bindings: null });
+      return Promise.resolve({ snapshot: createWorkspaceSnapshot(state), bindings: null, ports: {} });
     }
     return queue.enqueue(() => loadCircuitInternal(document));
   }
@@ -796,7 +814,7 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
       state.signals = {
         ...Object.fromEntries(
           bindings.inputs.map((binding) => [
-            signalKey(binding.key, INPUT_OUTPUT_PORT),
+            signalKey(binding.key, binding.port),
             state.inputValues[binding.key] ?? "0",
           ]),
         ),

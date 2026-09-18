@@ -16,19 +16,41 @@
       let tickStep = 0;
       let pendingTick = null;
       const componentKinds = new Map();
-      const visualOutputPorts = { input: "out", clock: "out", not: "out", and: "out", or: "out", nand: "out", nor: "out", xor: "out", xnor: "out", d_flip_flop: "q" };
+      const componentPorts = new Map();
+      // 夹具扮演的就是引擎：真实引擎在 add_component 省略端口清单时回退到内置定义并把实际清单回传，
+      // 这里照做。前端源码里没有第二份端口定义，位宽的唯一权威来源是引擎。
+      const bit = (name, direction) => ({ name, direction, width: 1 });
+      const visualPorts = {
+        input: [bit("out", "output")],
+        output: [bit("in", "input")],
+        not: [bit("in", "input"), bit("out", "output")],
+        and: [bit("in1", "input"), bit("in2", "input"), bit("out", "output")],
+        or: [bit("in1", "input"), bit("in2", "input"), bit("out", "output")],
+        nand: [bit("in1", "input"), bit("in2", "input"), bit("out", "output")],
+        nor: [bit("in1", "input"), bit("in2", "input"), bit("out", "output")],
+        xor: [bit("in1", "input"), bit("in2", "input"), bit("out", "output")],
+        xnor: [bit("in1", "input"), bit("in2", "input"), bit("out", "output")],
+        clock: [bit("out", "output")],
+        d_flip_flop: [bit("d", "input"), bit("clock", "input"), bit("q", "output")],
+      };
       const response = (value) => Promise.resolve(value);
       window.circuitPlatform = {
         checkEngine: () => response({ status: "ok", engine: "Visual test engine" }),
-        addComponent: (kind) => {
+        addComponent: (kind, ports) => {
           if (failAdds) return response({ type: "error", requestId: "visual", code: "visual_add_failed", message: "视觉回归模拟：元件提交失败" });
           const componentId = nextComponentId++;
           componentKinds.set(componentId, kind);
-          return response({ type: "component_added", requestId: "visual", componentId });
+          return response({ type: "component_added", requestId: "visual", componentId, ports: ports ?? visualPorts[kind] ?? [] });
+        },
+        // 改宽整体替换端口清单；夹具只需要协议形状正确，匹配规则由引擎测试负责。
+        setPortWidth: (componentId, ports) => {
+          componentPorts.set(componentId, ports);
+          return response({ type: "port_width_set", requestId: "visual", componentId, ports, danglingConnectionIds: [] });
         },
         addConnection: () => response({ type: "connection_added", requestId: "visual", connectionId: nextConnectionId++ }),
         removeComponent: (componentId) => {
           componentKinds.delete(componentId);
+          componentPorts.delete(componentId);
           return response({ type: "component_removed", requestId: "visual", componentId });
         },
         removeConnection: (connectionId) => response({ type: "connection_removed", requestId: "visual", connectionId }),
@@ -41,9 +63,12 @@
         tick: () => new Promise((resolve) => {
           pendingTick = () => {
             tickStep += 1;
+            // 输出端口从元件自己的端口清单里取，与真实引擎一样不再查一张按类型写死的端口名表。
             const signals = [...componentKinds].flatMap(([componentId, kind]) => {
-              const outputPort = visualOutputPorts[kind];
-              return outputPort === undefined ? [] : [{ componentId, port: outputPort, value: "0" }];
+              const ports = componentPorts.get(componentId) ?? visualPorts[kind] ?? [];
+              return ports
+                .filter((port) => port.direction === "output")
+                .map((port) => ({ componentId, port: port.name, value: "0".repeat(port.width) }));
             });
             resolve({ type: "ticked", requestId: "visual", step: tickStep, signals });
           };

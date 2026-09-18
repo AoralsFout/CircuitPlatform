@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ComponentKindName } from "@circuit-platform/protocol";
+import type { ComponentKindName, PortSpec } from "@circuit-platform/protocol";
 import {
   createAndDemoDocument,
   createEditorSession,
@@ -9,6 +9,7 @@ import {
   type EngineResult,
 } from "../src/editor/index.ts";
 import { resolveCanvasKeyboardAction, resolveEditorShortcut } from "../src/editor/keyboard.ts";
+import { BUILT_IN_PORTS, portsForAddComponent } from "./fake-ports.ts";
 
 class FakeEngine implements CircuitEnginePort {
   nextComponentId = 100;
@@ -33,8 +34,22 @@ class FakeEngine implements CircuitEnginePort {
     this.failures.set(operation, count);
   }
 
-  async addComponent(kind: ComponentKindName): Promise<EngineResult<{ componentId: number }>> {
-    return this.result(`addComponent:${kind}`, { componentId: this.nextComponentId++ });
+  async addComponent(
+    kind: ComponentKindName,
+    ports?: readonly PortSpec[],
+  ): Promise<EngineResult<{ componentId: number; ports: readonly PortSpec[] }>> {
+    // 与真实引擎同一条回退规则：省略端口清单时用内置定义，并把实际清单回传。
+    return this.result(`addComponent:${kind}`, {
+      componentId: this.nextComponentId++,
+      ports: portsForAddComponent(kind, ports),
+    });
+  }
+
+  async setPortWidth(
+    componentId: number,
+    ports: readonly PortSpec[],
+  ): Promise<EngineResult<{ ports: readonly PortSpec[]; danglingConnectionIds: readonly EngineConnectionId[] }>> {
+    return this.result(`setPortWidth:${componentId}`, { ports, danglingConnectionIds: [] });
   }
 
   async addConnection(input: {
@@ -720,6 +735,7 @@ test("failed placement can be retried with the same editor identity and position
     displayName: "AND 门 1",
     position: { x: 22, y: 22 },
     lifecycle: "active",
+    ports: BUILT_IN_PORTS.and,
   }]);
   assert.deepEqual(retried.snapshot.selection, { kind: "component", id: "component-1" });
   assert.equal(retried.snapshot.pendingPlacement, null);
@@ -929,6 +945,7 @@ test("duplicating a Component copies only kind and selects a new offset Componen
     displayName: "AND 门 2",
     position: { x: 472, y: 252 },
     lifecycle: "active",
+    ports: BUILT_IN_PORTS.and,
   });
   assert.equal(result.snapshot.document.connections.length, 3);
   assert.deepEqual(engine.calls, ["addComponent:and"]);

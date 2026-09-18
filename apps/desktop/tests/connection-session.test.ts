@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ComponentKindName } from "@circuit-platform/protocol";
-import { createComponentDefinitionRegistry } from "../src/canvas/index.ts";
-import { createEditorSession, type CircuitEnginePort, type EngineResult } from "../src/editor/index.ts";
+import type { ComponentKindName, PortSpec } from "@circuit-platform/protocol";
+import { createEditorSession, type CircuitEnginePort, type EngineConnectionId, type EngineResult } from "../src/editor/index.ts";
+import { BUILT_IN_PORTS, portsForAddComponent } from "./fake-ports.ts";
 
 class Engine implements CircuitEnginePort {
   calls: string[] = [];
@@ -10,9 +10,20 @@ class Engine implements CircuitEnginePort {
   nextConnection = 20;
   failAddConnection = false;
   failNextAddConnection = 0;
-  async addComponent(kind: ComponentKindName): Promise<EngineResult<{ componentId: number }>> {
+  async addComponent(
+    kind: ComponentKindName,
+    ports?: readonly PortSpec[],
+  ): Promise<EngineResult<{ componentId: number; ports: readonly PortSpec[] }>> {
     this.calls.push(`addComponent:${kind}`);
-    return { ok: true, value: { componentId: this.nextComponent++ } };
+    // 与真实引擎同一条回退规则：省略端口清单时用内置定义，并把实际清单回传。
+    return { ok: true, value: { componentId: this.nextComponent++, ports: portsForAddComponent(kind, ports) } };
+  }
+  async setPortWidth(
+    componentId: number,
+    ports: readonly PortSpec[],
+  ): Promise<EngineResult<{ ports: readonly PortSpec[]; danglingConnectionIds: readonly EngineConnectionId[] }>> {
+    this.calls.push(`setPortWidth:${componentId}`);
+    return { ok: true, value: { ports, danglingConnectionIds: [] } };
   }
   async addConnection(input: { sourceComponentId: number; sourcePort: string; targetComponentId: number; targetPort: string }): Promise<EngineResult<{ connectionId: number }>> {
     this.calls.push(`addConnection:${input.sourcePort}->${input.targetPort}`);
@@ -27,10 +38,10 @@ class Engine implements CircuitEnginePort {
 }
 
 const components = [
-  { id: "source", kind: "input" as const, displayName: "输入 1", position: { x: 0, y: 0 }, lifecycle: "active" as const },
-  { id: "source-2", kind: "input" as const, displayName: "输入 2", position: { x: 0, y: 160 }, lifecycle: "active" as const },
-  { id: "target", kind: "output" as const, displayName: "输出 1", position: { x: 160, y: 0 }, lifecycle: "active" as const },
-  { id: "target-2", kind: "output" as const, displayName: "输出 2", position: { x: 160, y: 160 }, lifecycle: "active" as const },
+  { id: "source", kind: "input" as const, displayName: "输入 1", position: { x: 0, y: 0 }, lifecycle: "active" as const, ports: BUILT_IN_PORTS.input },
+  { id: "source-2", kind: "input" as const, displayName: "输入 2", position: { x: 0, y: 160 }, lifecycle: "active" as const, ports: BUILT_IN_PORTS.input },
+  { id: "target", kind: "output" as const, displayName: "输出 1", position: { x: 160, y: 0 }, lifecycle: "active" as const, ports: BUILT_IN_PORTS.output },
+  { id: "target-2", kind: "output" as const, displayName: "输出 2", position: { x: 160, y: 160 }, lifecycle: "active" as const, ports: BUILT_IN_PORTS.output },
 ];
 
 function createSession(engine = new Engine()) {
@@ -51,20 +62,19 @@ test("connection submission normalizes input-first order and supports output fan
   assert.equal(second.snapshot.document.connections.length, 2);
 });
 
-/** 展示定义的端口 id 原样发给引擎，所以时钟端口必须叫 `clock`，否则连线会被引擎拒绝。 */
+/** 端口名原样发给引擎，所以时钟端口必须叫 `clock`，否则连线会被引擎拒绝。 */
 test("connects the d flip-flop clock port with the engine port name", async () => {
-  const registry = createComponentDefinitionRegistry();
-  const clockOut = registry.get("clock")?.ports.find((candidate) => candidate.direction === "output");
-  const clockInput = registry.get("d_flip_flop")?.ports.find((candidate) => candidate.id === "clock");
-  assert.equal(clockOut?.id, "out");
+  const clockOut = BUILT_IN_PORTS.clock.find((candidate) => candidate.direction === "output");
+  const clockInput = BUILT_IN_PORTS.d_flip_flop.find((candidate) => candidate.name === "clock");
+  assert.equal(clockOut?.name, "out");
   assert.equal(clockInput?.direction, "input");
 
   const engine = new Engine();
   const session = createEditorSession({
     document: {
       components: [
-        { id: "clock-1", kind: "clock", displayName: "Clock", position: { x: 0, y: 0 }, lifecycle: "active" },
-        { id: "dff-1", kind: "d_flip_flop", displayName: "D Flip-Flop", position: { x: 160, y: 0 }, lifecycle: "active" },
+        { id: "clock-1", kind: "clock", displayName: "Clock", position: { x: 0, y: 0 }, lifecycle: "active", ports: BUILT_IN_PORTS.clock },
+        { id: "dff-1", kind: "d_flip_flop", displayName: "D Flip-Flop", position: { x: 160, y: 0 }, lifecycle: "active", ports: BUILT_IN_PORTS.d_flip_flop },
       ],
       connections: [],
     },
@@ -73,8 +83,8 @@ test("connects the d flip-flop clock port with the engine port name", async () =
 
   const created = await session.dispatch({
     type: "create-connection",
-    left: { componentId: "clock-1", port: clockOut?.id ?? "", direction: "output", point: { x: 148, y: 42 } },
-    right: { componentId: "dff-1", port: clockInput?.id ?? "", direction: "input", point: { x: 160, y: 54 } },
+    left: { componentId: "clock-1", port: clockOut?.name ?? "", direction: "output", point: { x: 148, y: 42 } },
+    right: { componentId: "dff-1", port: clockInput?.name ?? "", direction: "input", point: { x: 160, y: 54 } },
   });
 
   assert.equal(created.ok, true);
