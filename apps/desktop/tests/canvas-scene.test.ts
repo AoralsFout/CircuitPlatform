@@ -3,6 +3,7 @@ import test from "node:test";
 import type { ComponentKindName, PortSpec } from "@circuit-platform/protocol";
 import {
   circuitPortLabel,
+  componentGeometryFor,
   createCanvasSceneProjector,
   createComponentDefinitionRegistry,
   portLayoutFor,
@@ -10,6 +11,7 @@ import {
   type ComponentDefinition,
 } from "../src/canvas/index.ts";
 import type { EditorComponent, EditorSnapshot, Point } from "../src/editor/index.ts";
+import { defaultPortsFor } from "../src/editor/bus-ports.ts";
 import { BUILT_IN_PORTS } from "./fake-ports.ts";
 
 /** 给一个元件补上内置端口清单，模拟 `component_added` 回传的那一份。 */
@@ -69,8 +71,9 @@ test("d flip-flop looks up its layout by the engine clock port name", () => {
   assert.deepEqual(ports.map((port) => port.name), ["d", "clock", "q"]);
   assert.deepEqual(ports.map((port) => port.direction), ["input", "input", "output"]);
   // `CLK` 只是显示标签，与发给引擎的端口名分开。
-  assert.equal(portLayoutFor(definition, "clock", "input", 1, 2).label, "CLK");
-  assert.deepEqual(portLayoutFor(definition, "clock", "input", 1, 2).offset, { x: 0, y: 54 });
+  const geometry = componentGeometryFor(definition, ports);
+  assert.equal(portLayoutFor(definition, "clock", "input", 1, 2, geometry).label, "CLK");
+  assert.deepEqual(portLayoutFor(definition, "clock", "input", 1, 2, geometry).offset, { x: 0, y: 54 });
 });
 
 /**
@@ -92,22 +95,77 @@ test("the layout rule reproduces every built-in component's existing coordinates
     clock: { out: { x: 148, y: 42 } },
     // D Flip-Flop 是唯一一个通用规则复现不了的形状：`q` 与 `d` 对齐而不是垂直居中。
     d_flip_flop: { d: { x: 0, y: 30 }, clock: { x: 0, y: 54 }, q: { x: 148, y: 30 } },
+    // 拆线器与合线器没有内置清单，期望值按默认的 8 位配置算：盒子 148 × 284（84 的下限被
+    // 「留白 30 × 2 + 7 × 间距 32」顶开），零点在垂直中线上，八条分支按 32 均分。
+    splitter: {
+      in: { x: 0, y: 142 },
+      out0: { x: 148, y: 30 }, out1: { x: 148, y: 62 }, out2: { x: 148, y: 94 }, out3: { x: 148, y: 126 },
+      out4: { x: 148, y: 158 }, out5: { x: 148, y: 190 }, out6: { x: 148, y: 222 }, out7: { x: 148, y: 254 },
+    },
+    merger: {
+      in0: { x: 0, y: 30 }, in1: { x: 0, y: 62 }, in2: { x: 0, y: 94 }, in3: { x: 0, y: 126 },
+      in4: { x: 0, y: 158 }, in5: { x: 0, y: 190 }, in6: { x: 0, y: 222 }, in7: { x: 0, y: 254 },
+      out: { x: 148, y: 142 },
+    },
   };
 
   for (const [kind, ports] of Object.entries(expected) as [ComponentKindName, Record<string, Point>][]) {
     const definition = registry.get(kind);
     assert.ok(definition, kind);
-    const list = BUILT_IN_PORTS[kind];
+    // 数据驱动元件的端口是前端按默认配置生成的，其余元件用的是引擎的内置定义。
+    const list = defaultPortsFor(kind) ?? BUILT_IN_PORTS[kind];
+    const geometry = componentGeometryFor(definition, list);
     const sideCounts = {
       input: list.filter((port) => port.direction === "input").length,
       output: list.filter((port) => port.direction === "output").length,
     };
     const sideIndexes = { input: 0, output: 0 };
     for (const port of list) {
-      const layout = portLayoutFor(definition, port.name, port.direction, sideIndexes[port.direction]++, sideCounts[port.direction]);
+      const layout = portLayoutFor(definition, port.name, port.direction, sideIndexes[port.direction]++, sideCounts[port.direction], geometry);
       assert.deepEqual(layout.offset, ports[port.name], `${kind}.${port.name}`);
     }
   }
+});
+
+/**
+ * 数据驱动元件的盒子与端口出自同一份几何：八条分支的拆线器画成 148 × 284，端口落在盒子里面，
+ * 标注带上各自的位区间。
+ */
+test("projects a splitter with the geometry its port count asks for", () => {
+  const projector = createCanvasSceneProjector(createComponentDefinitionRegistry());
+  const scene = projector.project({
+    document: {
+      components: [{
+        id: "splitter-1",
+        kind: "splitter",
+        displayName: "拆线器 1",
+        position: { x: 100, y: 100 },
+        lifecycle: "active",
+        ports: defaultPortsFor("splitter")!,
+      }],
+      connections: [],
+    },
+    selection: null,
+    operation: "idle",
+    canUndo: false,
+    canRedo: false,
+    confirmation: null,
+    error: null,
+  }, { signals: {} });
+
+  const node = scene.nodes[0]!;
+  assert.deepEqual(node.size, { width: 148, height: 284 });
+  assert.equal(node.ports.length, 9);
+  assert.deepEqual(node.ports.map((port) => port.label), [
+    "in[7:0]",
+    "out0[7:7]", "out1[6:6]", "out2[5:5]", "out3[4:4]",
+    "out4[3:3]", "out5[2:2]", "out6[1:1]", "out7[0:0]",
+  ]);
+  // 0 号分支拿最高位，因此它排在最上面；MSB 在上、LSB 在下。
+  assert.equal(node.ports[1]?.point.y, 130);
+  assert.equal(node.ports[8]?.point.y, 354);
+  assert.ok(node.ports.every((port) => port.point.y >= 100 && port.point.y <= 100 + node.size.height));
+  assert.ok(node.ports.every((port) => port.point.x === 100 || port.point.x === 248));
 });
 
 /** 位宽为 1 且没有位区间的端口显示得与引入位宽之前一字不差；再宽或带区间才补上位区间。 */

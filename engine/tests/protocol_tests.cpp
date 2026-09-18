@@ -674,5 +674,166 @@ int main() {
     assert(withEmptyPorts->ports.present);
     assert(withEmptyPorts->ports.wellFormed);
     assert(withEmptyPorts->ports.ports.empty());
+
+    // ---- 拆线器与合线器：形状由数据决定，清单必须随请求给出 ----
+
+    circuit::Circuit busCircuit;
+    std::optional<circuit::Simulation> busSimulation;
+
+    // 数据驱动的元件没有内置定义：省略清单就没有可回退的形状，这是一条应当被拒绝的请求。
+    // 内置元件相反——省略清单正是「引擎回退到内置定义」。
+    const auto splitterWithoutPorts = dispatch(
+        R"({"type":"add_component","requestId":"splitter-no-ports","kind":"splitter"})",
+        busCircuit, busSimulation);
+    assert(splitterWithoutPorts.find("\"code\":\"bad_request\"") != std::string::npos);
+    assert(splitterWithoutPorts.find("缺少字段: ports") != std::string::npos);
+
+    // 默认的 8 位拆线器：一条 8 位输入加八条 1 位分支，回传的清单里带着每条分支的位区间。
+    const auto splitter = dispatch(
+        R"({"type":"add_component","requestId":"add-splitter","kind":"splitter","ports":[{"name":"in","direction":"input","width":8},{"name":"out0","direction":"output","width":1,"bitRange":{"msb":7,"lsb":7}},{"name":"out1","direction":"output","width":1,"bitRange":{"msb":6,"lsb":6}},{"name":"out2","direction":"output","width":1,"bitRange":{"msb":5,"lsb":5}},{"name":"out3","direction":"output","width":1,"bitRange":{"msb":4,"lsb":4}},{"name":"out4","direction":"output","width":1,"bitRange":{"msb":3,"lsb":3}},{"name":"out5","direction":"output","width":1,"bitRange":{"msb":2,"lsb":2}},{"name":"out6","direction":"output","width":1,"bitRange":{"msb":1,"lsb":1}},{"name":"out7","direction":"output","width":1,"bitRange":{"msb":0,"lsb":0}}]})",
+        busCircuit, busSimulation);
+    assert(splitter.find("\"type\":\"component_added\"") != std::string::npos);
+    assert(splitter.find("\"componentId\":1") != std::string::npos);
+    assert(splitter.find("\"name\":\"out7\",\"direction\":\"output\",\"width\":1,"
+                         "\"bitRange\":{\"msb\":0,\"lsb\":0}") != std::string::npos);
+
+    const auto wideSource = dispatch(
+        R"({"type":"add_component","requestId":"add-wide-source","kind":"input","ports":[{"name":"out","direction":"output","width":8}]})",
+        busCircuit, busSimulation);
+    assert(wideSource.find("\"componentId\":2") != std::string::npos);
+
+    // 位区间决定分支的位宽：分支端口的位宽必须等于它声明的区间长度，不一致时拒绝。
+    assert(dispatch(
+               R"({"type":"add_component","requestId":"branch-width-mismatch","kind":"splitter","ports":[{"name":"in","direction":"input","width":4},{"name":"out0","direction":"output","width":3,"bitRange":{"msb":3,"lsb":0}}]})",
+               busCircuit, busSimulation)
+               .find("\"code\":\"invalid_bit_range\"") != std::string::npos);
+
+    // 越界、重叠、漏位各自被拒绝，且文案各不相同——用户需要知道是哪一种。
+    const auto incomplete = dispatch(
+        R"({"type":"add_component","requestId":"splitter-hole","kind":"splitter","ports":[{"name":"in","direction":"input","width":8},{"name":"out0","direction":"output","width":4,"bitRange":{"msb":7,"lsb":4}},{"name":"out1","direction":"output","width":3,"bitRange":{"msb":2,"lsb":0}}]})",
+        busCircuit, busSimulation);
+    assert(incomplete.find("\"code\":\"invalid_bit_range\"") != std::string::npos);
+    assert(incomplete.find("不能漏位") != std::string::npos);
+
+    const auto overlap = dispatch(
+        R"({"type":"add_component","requestId":"splitter-overlap","kind":"splitter","ports":[{"name":"in","direction":"input","width":8},{"name":"out0","direction":"output","width":4,"bitRange":{"msb":7,"lsb":4}},{"name":"out1","direction":"output","width":5,"bitRange":{"msb":4,"lsb":0}}]})",
+        busCircuit, busSimulation);
+    assert(overlap.find("\"code\":\"invalid_bit_range\"") != std::string::npos);
+    assert(overlap.find("不能互相重叠") != std::string::npos);
+
+    const auto outOfRange = dispatch(
+        R"({"type":"add_component","requestId":"splitter-overflow","kind":"splitter","ports":[{"name":"in","direction":"input","width":8},{"name":"out0","direction":"output","width":9,"bitRange":{"msb":8,"lsb":0}}]})",
+        busCircuit, busSimulation);
+    assert(outOfRange.find("\"code\":\"invalid_bit_range\"") != std::string::npos);
+    assert(outOfRange.find("越出了宿主总线") != std::string::npos);
+
+    // 被拒绝的三次尝试都没有建立元件：下一个建成的元件仍然是 3 号。
+    const auto merger = dispatch(
+        R"({"type":"add_component","requestId":"add-merger","kind":"merger","ports":[{"name":"in0","direction":"input","width":4,"bitRange":{"msb":7,"lsb":4}},{"name":"in1","direction":"input","width":4,"bitRange":{"msb":3,"lsb":0}},{"name":"out","direction":"output","width":8}]})",
+        busCircuit, busSimulation);
+    assert(merger.find("\"type\":\"component_added\"") != std::string::npos);
+    assert(merger.find("\"componentId\":3") != std::string::npos);
+
+    // 逐位搬运能被外部看见：一位未知只污染拿到它的那条分支。
+    assert(dispatch(
+               R"({"type":"add_connection","requestId":"bus-in","sourceComponentId":2,"sourcePort":"out","targetComponentId":1,"targetPort":"in"})",
+               busCircuit, busSimulation)
+               .find("\"connectionId\"") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"set_input","requestId":"bus-value","componentId":2,"value":"10X10010"})",
+               busCircuit, busSimulation)
+               .find("\"type\":\"input_set\"") != std::string::npos);
+    assert(dispatch(R"({"type":"settle","requestId":"bus-settle"})", busCircuit, busSimulation)
+               .find("\"type\":\"settled\"") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"get_signal","requestId":"read-bit2","componentId":1,"port":"out2"})",
+               busCircuit, busSimulation)
+               .find("\"value\":\"X\"") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"get_signal","requestId":"read-bit0","componentId":1,"port":"out0"})",
+               busCircuit, busSimulation)
+               .find("\"value\":\"1\"") != std::string::npos);
+
+    // 一条分支接上一个 1 位接收端，用来观察改位区间之后它会不会悬空。
+    assert(dispatch(
+               R"({"type":"add_component","requestId":"add-bit-sink","kind":"output"})",
+               busCircuit, busSimulation)
+               .find("\"componentId\":4") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"add_connection","requestId":"sink-top-bit","sourceComponentId":1,"sourcePort":"out0","targetComponentId":4,"targetPort":"in"})",
+               busCircuit, busSimulation)
+               .find("\"connectionId\":2") != std::string::npos);
+
+    // 合线器反向搬运：两条 4 位分支拼回一条 8 位总线。
+    assert(dispatch(
+               R"({"type":"add_component","requestId":"add-high","kind":"input","ports":[{"name":"out","direction":"output","width":4}]})",
+               busCircuit, busSimulation)
+               .find("\"componentId\":5") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"add_component","requestId":"add-low","kind":"input","ports":[{"name":"out","direction":"output","width":4}]})",
+               busCircuit, busSimulation)
+               .find("\"componentId\":6") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"add_connection","requestId":"merge-high","sourceComponentId":5,"sourcePort":"out","targetComponentId":3,"targetPort":"in0"})",
+               busCircuit, busSimulation)
+               .find("\"connectionId\":3") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"add_connection","requestId":"merge-low","sourceComponentId":6,"sourcePort":"out","targetComponentId":3,"targetPort":"in1"})",
+               busCircuit, busSimulation)
+               .find("\"connectionId\":4") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"set_input","requestId":"high-value","componentId":5,"value":"10X1"})",
+               busCircuit, busSimulation)
+               .find("\"type\":\"input_set\"") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"set_input","requestId":"low-value","componentId":6,"value":"0010"})",
+               busCircuit, busSimulation)
+               .find("\"type\":\"input_set\"") != std::string::npos);
+    assert(dispatch(R"({"type":"settle","requestId":"merge-settle"})", busCircuit, busSimulation)
+               .find("\"type\":\"settled\"") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"get_signal","requestId":"read-bus","componentId":3,"port":"out"})",
+               busCircuit, busSimulation)
+               .find("\"value\":\"10X10010\"") != std::string::npos);
+
+    // 改位区间是整体替换：回传替换后的清单，以及被这次变更挤成悬空的连接。
+    const auto rebranched = dispatch(
+        R"({"type":"set_port_width","requestId":"rebranch","componentId":3,"ports":[{"name":"in0","direction":"input","width":8,"bitRange":{"msb":7,"lsb":0}},{"name":"out","direction":"output","width":8}]})",
+        busCircuit, busSimulation);
+    assert(rebranched.find("\"type\":\"port_width_set\"") != std::string::npos);
+    assert(rebranched.find("\"ports\":[{\"name\":\"in0\",\"direction\":\"input\",\"width\":8,"
+                           "\"bitRange\":{\"msb\":7,\"lsb\":0}},"
+                           "{\"name\":\"out\",\"direction\":\"output\",\"width\":8}]") !=
+           std::string::npos);
+    // 两条 4 位分支被一条 8 位分支取代：原来接在 in1 上的那条连接因为端点消失而悬空，in0 上的
+    // 那条因为宽度从 4 变成 8 而悬空——两者都是本次变更造成的，因此都在回传的差分里。
+    assert(rebranched.find("\"danglingConnectionIds\":[3,4]") != std::string::npos);
+
+    // 八条 1 位分支改成一条 8 位分支：分支名与位宽都跟着清单走，原来接在 out0 上的那条连接
+    // 因为两端位宽不再相同而悬空。
+    const auto resplit = dispatch(
+        R"({"type":"set_port_width","requestId":"resplit","componentId":1,"ports":[{"name":"in","direction":"input","width":8},{"name":"out0","direction":"output","width":8,"bitRange":{"msb":7,"lsb":0}}]})",
+        busCircuit, busSimulation);
+    assert(resplit.find("\"type\":\"port_width_set\"") != std::string::npos);
+    assert(resplit.find("\"danglingConnectionIds\":[2]") != std::string::npos);
+
+    const auto rejectedResplit = dispatch(
+        R"({"type":"set_port_width","requestId":"bad-resplit","componentId":1,"ports":[{"name":"in","direction":"input","width":8},{"name":"out0","direction":"output","width":4,"bitRange":{"msb":7,"lsb":4}},{"name":"out1","direction":"output","width":1,"bitRange":{"msb":4,"lsb":4}}]})",
+        busCircuit, busSimulation);
+    assert(rejectedResplit.find("\"code\":\"invalid_bit_range\"") != std::string::npos);
+
+    // 半成品快照的判据：被拒之后拆线器仍然只有 out0 那一条 8 位分支，读数与提交前一致。
+    // 改位区间按初值重建了分支端口，因此先求值一次再读。
+    assert(dispatch(R"({"type":"settle","requestId":"settle-after-resplit"})", busCircuit, busSimulation)
+               .find("\"type\":\"settled\"") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"get_signal","requestId":"read-after-bad-resplit","componentId":1,"port":"out0"})",
+               busCircuit, busSimulation)
+               .find("\"value\":\"10X10010\"") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"get_signal","requestId":"read-gone-branch","componentId":1,"port":"out1"})",
+               busCircuit, busSimulation)
+               .find("\"code\":\"port_not_found\"") != std::string::npos);
+
     return 0;
 }

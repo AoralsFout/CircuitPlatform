@@ -43,6 +43,12 @@ std::vector<Port> portsFor(ComponentKind kind) {
             bit("clock", PortDirection::Input),
             bit("q", PortDirection::Output),
         };
+    case ComponentKind::Splitter:
+    case ComponentKind::Merger:
+        // 这两个元件的形状是数据驱动的：分支数量、每条分支覆盖哪几位、宿主总线有多宽，都由
+        // 调用方给出的端口清单决定，没有一份写得出来的内置定义。返回空清单是为了让「没有清单
+        // 的拆线器」这件事在协议层被明确拒绝，而不是让引擎悄悄造一个没有任何端口的元件。
+        return {};
     }
 
     return {};
@@ -115,6 +121,78 @@ PortError validatePort(const Port& port) noexcept {
 
     // 位区间决定分支端口的位宽，两者一致才是一次自洽的声明。
     return range.msb - range.lsb + 1 == port.width ? PortError::None : PortError::InvalidBitRange;
+}
+
+// 校验数据驱动元件的端口清单：一条宿主总线端口，加若干条盖满它、互不重叠的位区间分支。
+// 按宿主总线的位序号从小到大走一遍已排序的分支，走到哪一位就是哪一位，因此不需要一张与总线
+// 等宽的覆盖表——位宽可以是任意大的数，校验的代价只与分支数量有关。
+PortListError validatePortList(ComponentKind kind, const std::vector<Port>& ports) noexcept {
+    if (kind != ComponentKind::Splitter && kind != ComponentKind::Merger) {
+        return PortListError::None;
+    }
+
+    // 拆线器从输入取位、往分支输出放位；合线器从分支输入取位、往输出放位。方向决定了两者
+    // 谁是宿主、谁是分支，也决定了求值时读哪一端、写哪一端。
+    const bool splitting = kind == ComponentKind::Splitter;
+    const auto hostDirection = splitting ? PortDirection::Input : PortDirection::Output;
+    const auto branchDirection = splitting ? PortDirection::Output : PortDirection::Input;
+
+    const Port* host = nullptr;
+    std::vector<PortBitRange> ranges;
+    ranges.reserve(ports.size());
+
+    for (const auto& port : ports) {
+        if (port.bitRange.has_value()) {
+            if (port.direction != branchDirection) {
+                return PortListError::Malformed;
+            }
+            // 位区间决定分支的位宽，两者一致才是一条自洽的分支。这条规则由 validatePort 保证，
+            // 这里再确认一次，因为下面的推进要以「区间长度就是这条分支的宽度」为前提。
+            if (port.bitRange->msb < port.bitRange->lsb ||
+                port.bitRange->msb - port.bitRange->lsb + 1 != port.width) {
+                return PortListError::Malformed;
+            }
+            ranges.push_back(*port.bitRange);
+            continue;
+        }
+
+        if (port.direction != hostDirection || port.width == 0 || host != nullptr) {
+            return PortListError::Malformed;
+        }
+        host = &port;
+    }
+
+    // 没有宿主总线就没有「覆盖哪些位」这个问题的参照物，这份清单不成立。
+    if (host == nullptr) {
+        return PortListError::Malformed;
+    }
+
+    // 越界先于覆盖判定：一条越出宿主总线的分支无论怎么排都不成立，先报它比先报一条
+    // 由它引起的重叠或漏位更接近用户实际写错的地方。
+    for (const auto& range : ranges) {
+        if (range.msb >= host->width) {
+            return PortListError::OutOfRange;
+        }
+    }
+
+    std::sort(ranges.begin(), ranges.end(), [](const PortBitRange& left, const PortBitRange& right) {
+        return left.lsb < right.lsb;
+    });
+
+    // 从位 0 往上推：下一条分支必须正好接在上一条的上一位，否则不是接不上（漏位）就是压住了
+    // 已经走过的位（重叠）。全部接完时游标应当正好停在宿主总线的位宽上。
+    std::uint32_t next = 0;
+    for (const auto& range : ranges) {
+        if (range.lsb < next) {
+            return PortListError::Overlap;
+        }
+        if (range.lsb > next) {
+            return PortListError::Incomplete;
+        }
+        next = range.msb + 1;
+    }
+
+    return next == host->width ? PortListError::None : PortListError::Incomplete;
 }
 
 // 返回元件副本，避免调用者直接修改 Circuit 内部保存的结构。

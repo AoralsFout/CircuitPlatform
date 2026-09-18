@@ -100,6 +100,7 @@ const {
   cancelConnection,
   focusCanvasObject,
   setPortWidth,
+  setBitRanges,
 } = useEditorState(state, editorState, select, moveComponent, updatePlacement, editRoute, createConnection, setPortWidthCommand);
 const {
   preference: themePreference,
@@ -302,6 +303,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           :operation-error="editorState?.error?.message ?? editorState?.simulationError?.message ?? state.operationError"
           :inspector="inspector"
           @set-port-width="setPortWidth"
+          @set-bit-ranges="setBitRanges"
           :waveform="state.waveform"
           :waveform-rows="waveformRows"
           @select-tab="bottomTab = $event"

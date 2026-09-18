@@ -24,6 +24,10 @@ enum class ComponentKind {
     NotGate,
     Clock,
     DFlipFlop,
+    /** 拆线器：一条多位输入按位区间拆成若干条分支输出。 */
+    Splitter,
+    /** 合线器：若干条位区间输入按位区间合并成一条多位输出。 */
+    Merger,
 };
 
 enum class PortDirection {
@@ -64,6 +68,43 @@ enum class PortError {
  * @return 位宽为 0 时返回 InvalidWidth；位区间的下界高于上界、或与位宽不一致时返回 InvalidBitRange。
  */
 [[nodiscard]] PortError validatePort(const Port& port) noexcept;
+
+/** 一份拆线器或合线器的端口清单不符合领域规则的原因。 */
+enum class PortListError {
+    None,
+    /**
+     * 清单不是「一条不带位区间的宿主总线端口 + 若干条方向相反的位区间分支」这个形状。
+     * 覆盖类错误的前提是形状成立，因此形状不对时先报这里。
+     */
+    Malformed,
+    /** 有分支的位区间越出了宿主总线声明的位范围。 */
+    OutOfRange,
+    /** 有两位被不止一条分支覆盖。 */
+    Overlap,
+    /** 有宿主位没有被任何分支覆盖。 */
+    Incomplete,
+};
+
+/**
+ * 校验一份拆线器或合线器的端口清单。
+ *
+ * 数据驱动的元件没有写死的端口形状，唯一的权威就是这份清单本身：宿主总线端口声明总线有多宽，
+ * 每条分支声明自己覆盖哪几位。规则是三条——分支的位区间必须完整覆盖宿主总线的每一位、
+ * 互不重叠、且不越出宿主总线。部分覆盖被拒绝，未覆盖的位因此不会成为一条没有去处的悬案。
+ *
+ * 宿主是清单里唯一那条不带位区间的端口，按结构找而不是按名字找：分支的数量与名字都由数据
+ * 决定，名字不是契约。拆线器的宿主是输入、分支是输出；合线器相反。
+ *
+ * 前提：每个端口都已经过 `validatePort`（位宽至少为 1、位区间自洽）。清单里任何一项违反了
+ * 这条前提，本函数按 `Malformed` 处理而不是给出未定义的结果。
+ *
+ * @param kind 元件类型；不是拆线器或合线器时无条件返回 None——其余元件的端口形状由引擎内置
+ *   定义或调用方负责，不适用覆盖规则。
+ * @param ports 要校验的完整端口清单。
+ * @return 符合规则时返回 None，否则返回第一条被发现的违反。
+ */
+[[nodiscard]] PortListError validatePortList(
+    ComponentKind kind, const std::vector<Port>& ports) noexcept;
 
 struct Component {
     ComponentId id;
@@ -109,6 +150,9 @@ class Circuit {
 public:
     /**
      * 添加一个指定类型的元件，端口清单按内置定义建立。
+     *
+     * 拆线器与合线器没有内置定义——它们的形状是数据驱动的，必须走带清单的重载。这里建立的是
+     * 一个没有端口的元件，调用方不应为这两个类型使用它。
      * @param kind 要添加的元件类型。
      * @return 新元件在当前电路中的唯一身份。
      */
@@ -119,7 +163,8 @@ public:
      *
      * 端口清单是位宽的唯一权威来源：调用方带着清单来时按清单建立，不带时由
      * `addComponent(ComponentKind)` 回退到内置定义。清单本身的合法性由调用方在调用前用
-     * `validatePort` 逐项确认——Circuit 保存的是结构，不重复做协议层的校验。
+     * `validatePort` 逐项、用 `validatePortList` 整体确认——Circuit 保存的是结构，
+     * 不重复做协议层的校验。
      * @param kind 要添加的元件类型；只在行为分派时使用，不影响端口清单。
      * @param ports 该元件的端口清单。
      * @return 新元件在当前电路中的唯一身份。
@@ -132,6 +177,9 @@ public:
      * 整体替换而不是按端口增量修改：改宽与改位区间在用户眼里是同一件事，而一次合法的整体
      * 变更（例如拆线器重算其余分支的位区间）用按端口的形状表达不出来。Component 身份不变；
      * 与两端位宽仍然匹配的 Connection 身份也不变，不再匹配的那些按 `isDangling` 变成悬空。
+     *
+     * 清单的合法性同样由调用方在调用前用 `validatePort` 与 `validatePortList` 确认：一次改位
+     * 区间会让其余分支必须跟着重算，整体校验因此是这次变更能不能成立的一部分，而不是逐条的。
      * @param id 要替换端口清单的元件身份。
      * @param ports 替换后的完整端口清单。
      * @return 元件存在并被替换时返回 true，否则返回 false。

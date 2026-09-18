@@ -1,4 +1,5 @@
 import type { ComponentKindName, PortSpec } from "@circuit-platform/protocol";
+import { isDataDrivenKind } from "../src/editor/bus-ports.ts";
 
 /**
  * 假引擎使用的内置端口清单。
@@ -21,6 +22,10 @@ export const BUILT_IN_PORTS: Readonly<Record<ComponentKindName, readonly PortSpe
   not: [bit("in", "input"), bit("out", "output")],
   clock: [bit("out", "output")],
   d_flip_flop: [bit("d", "input"), bit("clock", "input"), bit("q", "output")],
+  // 拆线器与合线器没有内置定义：它们的端口形状完全由数据决定，清单必须随请求给出。空数组
+  // 表达的正是「这里没有一份可以回退的清单」，而不是「这个元件没有端口」。
+  splitter: [],
+  merger: [],
 };
 
 /**
@@ -28,12 +33,18 @@ export const BUILT_IN_PORTS: Readonly<Record<ComponentKindName, readonly PortSpe
  * @param kind 元件类型。
  * @param ports 请求里携带的端口清单，省略时回退到内置定义。
  * @returns 该元件实际的端口清单，与真实引擎的回退规则一致。
+ * @throws 数据驱动元件省略清单时抛错——真实引擎会以 `bad_request` 拒绝这条请求，夹具因此
+ *   不能悄悄替它编一份清单出来。
  */
 export function portsForAddComponent(
   kind: ComponentKindName,
   ports?: readonly PortSpec[],
 ): readonly PortSpec[] {
-  return ports ?? BUILT_IN_PORTS[kind];
+  if (ports) return ports;
+  if (isDataDrivenKind(kind)) {
+    throw new Error(`${kind} 的端口清单必须随请求给出，引擎没有它的内置定义`);
+  }
+  return BUILT_IN_PORTS[kind];
 }
 
 /**

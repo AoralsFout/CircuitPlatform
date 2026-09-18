@@ -3,6 +3,7 @@ import test from "node:test";
 import { createComponentDefinitionRegistry, hitTestCanvas, type CanvasPort, type CanvasScene } from "../src/canvas/index.ts";
 import { contextActionsFor } from "../src/editor/context-menu.ts";
 import { createInspectorModel } from "../src/editor/inspector.ts";
+import { defaultPortsFor } from "../src/editor/bus-ports.ts";
 import { BUILT_IN_PORTS } from "./fake-ports.ts";
 
 /**
@@ -10,7 +11,7 @@ import { BUILT_IN_PORTS } from "./fake-ports.ts";
  * 几何走展示布局规则；这里只关心检查器读到的字段，因此偏移按调用方给的表直接摆好。
  */
 function canvasPorts(
-  ports: readonly { name: string; direction: "input" | "output"; width: number }[],
+  ports: readonly { name: string; direction: "input" | "output"; width: number; bitRange?: { msb: number; lsb: number } }[],
   origin: { x: number; y: number },
   offsets: Readonly<Record<string, { x: number; y: number }>>,
   labels: Readonly<Record<string, string>> = {},
@@ -21,9 +22,12 @@ function canvasPorts(
     return {
       id: port.name,
       name: label,
-      label: port.width > 1 ? `${label}[${port.width - 1}:0]` : label,
+      label: port.bitRange
+        ? `${label}[${port.bitRange.msb}:${port.bitRange.lsb}]`
+        : port.width > 1 ? `${label}[${port.width - 1}:0]` : label,
       direction: port.direction,
       width: port.width,
+      ...(port.bitRange ? { bitRange: { ...port.bitRange } } : {}),
       point: { x: origin.x + offset.x, y: origin.y + offset.y },
       offset: { ...offset },
       signal: "X",
@@ -138,6 +142,38 @@ test("inspector exposes the width as the first editable attribute of an Input", 
   // 端口行同时带上位宽与带位区间的标签。
   assert.equal(model.ports[0]?.width, 8);
   assert.equal(model.ports[0]?.label, "out[7:0]");
+});
+
+/**
+ * 拆线器与合线器的可编辑属性是位区间列表；列表里每一项的 `msb:lsb` 就是它在检查器里的样子。
+ */
+test("inspector exposes the bit range list of a splitter", () => {
+  const registry = createComponentDefinitionRegistry();
+  const defaultPorts = defaultPortsFor("splitter")!;
+  const splitter: CanvasScene = {
+    nodes: [{
+      id: "splitter-1", kind: "splitter", displayName: "拆线器 1", symbol: "⇤", description: "把一条多位总线按位区间拆成若干条分支。",
+      position: { x: 0, y: 0 }, size: { width: 148, height: 284 }, selected: true,
+      ports: canvasPorts(
+        defaultPorts.map((port) => ({ name: port.name, direction: port.direction, width: port.width, bitRange: port.bitRange })),
+        { x: 0, y: 0 },
+        Object.fromEntries(defaultPorts.map((port, index) => [port.name, { x: 0, y: index * 32 }])),
+      ),
+    }],
+    wires: [],
+    bounds: { min: { x: 0, y: 0 }, max: { x: 148, y: 284 } },
+  };
+  const model = createInspectorModel(splitter, { kind: "component", id: "splitter-1" }, registry);
+  assert.equal(model?.kind, "component");
+  if (model?.kind !== "component") return;
+
+  // 位区间列表跟在位宽之后；宿主总线端口在 portName 上，提交时用它认出哪一条是宿主。
+  assert.deepEqual(model.attributes, [{
+    id: "bit-ranges",
+    label: "位区间",
+    value: "7:7, 6:6, 5:5, 4:4, 3:3, 2:2, 1:1, 0:0",
+    portName: "in",
+  }]);
 });
 
 test("inspector projects read-only Component ports and Wire endpoints", () => {

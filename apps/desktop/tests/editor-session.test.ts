@@ -9,6 +9,7 @@ import {
   type EngineResult,
 } from "../src/editor/index.ts";
 import { resolveCanvasKeyboardAction, resolveEditorShortcut } from "../src/editor/keyboard.ts";
+import { defaultPortsFor } from "../src/editor/bus-ports.ts";
 import { BUILT_IN_PORTS, builtInPortsById, portsForAddComponent } from "./fake-ports.ts";
 
 class FakeEngine implements CircuitEnginePort {
@@ -752,6 +753,28 @@ test("places every combinational kind at a snapped world center and selects it",
     "addComponent:input", "addComponent:output", "addComponent:and", "addComponent:or",
     "addComponent:nand", "addComponent:nor", "addComponent:xor", "addComponent:xnor", "addComponent:not",
   ]);
+});
+
+/**
+ * 拆线器与合线器放下即可用：端口清单由前端按默认配置生成并随 `add_component` 发出，引擎没有
+ * 它们的形状可回退。夹具在省略清单时抛错，因此这条断言同时证明了清单确实被发了出去。
+ */
+test("places a splitter and a merger with their default port lists", async () => {
+  const engine = new FakeEngine();
+  const session = createSession(engine);
+
+  const splitter = await session.dispatch({ type: "add-component", kind: "splitter", position: { x: 320, y: 240 } });
+  assert.equal(splitter.ok, true);
+  const splitterComponent = splitter.snapshot.document.components.at(-1);
+  assert.deepEqual(splitterComponent?.ports, defaultPortsFor("splitter"));
+  // 盒子高度按端口数长到 284，因此点击中心落在盒子的中心而不是一个 84 高的盒子上。
+  assert.deepEqual(splitterComponent?.position, { x: 320 - 74, y: 240 - 142 });
+
+  const merger = await session.dispatch({ type: "add-component", kind: "merger", position: { x: 320, y: 240 } });
+  assert.equal(merger.ok, true);
+  const mergerComponent = merger.snapshot.document.components.at(-1);
+  assert.deepEqual(mergerComponent?.ports, defaultPortsFor("merger"));
+  assert.equal(mergerComponent?.displayName, "合线器 1");
 });
 
 test("Alt preserves the exact placement center and failed placement remains pending", async () => {

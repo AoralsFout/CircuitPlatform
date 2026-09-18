@@ -1,4 +1,6 @@
 import type { ComponentKindName, PortSpec } from "@circuit-platform/protocol";
+import { componentGeometryFor, defaultComponentDefinitionRegistry } from "../canvas/registry.ts";
+import { defaultPortsFor } from "./bus-ports.ts";
 import { positionFromPlacementCenter } from "./placement.ts";
 import {
   createDefaultOrthogonalRoute,
@@ -841,6 +843,8 @@ export function createEditorSession(
       not: "NOT 门",
       clock: "Clock",
       d_flip_flop: "D Flip-Flop",
+      splitter: "拆线器",
+      merger: "合线器",
     };
     return labels[kind] ?? kind;
   }
@@ -854,8 +858,23 @@ export function createEditorSession(
     };
   }
 
-  function componentPosition(center: Point, altKey: boolean): Point {
-    return positionFromPlacementCenter(center, { width: 148, height: 84 }, altKey);
+  /**
+   * 放置位置由展示定义里的尺寸推出，而不是一个写死的 148 × 84。
+   *
+   * 端口数量由数据决定的元件（拆线器、合线器）高度按端口数增长，写死的尺寸会让「点在哪、
+   * 元件落在哪」差出半个高度，而且与放置预览画出的那个盒子对不上。
+   */
+  function componentPosition(
+    kind: ComponentKindName,
+    center: Point,
+    ports: readonly PortSpec[],
+    altKey: boolean,
+  ): Point {
+    const definition = defaultComponentDefinitionRegistry.get(kind);
+    const size = definition
+      ? componentGeometryFor(definition, ports).size
+      : { width: 148, height: 84 };
+    return positionFromPlacementCenter(center, size, altKey);
   }
 
   async function settleAfterStructure(): Promise<void> {
@@ -1043,7 +1062,10 @@ export function createEditorSession(
     if (!Number.isFinite(center.x) || !Number.isFinite(center.y)) {
       return fail({ code: "invalid_placement", message: "元件放置位置无效。", retryable: false });
     }
-    const position = componentPosition(center, altKey);
+    // 拆线器与合线器的端口清单由前端生成并随请求发出——引擎没有它们的形状可回退。默认是
+    // 8 位宿主总线拆成八条 1 位分支，因此放下即可用；内置类型仍然省略清单，由引擎回退。
+    const ports = defaultPortsFor(kind);
+    const position = componentPosition(kind, center, ports ?? [], altKey);
     const component: EditorComponent = {
       id: identity.id,
       kind,
@@ -1063,7 +1085,9 @@ export function createEditorSession(
     };
     publish();
 
-    const added = await call(() => engine.addComponent(kind));
+    const added = await call(() =>
+      ports === null ? engine.addComponent(kind) : engine.addComponent(kind, ports),
+    );
     if (!added.ok) {
       return fail(added.error);
     }

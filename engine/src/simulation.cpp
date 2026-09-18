@@ -112,6 +112,52 @@ SignalValue xorValue(SignalValue left, SignalValue right) {
     return bitwiseBinary(left, right, xorBit);
 }
 
+// 数据驱动元件的宿主总线端口是清单里唯一不带位区间的那个端口。按结构找而不是按名字找：
+// 分支的数量与名字都由数据决定，`in` / `out0` 这类名字不是契约。清单里出现第二条不带位区间
+// 的端口时返回空值——形状不成立，与其猜哪一条是宿主，不如什么都不搬运。
+const Port* hostPort(const Component& component) {
+    const Port* host = nullptr;
+    for (const auto& port : component.ports) {
+        if (port.bitRange.has_value() || port.width == 0) {
+            continue;
+        }
+        if (host != nullptr) {
+            return nullptr;
+        }
+        host = &port;
+    }
+    return host;
+}
+
+// 取出宿主总线上位区间 [msb:lsb] 覆盖的那些位。
+// 值的文本最左边是最高位（`[N-1:0]`），所以位 m 落在下标 `width - 1 - m` 上，
+// 区间 [msb:lsb] 因此是一段从 `width - 1 - msb` 开始、长度为 `msb - lsb + 1` 的连续切片。
+// 宿主值比区间还短只可能来自一份没有被校验的清单，那时返回空值，由调用方给出等宽的全 X，
+// 而不是让 substr 悄悄截出一段长度对不上的值。
+std::optional<std::string> sliceBits(const std::string& bits, const PortBitRange& range) {
+    const auto length = static_cast<std::size_t>(range.msb - range.lsb + 1);
+    if (range.msb >= bits.size()) {
+        return std::nullopt;
+    }
+    return bits.substr(bits.size() - 1 - range.msb, length);
+}
+
+// 把一条分支的值放回宿主总线的 [msb:lsb] 上：分支的最左位是 msb，最右位是 lsb。
+// 长度对不上就整条宿主作废（返回 false），因为「这一位到底来自哪条分支」已经无从确定，
+// 而按更短的那个静默补齐会造出一条看起来正常、实际错了位的值。
+bool placeBits(std::string& host, const std::string& branch, const PortBitRange& range) {
+    const auto length = static_cast<std::size_t>(range.msb - range.lsb + 1);
+    if (range.msb >= host.size() || branch.size() != length) {
+        return false;
+    }
+
+    const auto offset = host.size() - 1 - range.msb;
+    for (std::size_t index = 0; index < length; ++index) {
+        host[offset + index] = branch[index];
+    }
+    return true;
+}
+
 // 按元件类型遍历：tick 与 signalSnapshot 都要在整份电路里挑出某一类元件。
 // 模板在调用点完全内联，逐元素执行的代码与手写循环一致，没有额外开销。
 template <typename Visit>
@@ -145,6 +191,8 @@ bool isCombinational(ComponentKind kind) {
     case ComponentKind::XorGate:
     case ComponentKind::XnorGate:
     case ComponentKind::NotGate:
+    case ComponentKind::Splitter:
+    case ComponentKind::Merger:
         return true;
     default:
         return false;
@@ -308,6 +356,10 @@ SimulationResult Simulation::settle() {
             if (component.kind == ComponentKind::NotGate) {
                 const auto input = signal({component.id, "in"}).value_or(unknownPortValue(circuit_.components_, {component.id, "in"}));
                 changed = setOutputSignal({component.id, "out"}, invert(input)) || changed;
+            } else if (component.kind == ComponentKind::Splitter) {
+                changed = settleSplitter(component) || changed;
+            } else if (component.kind == ComponentKind::Merger) {
+                changed = settleMerger(component) || changed;
             } else {
                 const auto first = signal({component.id, "in1"}).value_or(unknownPortValue(circuit_.components_, {component.id, "in1"}));
                 const auto second = signal({component.id, "in2"}).value_or(unknownPortValue(circuit_.components_, {component.id, "in2"}));
@@ -324,6 +376,60 @@ SimulationResult Simulation::settle() {
     }
 
     return {SimulationError::CombinationalLoop};
+}
+
+// 拆线器：宿主输入按每条分支的位区间切片后放进对应的分支输出。搬运是逐位的，因此某一位未知
+// 只影响拿到这一位的那条分支，其余分支照常是确定值——`X1X0` 拆开是 `1`、`X`、`0`，不是三条 X。
+bool Simulation::settleSplitter(const Component& component) {
+    const auto* host = hostPort(component);
+    if (host == nullptr) {
+        return false;
+    }
+
+    const PortId hostId{component.id, host->name};
+    const auto value = signal(hostId).value_or(unknownPortValue(circuit_.components_, hostId));
+
+    bool changed = false;
+    for (const auto& port : component.ports) {
+        if (!port.bitRange.has_value()) {
+            continue;
+        }
+
+        const auto slice = sliceBits(value.bits(), *port.bitRange);
+        changed = setOutputSignal({component.id, port.name},
+                                  slice.has_value() ? SignalValue::fromBits(*slice)
+                                                    : SignalValue::unknown(port.width)) ||
+                  changed;
+    }
+    return changed;
+}
+
+// 合线器：宿主输出由每条分支输入按位区间拼出来，未覆盖的位保持 X。
+// 从全 X 起步而不是从旧值起步：旧值里可能有上一位宽留下的位，而这次拼装的结果只应当由
+// 当前的分支决定，否则一次改位区间之后旧位会以「没人覆盖」的形式留在输出上。
+// 逐位搬运同样是逐位的，因此一条分支是 X 只让它覆盖的那些位变成 X。
+bool Simulation::settleMerger(const Component& component) {
+    const auto* host = hostPort(component);
+    if (host == nullptr) {
+        return false;
+    }
+
+    const PortId hostId{component.id, host->name};
+    std::string assembled(host->width, 'X');
+    for (const auto& port : component.ports) {
+        if (!port.bitRange.has_value()) {
+            continue;
+        }
+
+        const PortId branchId{component.id, port.name};
+        const auto value = signal(branchId).value_or(unknownPortValue(circuit_.components_, branchId));
+        if (!placeBits(assembled, value.bits(), *port.bitRange)) {
+            // 分支值与本条分支声明的位区间长度对不上：与其把错位的位拼出去，不如整条输出未知。
+            return setOutputSignal(hostId, SignalValue::unknown(host->width));
+        }
+    }
+
+    return setOutputSignal(hostId, SignalValue::fromBits(std::move(assembled)));
 }
 
 // 六步顺序本身就是语义：先记前值，再推进时钟，求值到稳定后才判上升沿，判完再求值一次。
