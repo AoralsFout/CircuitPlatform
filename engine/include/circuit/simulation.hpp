@@ -2,16 +2,78 @@
 
 #include "circuit/circuit.hpp"
 
+#include <cassert>
 #include <cstddef>
 #include <optional>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace circuit {
 
-enum class SignalValue {
-    Zero,
-    One,
-    Unknown,
+/**
+ * 一个信号值：N 位，每一位独立取 `0` / `1` / `X`。
+ *
+ * 某一位未知不影响其余位。`"1X0"` 的第 1 位是 X，另外两位照常参与求值，用户看到的因此是
+ * `1X0` 而不是整条 `XXX`。位宽为 1 时它与旧的三值标量完全等价，协议与外观因此都不变。
+ *
+ * 相等是逐位比较，长度也必须相同。`settle` 的定点迭代正是靠这个相等判断本轮有没有变化，
+ * 因此任何近似（例如把 X 当成通配）都会让迭代在还没稳定时提前返回，表现为静默的求值不全。
+ */
+class SignalValue {
+public:
+    /** 1 位的 `0`。 */
+    [[nodiscard]] static SignalValue zero() {
+        return SignalValue("0");
+    }
+
+    /** 1 位的 `1`。 */
+    [[nodiscard]] static SignalValue one() {
+        return SignalValue("1");
+    }
+
+    /**
+     * 每一位都是 X 的值。
+     * @param width 位宽；省略时是 1 位，也就是未连接与未初始化端口上的那个值。
+     */
+    [[nodiscard]] static SignalValue unknown(std::size_t width = 1) {
+        assert(width >= 1);
+        return SignalValue(std::string(width, 'X'));
+    }
+
+    /**
+     * 按逐位文本建立一个信号值。
+     * @param bits 每一位取 `0` / `1` / `X`；必须非空，且只含这三个字符。
+     *   校验发生在协议边界（`signalValueFromName`）：那里是唯一能收到外部文本的地方，
+     *   仿真内部的逐位运算只在合法字符之间产生新值，因此这里只做断言。
+     */
+    [[nodiscard]] static SignalValue fromBits(std::string bits) {
+        assert(!bits.empty() && bits.find_first_not_of("01X") == std::string::npos);
+        return SignalValue(std::move(bits));
+    }
+
+    /** 逐位文本，每一位是 `0`、`1` 或 `X`；长度等于位宽。 */
+    [[nodiscard]] const std::string& bits() const noexcept {
+        return bits_;
+    }
+
+    /** 位宽，即 `bits()` 的长度。 */
+    [[nodiscard]] std::size_t width() const noexcept {
+        return bits_.size();
+    }
+
+    /**
+     * 判断两个信号值是否逐位相同。
+     * @return 长度与每一位都相同时返回 true；长度不同即不相等。
+     */
+    [[nodiscard]] bool operator==(const SignalValue& other) const noexcept {
+        return bits_ == other.bits_;
+    }
+
+private:
+    explicit SignalValue(std::string bits) : bits_(std::move(bits)) {}
+
+    std::string bits_;
 };
 
 enum class SimulationError {
@@ -64,7 +126,7 @@ public:
     /**
      * 设置 Input 元件的输出值。
      * @param inputId 要设置的 Input 元件身份。
-     * @param value 要写入的数字信号值。
+     * @param value 要写入的信号值；位宽是否与端口相符由调用方负责。
      * @return 元件存在且确实是 Input 时返回 true，否则返回 false。
      */
     bool setInput(ComponentId inputId, SignalValue value);
@@ -127,7 +189,7 @@ public:
     /**
      * 读取指定端口当前的信号值。
      * @param portId 要读取的端口身份。
-     * @return 端口存在时返回信号值；不存在时返回空值。未连接输入返回 Unknown。
+     * @return 端口存在时返回信号值；不存在时返回空值。未连接输入返回全 X。
      */
     [[nodiscard]] std::optional<SignalValue> signal(PortId portId) const;
 

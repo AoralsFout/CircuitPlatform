@@ -1,5 +1,6 @@
 #include "circuit/request_handler.hpp"
 
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -23,22 +24,29 @@ std::optional<ComponentKind> componentKindFromName(std::string_view name) {
     return std::nullopt;
 }
 
+/**
+ * 把协议里的信号值文本翻译成领域值。
+ * @param value 逐位文本，每一位取 `0` / `1` / `X`。
+ * @return 合法时返回领域值；空串或含其它字符时返回空值。
+ */
 std::optional<SignalValue> signalValueFromName(std::string_view value) {
-    if (value == "0") return SignalValue::Zero;
-    if (value == "1") return SignalValue::One;
-    if (value == "X") return SignalValue::Unknown;
-    return std::nullopt;
+    if (value.empty() || value.find_first_not_of("01X") != std::string_view::npos) {
+        return std::nullopt;
+    }
+    return SignalValue::fromBits(std::string(value));
 }
 
-// 协议允许用数字表达确定值，用字符串 X 表达未知值。
-std::string signalValueToJson(SignalValue value) {
-    switch (value) {
-    case SignalValue::Zero: return "0";
-    case SignalValue::One: return "1";
-    case SignalValue::Unknown: return "\"X\"";
-    }
-    return "\"X\"";
+// 信号值出协议时统一是字符串，逐位文本因此直接加引号。文本只含 `0` / `1` / `X`，
+// 没有需要转义的字符。
+std::string signalValueToJson(const SignalValue& value) {
+    return "\"" + value.bits() + "\"";
 }
+
+/**
+ * 本票所有端口的位宽恒为 1。位宽成为 `Port` 的属性后（Phase 4.5 的下一票），这个常量
+ * 换成读目标端口声明的位宽。
+ */
+constexpr std::size_t portWidth = 1;
 
 std::string responseWithId(std::string_view type, std::string_view requestId) {
     return "{\"type\":\"" + protocol::escapeJson(type) +
@@ -149,6 +157,12 @@ std::string handleRequest(
         const auto value = signalValueFromName(*request.value);
         if (!value.has_value()) {
             return protocol::errorResponse(request.requestId, "invalid_signal", "信号值必须是 0、1 或 X");
+        }
+        // 长度先按字符集判定再按位宽判定：空串与含其它字符的值连信号值都不是，报 invalid_signal；
+        // 只含 0/1/X 但长度不对的值本身合法，只是放不进这个端口，报 invalid_width。
+        if (value->width() != portWidth) {
+            return protocol::errorResponse(
+                request.requestId, "invalid_width", "信号值长度必须等于端口位宽");
         }
 
         if (!simulation.has_value()) resetSimulation(circuit, simulation);
