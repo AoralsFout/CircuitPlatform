@@ -53,7 +53,7 @@ Electron 主进程与 C++ 引擎通过 stdin/stdout 建立一条长连接。双�
 
 `signals` 的前半段直接来自仿真内部的输出信号表，覆盖每一个输出端口；后半段是每个 `Output` 元件 `in` 端口的当前值。带上接收端的原因是 `Output` 的读数来自它的 `in`——只带输出端口的话，调用方无法在一次往返内得到 Output 的展示值，只能逐端口 `get_signal` 或自己沿 Connection 推导。因此连续推进时每步只需一次跨进程往返，往返次数不随电路规模增长。
 
-`step` 是**引擎当前那份 `Simulation` 自建立以来**累计推进的 tick 次数，属于引擎侧的仿真状态，不是调用方的推进次数：结构变更重建 `Simulation` 会让它从头计数。调用方若要展示「已经推进了多少步」，应当维护自己的计数，不要把它和引擎侧的值混用。
+`step` 是**引擎当前那份 `Simulation` 自建立以来**累计推进的 tick 次数，属于引擎侧的仿真状态，不是调用方的推进次数：它只统计 `tick`，`settle` 不计入；`reset` 会让它归零，结构变更不会。调用方若要展示「已经推进了多少步」，应当维护自己的计数，不要把它和引擎侧的值混用。
 
 `reset` 把当前的 `Simulation` 恢复成刚建立时的样子：全部输出端口回到初值（`clock` 的 `out` 是 `0`，`d_flip_flop` 的 `q` 是 `X`，其余端口是 `X`），tick 计数归零，`Circuit` 结构与元件、连接的引擎身份原样保留。它**没有业务失败分支**：
 
@@ -92,7 +92,9 @@ reset 之后引擎里的 Input 也回到初值 `X`，因此调用方需要重新
 ## 生命周期约定
 
 - 引擎进程启动后持有一份 `Circuit`；同一进程内的请求共享这份结构。
-- 添加或删除元件、添加或删除连接后会重建 `Simulation` 快照；因此结构修改会清空运行时状态。
+- 添加或删除元件、添加或删除连接后**按元件身份重新推导仿真状态**，不再重建 `Simulation` 快照：`PortId` 仍然存在的端口保留当前值，消失的端口连同它的值一起丢弃，新出现的端口按初始值建立，仍然存在的 `d_flip_flop` 保留它的 `q` 与它在 `clock` 端口上的前值。已经推进的步数不归零——结构变更不是重置。按身份保留之所以安全，是因为元件身份单调递增、永不重用（[ADR 0019](decisions/0019-tick-driven-by-protocol-and-state-kept-by-identity.md)）。
+- 清空全部运行时状态是一条独立的 `reset` 请求：它把整个仿真恢复成刚创建时的状态，而 `Circuit` 结构不变。它与上面的结构变更保留状态是两种可区分、可测试的行为。
+- 撤销对结构的影响落在调用方一侧：撤销删除会用新的引擎身份重建被删元件（[ADR 0007](decisions/0007-editor-session-and-stable-editor-ids.md) 的补偿事务），按身份保留因此救不回撤销恢复的 `d_flip_flop`——它是一个新元件，`q` 回到 `X`。这是既有设计，不是缺陷。
 - `remove_component` 删除 Component 但保留相关 Connection；端点失效的 Connection 变为悬空连接，不参与仿真。
 - `remove_connection` 只删除指定 Connection，不删除两端 Component。
 - 悬空 Connection 在领域层可以被查看、删除或重新连接；当前协议只能按已知 ID 删除它。编辑器的「重接」不新增协议请求，而是用「删除旧 Connection + 创建新 Connection」的补偿事务实现（见 [ADR 0007](decisions/0007-editor-session-and-stable-editor-ids.md) 与前端设计规范 14.1）；若将来出现需要原子重接的用例，再评估新请求类型。

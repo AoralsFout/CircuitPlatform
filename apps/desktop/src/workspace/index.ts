@@ -119,7 +119,7 @@ export interface WorkspaceSnapshot {
   hasCircuit: boolean;
   /**
    * 工作区自当前电路加载以来完成的推进次数，只增不减，是界面上唯一的步数。
-   * 引擎的 `ticked.step` 是另一个量——它属于引擎当前那份仿真状态，结构变更重建仿真时归零；
+   * 引擎的 `ticked.step` 是另一个量——它只统计 `tick`，而这里每完成一次求值就加一；
    * 状态文案、设置页与波形标签都读这个本地计数，因此界面上不会出现两个对不上的数字。
    */
   simulationStep: number;
@@ -148,7 +148,10 @@ export interface Workspace {
   checkEngine(): Promise<WorkspaceSnapshot>;
   /** 把一份电路文档整体推送到引擎，并返回本次会话的编辑器 ID → 引擎 ID 绑定。 */
   loadCircuit(document: CircuitDocument): Promise<CircuitLoadResult>;
-  /** 由编辑器会话在结构提交后更新仿真所使用的临时引擎身份。 */
+  /**
+   * 由编辑器会话在结构提交后更新仿真所使用的临时引擎身份。
+   * 只有拓扑真的变了才把连续运行切到暂停，并按元件身份保留已积累的读数；内容相同的绑定原样返回。
+   */
   rebindSimulation(bindings: SimulationBindings | null): WorkspaceSnapshot;
   runSimulation(): Promise<WorkspaceSnapshot>;
   /**
@@ -200,6 +203,11 @@ interface MutableState {
   outputValue: Signal;
   hasCircuit: boolean;
   runtimeBindings: RuntimeSimulationBindings | null;
+  /**
+   * 上一次绑定的原始形态。仿真只关心从它推导出的运行时身份，但「拓扑是否真的变了」必须拿
+   * 原始绑定来比：连接不参与运行时身份，却是实打实的拓扑。
+   */
+  lastBindings: SimulationBindings | null;
   simulationStep: number;
   waveform: WaveformPoint[];
 }
@@ -240,6 +248,55 @@ const observableInputPorts: Readonly<Partial<Record<ComponentKindName, string>>>
   output: "in",
 };
 
+/**
+ * 比较两份「编辑器 ID → 引擎 ID」映射。键集合与取值都一致才算没变。
+ * @param left 上一份映射。
+ * @param right 这一份映射。
+ * @returns 两份映射表达同一批引擎身份时返回 true。
+ */
+function sameIdentityMap(
+  left: Readonly<Record<string, unknown>>,
+  right: Readonly<Record<string, unknown>>,
+): boolean {
+  const keys = Object.keys(left);
+  if (keys.length !== Object.keys(right).length) return false;
+  return keys.every((key) => left[key] === right[key]);
+}
+
+/**
+ * 判断一次绑定更新是否真的改动了拓扑。
+ * 只移动元件或改 Route 的编辑不会分配新的引擎身份，`publishBindings` 也不会为它们触发；
+ * 因此这里相等就表示电路结构没变，运行态与已积累的读数都不该被动到。
+ * @param left 上一份绑定。
+ * @param right 这一份绑定。
+ * @returns 元件、连接与元件类型三份映射都一致时返回 true。
+ */
+function sameBindings(left: SimulationBindings | null, right: SimulationBindings | null): boolean {
+  if (left === null || right === null) return left === right;
+  return sameIdentityMap(left.components, right.components) &&
+    sameIdentityMap(left.connections ?? {}, right.connections ?? {}) &&
+    sameIdentityMap(left.componentKinds ?? {}, right.componentKinds ?? {});
+}
+
+/**
+ * 按新的绑定集合裁剪信号读数：仍然存在的键保留当前值，消失的键连同它的值一起丢弃。
+ * 这是引擎「结构变更按元件身份保留状态」在编辑器键空间上的同一条规则。
+ * @param signals 上一次求值得到的读数，键为 `${editorComponentId}:${portId}`。
+ * @param bindings 结构变更后重新推导出的运行时绑定。
+ * @returns 只保留当前绑定里仍然存在的键的新读数表。
+ */
+function pruneSignals(
+  signals: Readonly<Record<string, Signal>>,
+  bindings: RuntimeSimulationBindings,
+): Record<string, Signal> {
+  const liveKeys = new Set([
+    ...bindings.inputs.map((binding) => `${binding.key}:out`),
+    ...bindings.observedSignals.map((binding) => binding.key),
+    ...bindings.outputs.map((binding) => binding.key),
+  ]);
+  return Object.fromEntries(Object.entries(signals).filter(([key]) => liveKeys.has(key)));
+}
+
 function isErrorResponse(response: EngineResponse): response is Extract<EngineResponse, { type: "error" }> {
   return response.type === "error";
 }
@@ -276,6 +333,7 @@ function createInitialState(): MutableState {
     outputValue: "X",
     hasCircuit: false,
     runtimeBindings: null,
+    lastBindings: null,
     simulationStep: 0,
     waveform: [],
   };
@@ -573,6 +631,7 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
       const bindings: SimulationBindings = { components, connections, componentKinds };
       const runtimeBindings = runtimeBindingsFrom(bindings);
       state.runtimeBindings = runtimeBindings;
+      state.lastBindings = bindings;
       if (runtimeBindings) {
         state.inputValues = valuesForBindings(runtimeBindings, state.inputValues, state.inputA, state.inputB);
       }
@@ -591,6 +650,7 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
         try { await adapter.removeComponent(componentId); } catch { /* 保留原始创建错误。 */ }
       }
       state.runtimeBindings = null;
+      state.lastBindings = null;
       state.hasCircuit = false;
     } finally {
       state.isBusy = false;
@@ -607,18 +667,30 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
   }
 
   function rebindSimulation(bindings: SimulationBindings | null): WorkspaceSnapshot {
+    // 只有拓扑真的变了才算结构修改。位置、Route 与线色不会分配新的引擎身份，
+    // 因此这类更新既不该停掉连续运行，也不该动到已积累的读数。
+    if (sameBindings(state.lastBindings, bindings)) {
+      return createWorkspaceSnapshot(state);
+    }
+
     // 结构修改把连续运行切到暂停：电路变了，要不要接着跑由用户显式决定。
     if (state.simulationState === "running") {
       cancelTick();
       state.simulationState = "paused";
       state.message = "电路结构已修改，连续运行已暂停。";
     }
+
+    state.lastBindings = bindings;
     state.runtimeBindings = bindings ? runtimeBindingsFrom(bindings) : null;
-    state.signals = {};
-    state.outputValue = "X";
     if (state.runtimeBindings) {
+      // 按元件身份保留已积累的运行时状态：还在的端口读数留着，消失的键连同它的值一起丢弃。
+      // 引擎侧同样按身份保留，因此这里留下的读数下一拍就能对上。
+      state.signals = pruneSignals(state.signals, state.runtimeBindings);
       commitInputValues(valuesForBindings(state.runtimeBindings, state.inputValues, state.inputA, state.inputB));
     } else {
+      // 没有任何元件可仿真：读数没有载体，运行态回到起点。
+      state.signals = {};
+      state.outputValue = "X";
       state.simulationState = "stopped";
     }
     return createWorkspaceSnapshot(state);
