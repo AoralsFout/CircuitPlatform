@@ -73,13 +73,16 @@ Subcircuit 是 Project 与编辑器层的概念，在进入引擎之前就已经
 - `Simulation(Circuit)`：从 Circuit 创建独立仿真快照；
 - `setInput`：设置 Input 元件的输出值；
 - `settle`：重复求值直到输出稳定，并返回 `SimulationResult`；
+- `tick`：推进一个 tick——翻转全部 Clock、求值到稳定、让时序元件完成采样、再求值一次——并返回 `SimulationResult`；
+- `step`：返回从创建以来推进的 tick 次数；
+- `outputSignals`：返回电路中全部输出端口的当前信号，供一次响应带回整份读数；
 - `signal`：读取端口当前的 SignalValue。
 
-当前切片实现 `Input`、`NotGate`、`AndGate`、`OrGate`、`NandGate`、`NorGate`、`XorGate`、`XnorGate` 和 `Output` 的组合行为，并能报告组合逻辑环路。未连接输入的值为 `Unknown`；不存在的端口返回空值。更丰富的通用仿真错误将在后续切片中加入。
+当前切片实现 `Input`、`NotGate`、`AndGate`、`OrGate`、`NandGate`、`NorGate`、`XorGate`、`XnorGate`、`Output` 和 `Clock` 的行为，并能报告组合逻辑环路。`Clock` 的输出初值是 `0`（`0 → 1` 才算上升沿，从 `X` 起步会永远判不出第一次边沿），每推进一次翻转一次；其余元件的输出初值仍是 `Unknown`。未连接输入的值为 `Unknown`；不存在的端口返回空值。更丰富的通用仿真错误将在后续切片中加入。
 
 ## 当前外部接口
 
-Electron 主进程通过 JSON Lines 长连接调用引擎。当前协议提供 `health_check`、`add_component`、`add_connection`、`remove_component`、`remove_connection`、`set_input`、`settle` 和 `get_signal` 八类请求，详细字段和错误格式见 [引擎 JSON Lines 协议](protocol.md)。
+Electron 主进程通过 JSON Lines 长连接调用引擎。当前协议提供 `health_check`、`add_component`、`add_connection`、`remove_component`、`remove_connection`、`set_input`、`settle`、`tick` 和 `get_signal` 九类请求，详细字段和错误格式见 [引擎 JSON Lines 协议](protocol.md)。
 
 这是一个刻意偏小的垂直切片：先让“创建结构 → 设置输入 → 稳定求值 → 读取输出”跑通，目前已扩展删除协议，后续继续实现时钟、时序状态和持久化。当前桌面 UI 已通过业务 IPC 创建并运行 AND 示例、切换输入、稳定求值和读取输出；画布位置与视觉连线仍只属于编辑器模型，不会进入仿真引擎。后续图形编辑器切片和验收顺序见[项目路线图](roadmap.md)。
 

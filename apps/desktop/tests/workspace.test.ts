@@ -22,6 +22,7 @@ type Call =
   | { type: "removeConnection"; connectionId: number }
   | { type: "setInput"; componentId: number; value: Signal }
   | { type: "settle" }
+  | { type: "tick" }
   | { type: "getSignal"; componentId: number; port: string };
 
 /**
@@ -33,6 +34,9 @@ class FakeEngine implements EngineAdapter {
   nextComponentId = 1;
   nextConnectionId = 1;
   errorOn: Call["type"] | null = null;
+  step = 0;
+  /** Clock 的输出初值为 0，每推进一次翻转一次。 */
+  private readonly clocks = new Map<number, Signal>();
   private readonly kinds = new Map<number, ComponentKindName>();
   private readonly inputs = new Map<number, Signal>();
   private readonly connections: { source: { componentId: number; port: string }; target: { componentId: number; port: string } }[] = [];
@@ -82,6 +86,23 @@ class FakeEngine implements EngineAdapter {
     return { type: "settled", requestId: "fake", status: "ok" };
   }
 
+  async tick(): Promise<EngineResponse> {
+    this.calls.push({ type: "tick" });
+    if (this.errorOn === "tick") return this.error("推进一步失败");
+    this.step += 1;
+    for (const [componentId, kind] of this.kinds) {
+      if (kind === "clock") this.clocks.set(componentId, this.clocks.get(componentId) === 1 ? 0 : 1);
+    }
+    // 快照覆盖每一个可观察的输出端口，因此工作区不必再逐端口 get_signal。
+    const signals = [...this.kinds].flatMap(([componentId, kind]) => {
+      const port = fakeOutputPorts[kind];
+      return port === undefined
+        ? []
+        : [{ componentId, port, value: this.evaluate(componentId, port, 0) }];
+    });
+    return { type: "ticked", requestId: "fake", step: this.step, signals };
+  }
+
   async getSignal(componentId: number, port: string): Promise<EngineResponse> {
     this.calls.push({ type: "getSignal", componentId, port });
     if (this.errorOn === "getSignal") return this.error("读取输出失败");
@@ -92,6 +113,7 @@ class FakeEngine implements EngineAdapter {
     if (depth > 16) return "X";
     const kind = this.kinds.get(componentId);
     if (kind === undefined) return "X";
+    if (kind === "clock") return this.clocks.get(componentId) ?? 0;
     if (kind === "input") return this.inputs.get(componentId) ?? 0;
     if (kind === "output") return this.resolveInto(componentId, port, depth);
     if (kind === "not") return invert(this.resolveInto(componentId, "in", depth));
@@ -120,6 +142,15 @@ function invert(value: Signal): Signal {
   if (value === "X") return "X";
   return value === 1 ? 0 : 1;
 }
+
+/** FakeEngine 认识的、带可观察输出端口的元件类型；真正的时序语义仍由 C++ 测试负责。 */
+const fakeOutputPorts: Readonly<Partial<Record<ComponentKindName, string>>> = {
+  input: "out",
+  clock: "out",
+  not: "out",
+  and: "out",
+  d_flip_flop: "q",
+};
 
 /** 与 `useWorkspace` 相同的桥接：工作区绑定是可选的，编辑器绑定要求 connections 存在。 */
 function bindingsFrom(loaded: SimulationBindings): EditorBindings {
@@ -317,6 +348,72 @@ test("reads every Output component's own signal instead of reusing the first one
 
   assert.equal(signalAt("inverted"), 0);
   assert.equal(signalAt("direct"), 1);
+});
+
+/** Clock 驱动一个 Output 的最小文档；它没有 Input，因此只由推进改变。 */
+function clockDocument(): EditorDocument {
+  return {
+    components: [
+      { id: "clock", kind: "clock", displayName: "Clock", position: { x: 0, y: 0 }, lifecycle: "active" },
+      { id: "monitor", kind: "output", displayName: "输出", position: { x: 400, y: 0 }, lifecycle: "active" },
+    ],
+    connections: [
+      { id: "wire", source: { componentId: "clock", port: "out", point: { x: 100, y: 50 } }, target: { componentId: "monitor", port: "in", point: { x: 400, y: 50 } }, lifecycle: "visible", danglingEndpoints: [] },
+    ],
+  };
+}
+
+test("advances the clock one tick per single step with a single round trip", async () => {
+  const engine = new FakeEngine();
+  const workspace = createWorkspace(engine);
+  await workspace.checkEngine();
+  const document = clockDocument();
+  const loaded = await workspace.loadCircuit(document);
+  const registry = createComponentDefinitionRegistry();
+
+  // Clock 的输出初值是 0 而不是 X，否则永远判不出第一次上升沿。
+  assert.equal(loaded.snapshot.signals["clock:out"], 0);
+
+  engine.calls.length = 0;
+  const first = await workspace.step();
+
+  // 一次推进只有一次跨进程往返：不再逐端口 get_signal。
+  assert.deepEqual(engine.calls.map((call) => call.type), ["tick"]);
+  assert.equal(first.signals["clock:out"], 1);
+
+  const scene = projectCanvasScene(
+    editorSnapshotOf(document),
+    createSimulationSnapshot(editorSnapshotOf(document), registry, {
+      inputA: first.inputA,
+      inputB: first.inputB,
+      inputValues: first.inputValues,
+      signals: first.signals,
+    }),
+    registry,
+  );
+  // 接收端的值由场景投影沿 Connection 推导，因此画布、检查器与输出面板读的是同一次推进。
+  assert.equal(scene.nodes.find((node) => node.id === "monitor")?.ports.find((port) => port.id === "in")?.signal, 1);
+  assert.equal(scene.wires.find((wire) => wire.id === "wire")?.signal, 1);
+
+  const second = await workspace.step();
+  assert.deepEqual(engine.calls.map((call) => call.type), ["tick", "tick"]);
+  assert.equal(second.signals["clock:out"], 0);
+  assert.equal(second.canRun, true);
+});
+
+test("surfaces a failed tick without leaving the workspace stuck", async () => {
+  const engine = new FakeEngine();
+  const workspace = createWorkspace(engine);
+  await workspace.checkEngine();
+  await workspace.loadCircuit(clockDocument());
+  engine.errorOn = "tick";
+
+  const state = await workspace.step();
+
+  assert.equal(state.operationError, "推进一步失败");
+  assert.equal(state.engineState, "ready");
+  assert.equal(state.simulationState, "idle");
+  assert.equal(state.canRun, true);
 });
 
 test("refreshes the AND output signal immediately after creating its output wire", async () => {

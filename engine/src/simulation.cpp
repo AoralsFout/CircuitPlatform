@@ -122,12 +122,17 @@ std::optional<SignalValue> evaluateBinaryGate(
 
 }  // namespace
 
-// 建立仿真快照，并将所有输出端初始化为 Unknown。
+// Clock 的输出初值必须是 0：只有 0 → 1 算上升沿，从 X 起步会永远判不出第一次边沿。
+SignalValue initialOutputValue(ComponentKind kind) {
+    return kind == ComponentKind::Clock ? SignalValue::Zero : SignalValue::Unknown;
+}
+
+// 建立仿真快照，并把每个输出端初始化为该元件类型的初值。
 Simulation::Simulation(Circuit circuit) : circuit_(std::move(circuit)) {
     for (const auto& component : circuit_.components_) {
         for (const auto& port : component.ports) {
             if (port.direction == PortDirection::Output) {
-                signals_.push_back({{component.id, port.name}, SignalValue::Unknown});
+                signals_.push_back({{component.id, port.name}, initialOutputValue(component.kind)});
             }
         }
     }
@@ -205,6 +210,56 @@ SimulationResult Simulation::settle() {
     }
 
     return {SimulationError::CombinationalLoop};
+}
+
+// 六步顺序本身就是语义：先记前值，再推进时钟，求值到稳定后才判边沿，判完再求值一次。
+SimulationResult Simulation::tick() {
+    // ① 记录每个 DFlipFlop 在它 clock 端口上当前观测到的值，作为本次 tick 的前值。
+    previousClockValues_.clear();
+    for (const auto& component : circuit_.components_) {
+        if (component.kind != ComponentKind::DFlipFlop) {
+            continue;
+        }
+        const PortId clockPort{component.id, "clock"};
+        previousClockValues_.push_back({clockPort, signal(clockPort).value_or(SignalValue::Unknown)});
+    }
+
+    // ② 推进每个 Clock 元件：out 在 0 与 1 之间翻转。初值是 0，因此第一次推进必然是 0 → 1。
+    for (const auto& component : circuit_.components_) {
+        if (component.kind != ComponentKind::Clock) {
+            continue;
+        }
+        const PortId outPort{component.id, "out"};
+        const auto next = outputSignal(outPort) == SignalValue::One ? SignalValue::Zero : SignalValue::One;
+        setOutputSignal(outPort, next);
+    }
+
+    // ③ 组合求值到稳定，让新的时钟电平经组合逻辑传播到 DFlipFlop 的 clock 端口。
+    if (const auto advance = settle(); !advance.succeeded()) {
+        return advance;
+    }
+
+    // ④ DFlipFlop 的边沿采样：比较 previousClockValues_ 与 clock 端口当前值，
+    //    只在 0 → 1 时把 d 采样进 q，其余情况保持 q。本票不实现，由 #20 在此接入。
+    //    判边沿所需的前值已经由第 ① 步记录，采样后的新 q 需要在第 ④ 步之后传播，
+    //    因此 #20 的代码应当放在这里、第 ⑤ 步之前。
+
+    // ⑤ 再次组合求值到稳定，让采样后的 q 变化传播到下游。
+    if (const auto propagated = settle(); !propagated.succeeded()) {
+        return propagated;
+    }
+
+    // ⑥ tick 计数自增。
+    ++step_;
+    return {SimulationError::None};
+}
+
+std::uint64_t Simulation::step() const noexcept {
+    return step_;
+}
+
+const std::vector<Simulation::PortSignal>& Simulation::outputSignals() const noexcept {
+    return signals_;
 }
 
 // 输出端直接读取保存值；输入端沿 Connection 读取来源输出值。

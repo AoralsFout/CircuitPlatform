@@ -27,6 +27,7 @@ export interface EngineAdapter {
   removeConnection(connectionId: number): Promise<EngineResponse>;
   setInput(componentId: number, value: Signal): Promise<EngineResponse>;
   settle(): Promise<EngineResponse>;
+  tick(): Promise<EngineResponse>;
   getSignal(componentId: number, port: string): Promise<EngineResponse>;
 }
 
@@ -76,7 +77,11 @@ export interface WorkspaceSnapshot {
   inputValues: Readonly<Record<InputKey, BinarySignal>>;
   /** 最近一次稳定求值后的端口信号，键为 `${editorComponentId}:${portId}`。 */
   signals: Readonly<Record<string, Signal>>;
-  /** 兼容投影：文档中第一个 Output 元件的值；全部输出见 `signals`。 */
+  /**
+   * 兼容投影：文档中第一个 Output 元件的值；全部输出见 `signals`。
+   * 它由提交输入并稳定求值的路径刷新；`step` 只带回输出 Port 的快照，接收端由场景投影
+   * 沿 Connection 推导，因此这条兼容标量在单步之后保持上一次求值的读数。
+   */
   outputValue: Signal;
   hasCircuit: boolean;
   simulationStep: number;
@@ -95,6 +100,8 @@ export interface Workspace {
   /** 由编辑器会话在结构提交后更新仿真所使用的临时引擎身份。 */
   rebindSimulation(bindings: SimulationBindings | null): WorkspaceSnapshot;
   runSimulation(): Promise<WorkspaceSnapshot>;
+  /** 推进仿真一个 tick，并用响应带回的输出 Port 快照刷新信号。 */
+  step(): Promise<WorkspaceSnapshot>;
   toggleInput(key: InputKey): Promise<WorkspaceSnapshot>;
   snapshot(): WorkspaceSnapshot;
 }
@@ -461,6 +468,62 @@ export function createWorkspace(adapter: EngineAdapter): Workspace {
     return createWorkspaceSnapshot(state);
   }
 
+  /**
+   * 推进一个 tick。响应一次带回电路中全部输出 Port 的当前值，因此每步只有一次跨进程往返，
+   * 往返次数不随电路规模增长；Output 这类接收端的值继续由场景投影沿 Connection 推导。
+   */
+  async function stepInternal(bindings: RuntimeSimulationBindings): Promise<boolean> {
+    state.simulationState = "running";
+    state.operationError = null;
+    try {
+      const ticked = expectResponse(await adapter.tick(), "ticked");
+
+      // 引擎按引擎身份回传快照，这里映射回工作区既有的 `${editorId}:${portId}` 键空间。
+      const enginePorts = new Map(
+        ticked.signals.map((signal) => [`${signal.componentId}:${signal.port}`, signal.value]),
+      );
+      const observedSignals: Record<string, Signal> = {};
+      for (const binding of bindings.observedSignals) {
+        const value = enginePorts.get(`${binding.componentId}:${binding.port}`);
+        if (value !== undefined) observedSignals[binding.key] = value;
+      }
+
+      // Input 的值来自工作区已提交的输入，不由引擎快照覆盖。
+      state.signals = {
+        ...Object.fromEntries(
+          bindings.inputs.map((binding) => [`${binding.key}:out`, state.inputValues[binding.key] ?? 0]),
+        ),
+        ...observedSignals,
+      };
+      state.simulationStep += 1;
+      state.waveform.push({
+        step: state.simulationStep,
+        a: state.inputA,
+        b: state.inputB,
+        output: state.outputValue,
+      });
+      state.message = `已推进到第 ${ticked.step} 步。`;
+      return true;
+    } catch (error) {
+      state.message = errorMessage(error, "推进失败。");
+      state.operationError = state.message;
+      if (!(error instanceof ProtocolResponseError)) state.engineState = "error";
+      return false;
+    } finally {
+      state.simulationState = "idle";
+    }
+  }
+
+  async function step(): Promise<WorkspaceSnapshot> {
+    if (!state.runtimeBindings || state.isBusy || state.simulationState === "running") {
+      return createWorkspaceSnapshot(state);
+    }
+    state.isBusy = true;
+    await stepInternal(state.runtimeBindings);
+    state.isBusy = false;
+    return createWorkspaceSnapshot(state);
+  }
+
   async function toggleInput(key: InputKey): Promise<WorkspaceSnapshot> {
     if (!state.runtimeBindings || state.isBusy || state.simulationState === "running") {
       return createWorkspaceSnapshot(state);
@@ -478,6 +541,7 @@ export function createWorkspace(adapter: EngineAdapter): Workspace {
     loadCircuit,
     rebindSimulation,
     runSimulation,
+    step,
     toggleInput,
     snapshot: () => createWorkspaceSnapshot(state),
   };

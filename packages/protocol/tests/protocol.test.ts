@@ -4,11 +4,13 @@ import {
   createHealthCheck,
   createRemoveComponent,
   createRemoveConnection,
+  createTick,
   isComponentRemovedResponse,
   isConnectionRemovedResponse,
   isRemoveComponentRequest,
   isRemoveConnectionRequest,
   isSignal,
+  isTickedResponse,
 } from "../src/index.ts";
 
 test("creates a health check request", () => {
@@ -53,6 +55,70 @@ test("recognizes removal requests and successful responses", () => {
     isConnectionRemovedResponse({ type: "connection_removed", requestId: "request-7", connectionId: 11 }),
     true,
   );
+});
+
+test("creates a tick request without any payload", () => {
+  assert.equal(JSON.stringify(createTick("request-12")), '{"type":"tick","requestId":"request-12"}');
+});
+
+test("recognizes a ticked response carrying the step and every output port", () => {
+  assert.equal(
+    isTickedResponse({
+      type: "ticked",
+      requestId: "request-13",
+      step: 7,
+      signals: [
+        { componentId: 3, port: "out", value: 1 },
+        { componentId: 5, port: "q", value: "X" },
+      ],
+    }),
+    true,
+  );
+  // 空电路也必须合法：没有输出端口时 signals 是空数组。
+  assert.equal(
+    isTickedResponse({ type: "ticked", requestId: "request-14", step: 0, signals: [] }),
+    true,
+  );
+});
+
+test("rejects malformed ticked responses", () => {
+  assert.equal(isTickedResponse({ type: "ticked", requestId: "request-15", step: 1 }), false);
+  assert.equal(
+    isTickedResponse({ type: "ticked", requestId: "request-16", step: -1, signals: [] }),
+    false,
+  );
+  assert.equal(
+    isTickedResponse({ type: "ticked", requestId: "request-17", step: 1.5, signals: [] }),
+    false,
+  );
+  assert.equal(
+    isTickedResponse({
+      type: "ticked",
+      requestId: "request-18",
+      step: 1,
+      signals: [{ componentId: 0, port: "out", value: 1 }],
+    }),
+    false,
+  );
+  assert.equal(
+    isTickedResponse({
+      type: "ticked",
+      requestId: "request-19",
+      step: 1,
+      signals: [{ componentId: 3, port: "out", value: 2 }],
+    }),
+    false,
+  );
+  assert.equal(
+    isTickedResponse({
+      type: "ticked",
+      requestId: "request-20",
+      step: 1,
+      signals: [{ componentId: 3, value: 1 }],
+    }),
+    false,
+  );
+  assert.equal(isTickedResponse({ type: "settled", requestId: "request-21", status: "ok" }), false);
 });
 
 test("rejects malformed removal messages", () => {

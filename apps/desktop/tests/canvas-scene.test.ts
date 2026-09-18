@@ -36,8 +36,12 @@ test("registry exposes complete display definitions and searchable aliases", () 
   assert.equal(and?.ports.length, 3);
   assert.equal(and?.available, true);
   assert.equal(registry.search("与门").some((definition) => definition.kind === "and"), true);
-  assert.equal(registry.get("clock")?.available, false);
-  assert.equal(typeof registry.get("clock")?.disabledReason, "string");
+  // Clock 已经可以添加，描述与「每推进一次翻转一次」的真实行为一致。
+  assert.equal(registry.get("clock")?.available, true);
+  assert.equal(registry.get("clock")?.disabledReason, null);
+  assert.match(registry.get("clock")?.description ?? "", /翻转/);
+  assert.equal(registry.get("d_flip_flop")?.available, false);
+  assert.equal(typeof registry.get("d_flip_flop")?.disabledReason, "string");
 });
 
 test("projects non-default editor identities through explicit routes and signal state", () => {

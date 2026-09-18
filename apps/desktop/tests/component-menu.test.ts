@@ -23,9 +23,10 @@ test("component menu groups recent items before categories and caps them at five
   assert.equal(groups.map((group) => group.id).join(","), "recent,input-output,logic,sequential");
 });
 
-test("disabled sequential definitions remain visible with an explanation", () => {
+test("sequential definitions expose the clock and keep the flip-flop explained", () => {
   const sequential = createComponentMenuGroups(definitions).find((group) => group.id === "sequential");
-  assert.equal(sequential?.definitions.find((item) => item.kind === "clock")?.available, false);
+  // Clock 已解除禁用；D Flip-Flop 仍附带可展示的禁用原因。
+  assert.equal(sequential?.definitions.find((item) => item.kind === "clock")?.available, true);
   assert.match(sequential?.definitions.find((item) => item.kind === "d_flip_flop")?.disabledReason ?? "", /时序/);
 });
 

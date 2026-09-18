@@ -18,7 +18,7 @@ const {
   editorState,
   bootstrap,
   checkEngine,
-  runSimulation,
+  step,
   toggleInput,
   select,
   moveComponent,
@@ -214,7 +214,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
         <p v-if="editorState?.operation === 'recovery-required'" class="bottom-error" role="alert">编辑器与仿真引擎的结构状态可能不一致。请关闭并重新打开应用后再继续编辑。</p>
         <EditorToolbar
           :zoom-label="zoomLabel"
-          :can-run="state.canRun"
+          :can-step="state.canRun"
           :can-undo="editorState?.operation === 'idle' && !editorState.confirmation && editorState.canUndo"
           :can-redo="editorState?.operation === 'idle' && !editorState.confirmation && editorState.canRedo"
           :can-delete="editorState?.operation === 'idle' && !editorState.confirmation && Boolean(editorState.selection)"
@@ -223,7 +223,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           :simulation-state="state.simulationState"
           @adjust-zoom="adjustZoom"
           @reset-zoom="fitViewport"
-          @run-simulation="runSimulation"
+          @step-simulation="step"
           @undo="undo"
           @redo="redo"
           @delete-selection="deleteSelection"

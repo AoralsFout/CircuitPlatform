@@ -155,6 +155,29 @@ std::string handleRequest(
         return responseWithId("settled", request.requestId) + ",\"status\":\"ok\"}";
     }
 
+    if (request.type == "tick") {
+        if (!simulation.has_value()) resetSimulation(circuit, simulation);
+        const auto result = simulation->tick();
+        if (!result.succeeded()) {
+            return protocol::errorResponse(request.requestId, "combinational_loop", "检测到组合逻辑环路");
+        }
+
+        // 一次推进就把全部输出端口的当前值带回，运行循环每步因此只有一次跨进程往返。
+        std::string signals = ",\"signals\":[";
+        bool first = true;
+        for (const auto& signal : simulation->outputSignals()) {
+            if (!first) signals += ",";
+            first = false;
+            signals += "{\"componentId\":" + std::to_string(signal.port.component) +
+                       ",\"port\":\"" + protocol::escapeJson(signal.port.name) + "\",\"value\":" +
+                       signalValueToJson(signal.value) + "}";
+        }
+        signals += "]}";
+
+        return responseWithId("ticked", request.requestId) +
+               ",\"step\":" + std::to_string(simulation->step()) + signals;
+    }
+
     if (request.type == "get_signal") {
         if (!request.componentId.has_value()) return missingField(request, "componentId");
         if (!request.port.has_value()) return missingField(request, "port");

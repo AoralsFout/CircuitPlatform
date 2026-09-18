@@ -28,6 +28,8 @@ interface WorkspaceBinding {
   bootstrap(): Promise<void>;
   checkEngine(): Promise<void>;
   runSimulation(): Promise<void>;
+  /** 推进仿真一个 tick；工具栏的「单步」是界面上唯一的推进原语。 */
+  step(): Promise<void>;
   toggleInput(key: InputKey): Promise<void>;
   select(selection: EditorSelection): Promise<void>;
   moveComponent(componentId: EditorComponentId, position: Point): Promise<void>;
@@ -137,6 +139,10 @@ export function useWorkspace(): WorkspaceBinding {
     await reflect(() => workspace.runSimulation());
   }
 
+  async function step(): Promise<void> {
+    await reflect(() => workspace.step());
+  }
+
   async function toggleInput(key: InputKey): Promise<void> {
     await reflect(() => workspace.toggleInput(key));
   }
@@ -221,6 +227,7 @@ export function useWorkspace(): WorkspaceBinding {
     bootstrap: checkEngine,
     checkEngine,
     runSimulation,
+    step,
     toggleInput,
     select: (selection) => dispatch({ type: "select", selection }),
     moveComponent: (componentId, position) => dispatch({ type: "move-component", componentId, position }),

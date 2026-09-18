@@ -177,5 +177,45 @@ int main() {
     assert(connectedCircuit.component(connectedOutput).has_value());
     assert(connectedSimulation->signal({connectedOutput, "in"}) == circuit::SignalValue::Unknown);
 
+    // 一次推进把全部输出端口的当前值与步数一起带回，取代按端口逐条 get_signal。
+    circuit::Circuit clockCircuit;
+    const auto clockComponent = clockCircuit.addComponent(circuit::ComponentKind::Clock);
+    const auto inverter = clockCircuit.addComponent(circuit::ComponentKind::NotGate);
+    const auto clockOutput = clockCircuit.addComponent(circuit::ComponentKind::Output);
+    assert(clockCircuit.addConnection({clockComponent, "out"}, {inverter, "in"}).succeeded());
+    assert(clockCircuit.addConnection({inverter, "out"}, {clockOutput, "in"}).succeeded());
+    std::optional<circuit::Simulation> clockSimulation;
+
+    const auto firstTick = dispatch(
+        R"({"type":"tick","requestId":"tick-1"})", clockCircuit, clockSimulation);
+    assert(firstTick.find("\"type\":\"ticked\"") != std::string::npos);
+    assert(firstTick.find("\"requestId\":\"tick-1\"") != std::string::npos);
+    assert(firstTick.find("\"step\":1") != std::string::npos);
+    assert(firstTick.find(
+               "{\"componentId\":1,\"port\":\"out\",\"value\":1}") != std::string::npos);
+    assert(firstTick.find(
+               "{\"componentId\":2,\"port\":\"out\",\"value\":0}") != std::string::npos);
+
+    const auto secondTick = dispatch(
+        R"({"type":"tick","requestId":"tick-2"})", clockCircuit, clockSimulation);
+    assert(secondTick.find("\"step\":2") != std::string::npos);
+    assert(secondTick.find(
+               "{\"componentId\":1,\"port\":\"out\",\"value\":0}") != std::string::npos);
+    assert(secondTick.find(
+               "{\"componentId\":2,\"port\":\"out\",\"value\":1}") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"get_signal","requestId":"read-after-tick","componentId":3,"port":"in"})",
+               clockCircuit, clockSimulation)
+               .find("\"value\":1") != std::string::npos);
+
+    circuit::Circuit loopCircuit;
+    const auto loopFirst = loopCircuit.addComponent(circuit::ComponentKind::NotGate);
+    const auto loopSecond = loopCircuit.addComponent(circuit::ComponentKind::NotGate);
+    assert(loopCircuit.addConnection({loopFirst, "out"}, {loopSecond, "in"}).succeeded());
+    assert(loopCircuit.addConnection({loopSecond, "out"}, {loopFirst, "in"}).succeeded());
+    std::optional<circuit::Simulation> loopSimulation;
+    assert(dispatch(R"({"type":"tick","requestId":"tick-loop"})", loopCircuit, loopSimulation)
+               .find("\"code\":\"combinational_loop\"") != std::string::npos);
+
     return 0;
 }

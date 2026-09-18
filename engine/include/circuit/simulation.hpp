@@ -32,6 +32,12 @@ struct SimulationResult {
 
 class Simulation {
 public:
+    /** 一个输出端口和它当前的信号值；用于读取整份输出快照。 */
+    struct PortSignal {
+        PortId port;
+        SignalValue value;
+    };
+
     /**
      * 从一份 Circuit 创建独立的组合逻辑仿真。
      * @param circuit 要仿真的电路；Simulation 会保存自己的电路副本。
@@ -53,6 +59,26 @@ public:
     [[nodiscard]] SimulationResult settle();
 
     /**
+     * 往前推进一个 tick：翻转全部 Clock，把新的时钟电平经组合逻辑传播到稳定，
+     * 并在时序元件完成采样后再求值一次。不推进 tick 计数之外的任何引擎侧状态，
+     * 也不引入定时器——每一步都由调用方显式驱动。
+     * @return 成功时返回 None；任一阶段求值无法稳定时返回 CombinationalLoop。
+     */
+    [[nodiscard]] SimulationResult tick();
+
+    /**
+     * 返回从创建仿真以来成功推进的 tick 次数。
+     * @return 当前步数；初始为 0。
+     */
+    [[nodiscard]] std::uint64_t step() const noexcept;
+
+    /**
+     * 返回电路中全部输出端口当前的信号快照，顺序与元件创建顺序一致。
+     * @return 覆盖每个输出端口的只读快照，供一次响应带回全部读数。
+     */
+    [[nodiscard]] const std::vector<PortSignal>& outputSignals() const noexcept;
+
+    /**
      * 读取指定端口当前的信号值。
      * @param portId 要读取的端口身份。
      * @return 端口存在时返回信号值；不存在时返回空值。未连接输入返回 Unknown。
@@ -60,16 +86,14 @@ public:
     [[nodiscard]] std::optional<SignalValue> signal(PortId portId) const;
 
 private:
-    struct PortSignal {
-        PortId port;
-        SignalValue value;
-    };
-
     bool setOutputSignal(const PortId& portId, SignalValue value);
     [[nodiscard]] SignalValue outputSignal(const PortId& portId) const;
 
     Circuit circuit_;
     std::vector<PortSignal> signals_;
+    std::uint64_t step_{0};
+    /** 本次 tick 开始时每个 DFlipFlop 在 clock 端口观测到的值，即边沿判定的前值。 */
+    std::vector<PortSignal> previousClockValues_;
 };
 
 }  // namespace circuit

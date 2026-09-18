@@ -3,7 +3,7 @@ import type { SimulationState } from "../workspace";
 
 defineProps<{
   zoomLabel: string;
-  canRun: boolean;
+  canStep: boolean;
   canUndo: boolean;
   canRedo: boolean;
   canDelete: boolean;
@@ -15,7 +15,8 @@ defineProps<{
 const emit = defineEmits<{
   adjustZoom: [delta: number];
   resetZoom: [];
-  runSimulation: [];
+  /** 界面上唯一的推进原语：推进一个 tick。 */
+  stepSimulation: [];
   undo: [];
   redo: [];
   deleteSelection: [];
@@ -36,7 +37,7 @@ const emit = defineEmits<{
       <span class="toolbar-rule" aria-hidden="true"></span>
       <button class="tool-button" type="button" @click="emit('adjustZoom', -10)" title="缩小">−</button><span class="zoom-label">{{ zoomLabel }}</span><button class="tool-button" type="button" @click="emit('adjustZoom', 10)" title="放大">＋</button><button class="tool-button tool-button--fit" type="button" @click="emit('resetZoom')" title="适合窗口">适合窗口</button>
       <span class="toolbar-rule" aria-hidden="true"></span>
-      <button class="run-button" type="button" :disabled="!canRun" @click="emit('runSimulation')"><span aria-hidden="true">▶</span>{{ simulationState === "running" ? "仿真中…" : "运行一次" }}</button>
+      <button class="run-button" type="button" :disabled="!canStep" title="推进一个 tick (Step)" @click="emit('stepSimulation')"><span aria-hidden="true">▶</span>{{ simulationState === "running" ? "推进中…" : "单步" }}</button>
     </div>
   </div>
 </template>
