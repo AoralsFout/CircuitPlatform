@@ -138,12 +138,18 @@ button:disabled { cursor: not-allowed; }
 .project-name { color: var(--color-text-muted); font-size: 12px; }
 .save-state { display: inline-flex; align-items: center; gap: 6px; color: var(--color-text-faint); font-size: 10px; }
 .save-dot, .mode-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--color-status-success); box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-status-success) 12%, transparent); }
+/* 脏标记与保存失败复用同一个指示器，只换语义色：不允许在组件里引入主题外颜色。 */
+.save-state--dirty { color: var(--color-status-warning); }
+.save-state--dirty .save-dot { background: var(--color-status-warning); box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-status-warning) 12%, transparent); }
+.save-state--error { color: var(--color-status-error); }
+.save-state--error .save-dot { background: var(--color-status-error); box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-status-error) 12%, transparent); }
 .topbar-actions { gap: 7px; }
 .engine-chip { display: inline-flex; align-items: center; gap: 7px; padding: 6px 9px; border: 1px solid var(--color-border); color: var(--color-text-muted); font-size: 10px; }
 .engine-chip--ready { border-color: color-mix(in srgb, var(--color-status-success) 38%, transparent); color: var(--color-status-success); }
 .engine-chip--error, .engine-chip--unavailable { border-color: color-mix(in srgb, var(--color-status-error) 45%, transparent); color: var(--color-status-error); }
 .pulse-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .topbar-button, .avatar-button { display: grid; width: 30px; height: 30px; place-items: center; border: 1px solid transparent; color: var(--color-text-muted); background: transparent; cursor: pointer; }
+.topbar-button--text { width: auto; padding: 0 9px; font-size: 11px; }
 .topbar-button:hover:not(:disabled) { border-color: var(--color-border); color: var(--color-text); background: var(--color-surface); }
 .topbar-button:disabled { opacity: .45; }
 .ui-icon { font-family: var(--font-data); font-size: 15px; }

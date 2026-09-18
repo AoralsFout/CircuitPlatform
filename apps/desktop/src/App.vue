@@ -46,6 +46,12 @@ const {
   deleteWaypoint,
   createConnection,
   setPortWidthCommand,
+  projectName,
+  saveState,
+  saveError,
+  canSave,
+  save: saveProject,
+  saveAs: saveProjectAs,
 } = useWorkspace();
 const {
   selectedConnection,
@@ -179,6 +185,8 @@ function onEditorKeydown(event: KeyboardEvent): void {
     case "step-simulation": void step(); break;
     case "reset-simulation": void reset(); break;
     case "delete-selection": void deleteSelection(); break;
+    case "save": void saveProject(); break;
+    case "save-as": void saveProjectAs(); break;
     default: {
       // 新增 EditorShortcut 成员时这里会编译失败，避免静默落到删除分支。
       const unhandled: never = shortcut;
@@ -203,8 +211,14 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
       :engine-state-label="engineStateLabel"
       :theme-label="themeLabel"
       :is-busy="state.isBusy || state.engineState === 'checking'"
+      :project-name="projectName"
+      :save-state="saveState"
+      :save-error="saveError"
+      :can-save="canSave"
       @cycle-theme="cycleTheme"
       @check-engine="checkEngine"
+      @save="saveProject"
+      @save-as="saveProjectAs"
     />
 
     <section class="editor-layout" :class="{ 'editor-layout--sidebar-collapsed': !showSidebar || activeRailPage === 'settings' }">
