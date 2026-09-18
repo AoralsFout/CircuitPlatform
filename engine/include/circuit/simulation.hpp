@@ -115,12 +115,14 @@ public:
     /**
      * 返回仍在跟踪时钟前值的 DFlipFlop 数量。
      *
-     * 这条读数不对协议暴露，也不参与求值：它的用处是让测试能断言「删除元件之后不留残留」。
-     * 表中若有已删除元件的条目，那是一条永远不可达、也永远不会释放的残留——元件身份单调递增、
-     * 永不重用，所以残留既不会误触发边沿，也不会被后续任何一次推进清掉。
+     * **这是一个测试观察点，不是仿真契约的一部分。** 它不参与求值，协议层也观察不到它：
+     * 表中若有已删除元件的条目，那是一条永远不可达、也永远不会释放的残留——元件身份单调
+     * 递增、永不重用，残留既不会误触发上升沿，也不会被后续任何一次推进清掉，因此没有任何
+     * 外部行为能区分「裁剪过」与「没裁剪过」。方法名里的 `ForTesting` 就是为了标明这一点，
+     * 避免它被当成可供调用方依赖的公开读数。
      * @return `previousClockValues_` 当前的条目数。
      */
-    [[nodiscard]] std::size_t trackedClockCount() const noexcept;
+    [[nodiscard]] std::size_t trackedClockCountForTesting() const noexcept;
 
     /**
      * 读取指定端口当前的信号值。
@@ -141,9 +143,10 @@ private:
     std::vector<PortSignal> signals_;
     std::uint64_t step_{0};
     /**
-     * 每个 DFlipFlop 在 clock 端口上最近一次观测到的值，即边沿判定的前值。
-     * 快照跨 tick 保留，只在上一 tick 结束时更新；驱动 clock 端口的可能是 Input 元件，
-     * 它的电平变化发生在两次 tick 之间，重新读取当前值会漏掉这类边沿。
+     * 每个 DFlipFlop 在 clock 端口上最近一次观测到的值，即上升沿判定的前值。
+     * 前值的含义是「上一 tick 求值稳定之后观测到的值」：它只在首次遇到该 DFlipFlop 时
+     * 现读一次，其后由第 ④ 步在每次推进末尾写回，跨 tick 保留。驱动 clock 端口的可能是
+     * Input 元件，它的电平变化发生在两次 tick 之间，每次都重新读取当前值会漏掉这类上升沿。
      * 结构变更后由 `reconcile` 裁剪掉已删除 DFlipFlop 的条目，其余原样保留。
      */
     std::vector<PortSignal> previousClockValues_;

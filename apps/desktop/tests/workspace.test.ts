@@ -12,12 +12,13 @@ import {
 import { createProtocolEnginePort } from "../src/editor/protocolEnginePort.ts";
 import { createSimulationSnapshot } from "../src/editor/simulation.ts";
 import { useWorkspace } from "../src/composables/useWorkspace.ts";
+import { createEngineCallQueue } from "../src/workspace/engineQueue.ts";
 import {
   createWorkspace,
   type EngineAdapter,
   type SimulationBindings,
-  type TickScheduler,
 } from "../src/workspace/index.ts";
+import { drain, FakeScheduler } from "./fake-scheduler.ts";
 
 type Call =
   | { type: "checkEngine" }
@@ -168,44 +169,6 @@ function invert(value: Signal): Signal {
   return value === 1 ? 0 : 1;
 }
 
-/**
- * 手动点火的假调度器：注入它就能无头驱动整个连续运行，不必等真实定时器。
- * 同一时刻最多只有一次已排定的推进，因此 `fire()` 也顺带断言了「没有积压」。
- */
-class FakeScheduler implements TickScheduler {
-  scheduled = 0;
-  cancelled = 0;
-  private pending: { run: () => void; cancelled: boolean } | null = null;
-
-  schedule(_delayMs: number, run: () => void): () => void {
-    this.scheduled += 1;
-    const entry = { run, cancelled: false };
-    this.pending = entry;
-    return () => {
-      if (entry.cancelled) return;
-      entry.cancelled = true;
-      this.cancelled += 1;
-      if (this.pending === entry) this.pending = null;
-    };
-  }
-
-  /** 触发已排定的那一次推进；当前没有排定（或已被取消）时返回 false。 */
-  fire(): boolean {
-    const entry = this.pending;
-    this.pending = null;
-    if (!entry || entry.cancelled) return false;
-    entry.run();
-    return true;
-  }
-}
-
-/** 让出宏任务，把工作区里已经排队的微任务全部跑完。 */
-function drain(): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, 0);
-  });
-}
-
 /** FakeEngine 认识的、带可观察输出端口的元件类型；真正的时序语义仍由 C++ 测试负责。 */
 const fakeOutputPorts: Readonly<Partial<Record<ComponentKindName, string>>> = {
   input: "out",
@@ -252,8 +215,9 @@ test("creates and runs the example circuit through the generic document path", a
     componentKinds: { "input-a": "input", "input-b": "input", "and-gate": "and", output: "output" },
   });
   assert.equal(state.outputValue, 1);
-  assert.equal(state.waveform.length, 1);
-  assert.deepEqual(state.waveform[0], { step: 1, a: 1, b: 1, output: 1 });
+  // 加载后的首次稳定求值不是一次推进：步数停在 0，波形历史也还是空的。
+  assert.equal(state.simulationStep, 0);
+  assert.deepEqual(state.waveform, []);
   assert.deepEqual(engine.calls.map((call) => call.type), [
     "checkEngine",
     "addComponent",
@@ -306,10 +270,9 @@ test("toggles an input, runs the circuit, and appends a waveform point", async (
   assert.equal(state.inputA, 0);
   assert.equal(state.inputB, 1);
   assert.equal(state.outputValue, 0);
-  assert.deepEqual(state.waveform, [
-    { step: 1, a: 1, b: 1, output: 1 },
-    { step: 2, a: 0, b: 1, output: 0 },
-  ]);
+  // 切换输入是用户发起的一次推进：它是波形历史里的第一个点，也是第 1 步。
+  assert.deepEqual(state.waveform, [{ step: 1, a: 0, b: 1, output: 0 }]);
+  assert.equal(state.simulationStep, 1);
 });
 
 test("projects the settled AND result onto the gate output wire", async () => {
@@ -470,9 +433,9 @@ test("records the advanced reading in the waveform instead of the previous settl
   await workspace.checkEngine();
   const loaded = await workspace.loadCircuit(clockDocument());
 
-  // 加载时 Clock 的输出是 0，Output 的接收端也是 0。
+  // 加载时 Clock 的输出是 0，Output 的接收端也是 0；这次稳定求值不计步，也不进波形历史。
   assert.equal(loaded.snapshot.outputValue, 0);
-  assert.equal(loaded.snapshot.waveform.at(-1)?.output, 0);
+  assert.deepEqual(loaded.snapshot.waveform, []);
 
   const advanced = await workspace.step();
 
@@ -489,8 +452,9 @@ test("starts, pauses, and resumes continuous running without losing accumulated 
   await workspace.checkEngine();
   const loaded = await workspace.loadCircuit(clockDocument());
   const waveformPoints = loaded.snapshot.waveform.length;
-  // 加载时的稳定求值已经记了一次推进，连续运行从它继续往上加。
+  // 加载时的稳定求值不计步，连续运行从第 0 步往上走。
   const baseStep = loaded.snapshot.simulationStep;
+  assert.equal(baseStep, 0);
   engine.calls.length = 0;
 
   const started = await workspace.start();
@@ -589,6 +553,52 @@ test("queues an input commit behind an in-flight advance while running", async (
   assert.equal(workspace.snapshot().canToggleInput, true);
 });
 
+test("queues a structural commit behind an in-flight advance while running", async () => {
+  const engine = new FakeEngine();
+  const scheduler = new FakeScheduler();
+  // 生产接线就是这样：一条队列同时交给工作区与编辑器端口。
+  // 编辑器发出的结构提交不经过工作区，只有共享同一个队列对象才能与在飞的推进排在一队。
+  const queue = createEngineCallQueue();
+  const workspace = createWorkspace(engine, { scheduler, queue });
+  await workspace.checkEngine();
+  const document = clockDocument();
+  const loaded = await workspace.loadCircuit(document);
+  assert.ok(loaded.bindings);
+  const session = createEditorSession(
+    { document, bindings: bindingsFrom(loaded.bindings) },
+    createProtocolEnginePort(engine, queue),
+    {
+      onBindingsChanged(bindings) {
+        workspace.rebindSimulation(bindings);
+      },
+    },
+  );
+
+  await workspace.start();
+  let release: () => void = () => {};
+  engine.holdTick = () => new Promise<void>((resolve) => { release = resolve; });
+  engine.calls.length = 0;
+
+  scheduler.fire();
+  await drain();
+  const deleting = session.dispatch({ type: "delete-component", componentId: "monitor" });
+  await drain();
+
+  // 推进还在飞，结构提交因此排在它之后：队列外面那条直连 adapter 的路径已经没有了。
+  assert.deepEqual(engine.calls.map((call) => call.type), ["tick"]);
+
+  release();
+  await drain();
+  await deleting;
+
+  const types = engine.calls.map((call) => call.type);
+  assert.equal(types[0], "tick", "那一拍先完成");
+  assert.equal(types[1], "removeComponent", "结构提交紧随其后，不与之交错");
+  // 结构提交完成后照常收尾：工作区按身份保留读数，并把连续运行切到暂停。
+  assert.equal(workspace.snapshot().simulationState, "paused");
+  assert.equal(workspace.snapshot().signals["clock:out"], 1);
+});
+
 test("pauses continuous running when the circuit structure changes", async () => {
   const engine = new FakeEngine();
   const scheduler = new FakeScheduler();
@@ -681,8 +691,8 @@ test("notifies subscribers about each advance the run loop makes on its own", as
   unsubscribe();
   await workspace.pause();
 
-  // 自行排定的每一拍都通知一次；取消订阅后不再收到。
-  assert.deepEqual(observed, [2, 3]);
+  // 自行排定的每一拍都通知一次；取消订阅后不再收到。加载不计步，因此从第 1 步开始。
+  assert.deepEqual(observed, [1, 2]);
 });
 
 test("pauses continuous running when an advance fails instead of repeating the error", async () => {
@@ -816,9 +826,9 @@ test("surfaces a failed reset without half-clearing the readings", async () => {
 
   assert.equal(state.operationError, "重置失败");
   assert.equal(state.engineState, "ready");
-  // 引擎没有重置，因此已读到的读数与步数都不该被清掉。
+  // 引擎没有重置，因此已读到的读数与步数都不该被清掉：加载不计步，那次单步是第 1 步。
   assert.equal(state.signals["clock:out"], 1);
-  assert.equal(state.simulationStep, 2);
+  assert.equal(state.simulationStep, 1);
 });
 
 test("refreshes the AND output signal immediately after creating its output wire", async () => {
@@ -963,14 +973,16 @@ test("rebinds simulation to the new engine ID after undo", async () => {
   const engine = new FakeEngine();
   engine.nextComponentId = 41;
   engine.nextConnectionId = 71;
-  const workspace = createWorkspace(engine);
+  // 与生产接线一致：编辑器端口与工作区共用同一条引擎调用队列。
+  const queue = createEngineCallQueue();
+  const workspace = createWorkspace(engine, { queue });
   await workspace.checkEngine();
   const loaded = await workspace.loadCircuit(createAndDemoDocument());
   assert.ok(loaded.bindings);
 
   const session = createEditorSession(
     { document: createAndDemoDocument(), bindings: bindingsFrom(loaded.bindings) },
-    createProtocolEnginePort(engine),
+    createProtocolEnginePort(engine, queue),
     {
       onBindingsChanged(bindings) {
         workspace.rebindSimulation(bindings);
@@ -983,20 +995,21 @@ test("rebinds simulation to the new engine ID after undo", async () => {
   assert.equal(workspace.snapshot().canStep, true);
 
   engine.calls.length = 0;
-  await workspace.runSimulation();
+  await workspace.refreshReadings();
   assert.deepEqual(engine.calls[0], { type: "setInput", componentId: 45, value: 1 });
   assert.equal(JSON.stringify(session.snapshot()).includes("41"), false);
 });
 
 test("disables simulation after clear and rebinds it after one undo", async () => {
   const engine = new FakeEngine();
-  const workspace = createWorkspace(engine);
+  const queue = createEngineCallQueue();
+  const workspace = createWorkspace(engine, { queue });
   await workspace.checkEngine();
   const loaded = await workspace.loadCircuit(createAndDemoDocument());
   assert.ok(loaded.bindings);
   const session = createEditorSession(
     { document: createAndDemoDocument(), bindings: bindingsFrom(loaded.bindings) },
-    createProtocolEnginePort(engine),
+    createProtocolEnginePort(engine, queue),
     {
       onBindingsChanged(bindings) {
         workspace.rebindSimulation(bindings);

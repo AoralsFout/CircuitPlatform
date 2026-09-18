@@ -1,4 +1,5 @@
 import type { ComponentKindName, EngineResponse, Signal } from "@circuit-platform/protocol";
+import { createEngineCallQueue, type EngineCallQueue } from "./engineQueue.ts";
 
 /** 输入设置项的稳定键；键是编辑器组件 ID，与引擎身份无关。 */
 export type InputKey = string;
@@ -36,6 +37,12 @@ const defaultTickScheduler: TickScheduler = {
 export interface WorkspaceOptions {
   /** 连续运行的调度器；省略时使用 `setTimeout`。 */
   scheduler?: TickScheduler;
+  /**
+   * 引擎调用的串行化队列；省略时新建一条。
+   * 编辑器的结构提交经 `CircuitEnginePort` 走另一条调用路径，只有把**同一条**队列同时交给
+   * 工作区与那个端口，运行中的推进才与结构提交排在同一队里（见 `useWorkspace`）。
+   */
+  queue?: EngineCallQueue;
 }
 
 export interface EngineHealth {
@@ -118,9 +125,12 @@ export interface WorkspaceSnapshot {
   outputValue: Signal;
   hasCircuit: boolean;
   /**
-   * 工作区自当前电路加载以来完成的推进次数，只增不减，是界面上唯一的步数。
-   * 引擎的 `ticked.step` 是另一个量——它只统计 `tick`，而这里每完成一次求值就加一；
-   * 状态文案、设置页与波形标签都读这个本地计数，因此界面上不会出现两个对不上的数字。
+   * 工作区自当前电路加载或上次重置以来**推进电路**的次数，是界面上唯一的步数。
+   * 推进指 `step` 与连续运行发出的 tick；把电路求值到稳定（加载后的首次求值、重置后的
+   * 重新求值、结构变更后的读数刷新）不是推进，不加这个计数——否则同一个「刚求值到稳定的
+   * 状态」会一处显示第 1 步、另一处显示第 0 步。
+   * 引擎的 `ticked.step` 是另一个量：它属于当下那份引擎仿真状态，结构变更后仍保留，
+   * 重置才归零。
    */
   simulationStep: number;
   waveform: readonly WaveformPoint[];
@@ -153,7 +163,13 @@ export interface Workspace {
    * 只有拓扑真的变了才把连续运行切到暂停，并按元件身份保留已积累的读数；内容相同的绑定原样返回。
    */
   rebindSimulation(bindings: SimulationBindings | null): WorkspaceSnapshot;
-  runSimulation(): Promise<WorkspaceSnapshot>;
+  /**
+   * 按当前输入重新求值到稳定，并刷新全部可展示读数；结构变更之后由调用方触发，用来把
+   * 新元件与新连接上的读数补齐。
+   * 它**不推进电路**：不加步数、不追加波形记录，因此不是「运行一次」的入口——界面上唯一的
+   * 推进原语是 `step` 与连续运行。
+   */
+  refreshReadings(): Promise<WorkspaceSnapshot>;
   /**
    * 开始连续运行：反复排定推进，每一次都在上一次响应之后才排定。
    * @returns 置为运行中之后的快照；不可开始时原样返回当前快照。
@@ -278,6 +294,14 @@ function sameBindings(left: SimulationBindings | null, right: SimulationBindings
     sameIdentityMap(left.componentKinds ?? {}, right.componentKinds ?? {});
 }
 
+/** 信号读数的键空间：编辑器元件 ID 加端口名，画布、检查器与波形共用同一套键。 */
+function signalKey(editorComponentId: string, port: string): string {
+  return `${editorComponentId}:${port}`;
+}
+
+/** Input 元件被驱动的输出端口名；它是引擎内置端口定义的一部分，不是可配置项。 */
+const INPUT_OUTPUT_PORT = "out";
+
 /**
  * 按新的绑定集合裁剪信号读数：仍然存在的键保留当前值，消失的键连同它的值一起丢弃。
  * 这是引擎「结构变更按元件身份保留状态」在编辑器键空间上的同一条规则。
@@ -290,7 +314,7 @@ function pruneSignals(
   bindings: RuntimeSimulationBindings,
 ): Record<string, Signal> {
   const liveKeys = new Set([
-    ...bindings.inputs.map((binding) => `${binding.key}:out`),
+    ...bindings.inputs.map((binding) => signalKey(binding.key, INPUT_OUTPUT_PORT)),
     ...bindings.observedSignals.map((binding) => binding.key),
     ...bindings.outputs.map((binding) => binding.key),
   ]);
@@ -384,14 +408,14 @@ function runtimeBindingsFrom(bindings: SimulationBindings): RuntimeSimulationBin
     const kind = bindings.componentKinds?.[id];
     if (kind === undefined) return [];
     const port = observableInputPorts[kind];
-    return port === undefined ? [] : [{ key: `${id}:${port}`, componentId, port }];
+    return port === undefined ? [] : [{ key: signalKey(id, port), componentId, port }];
   });
 
   const observedSignals = components.flatMap(([key, componentId]) => {
     const kind = bindings.componentKinds?.[key];
     if (kind === undefined) return [];
     return (observableOutputPorts[kind] ?? []).map((port) => ({
-      key: `${key}:${port}`,
+      key: signalKey(key, port),
       componentId,
       port,
     }));
@@ -423,15 +447,26 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
   const state = createInitialState();
 
   /**
-   * 引擎调用队列：运行中的推进、输入提交与结构推送共用这一条队列，任意两条请求不交错。
-   * 一条请求进行中到达的请求会排队等待，而不是被丢弃或与前者并发。
+   * 引擎调用队列：运行中的推进、输入提交与工作区自己发起的结构推送共用这一条队列，
+   * 任意两条请求不交错；一条请求进行中到达的请求会排队等待，而不是被丢弃或与前者并发。
+   *
+   * 编辑器发出的结构提交不经过 `Workspace`，它由 `createProtocolEnginePort` 直接调用 adapter。
+   * 那条路径要排进同一条队列，就必须拿到同一个队列对象——`useWorkspace` 因此在这里注入，
+   * 并把同一个实例转交给编辑器端口。只建队列而不共享，等于结构提交仍在队列外面。
    */
-  let engineQueue: Promise<unknown> = Promise.resolve();
+  const queue = options.queue ?? createEngineCallQueue();
 
-  function enqueue<T>(task: () => Promise<T>): Promise<T> {
-    const result = engineQueue.then(task, task);
-    engineQueue = result.then(() => undefined, () => undefined);
-    return result;
+  /**
+   * 统一记录一次引擎操作失败：可展示的文案进 message 与 operationError。
+   * 只有传输层故障（拿不到协议响应）才把引擎打成 `error`；协议内的业务错误说明引擎还在，
+   * 保留 `ready` 让用户能继续操作。
+   * @param error 捕获到的异常。
+   * @param fallback 拿不到异常信息时的兜底文案。
+   */
+  function recordEngineFailure(error: unknown, fallback: string): void {
+    state.message = errorMessage(error, fallback);
+    state.operationError = state.message;
+    if (!(error instanceof ProtocolResponseError)) state.engineState = "error";
   }
 
   /** 连续运行期间每一拍完成后通知的订阅者；调用方发起的操作不需要这条通道。 */
@@ -464,16 +499,21 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
     const bindings = state.runtimeBindings;
     if (state.simulationState !== "running" || bindings === null) return;
     // 自动推进不追加波形记录：波形历史只记录用户发起的推进。
-    const advanced = await enqueue(() => stepInternal(bindings, { record: false }));
+    const advanced = await queue.enqueue(() => stepInternal(bindings, { record: false }));
     if (!advanced) {
       // 推进失败时不继续排定，避免每一拍都重复报同一个错误；用户修好电路后可以继续。
       state.simulationState = "paused";
-      state.message = `${state.operationError ?? "推进失败。"}已暂停在第 ${state.simulationStep} 步。`;
+      state.message = `${state.operationError ?? "推进失败。"}${pausedAtStepMessage()}`;
       notifyAdvanced();
       return;
     }
     scheduleTick();
     notifyAdvanced();
+  }
+
+  /** 「已暂停在第 N 步」的文案；暂停与推进失败自暂停共用同一种说法。 */
+  function pausedAtStepMessage(): string {
+    return `已暂停在第 ${state.simulationStep} 步。`;
   }
 
   /** 把提交后的输入值写回状态，并同步 `inputA` / `inputB` 兼容投影。 */
@@ -532,16 +572,19 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
   }
 
   /**
-   * 提交输入并求值到稳定。默认把这次求值计为一次推进并追加波形记录。
+   * 提交全部输入并求值到稳定，然后刷新可展示读数。
+   *
+   * 「把电路求值到稳定」与「推进电路」是两件事，由 `countAsAdvance` 区分：加载后的首次求值、
+   * 重置后的重新求值与结构变更后的读数刷新都只求值不推进，因此同一个刚稳定的状态不会一处
+   * 记成第 1 步、另一处记成第 0 步。
    * @param bindings 本次会话的运行时身份绑定。
    * @param nextInputValues 本次要提交的输入值；省略时提交当前值。
-   * @param options `countAsAdvance` 为假时既不加步数也不追加波形记录——重置后的重新求值
-   *                是「回到初始状态」的一部分，不是一次推进。
+   * @param options `countAsAdvance` 为真时把这次求值计为一次推进并追加波形记录，为假时两者都不做。
    */
-  async function runSimulationInternal(
+  async function submitInputsAndSettle(
     bindings: RuntimeSimulationBindings | null,
     nextInputValues: Readonly<Record<InputKey, BinarySignal>> = state.inputValues,
-    options: { countAsAdvance?: boolean } = {},
+    options: { countAsAdvance: boolean },
   ): Promise<boolean> {
     if (!bindings) return false;
     state.operationError = null;
@@ -575,11 +618,13 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
       commitInputValues(Object.fromEntries(committedValues.map(({ binding, value }) => [binding.key, value])));
       state.outputValue = bindings.outputs.length > 0 ? outputSignals[bindings.outputs[0].key] ?? "X" : "X";
       state.signals = {
-        ...Object.fromEntries(committedValues.map(({ binding, value }) => [`${binding.key}:out`, value])),
+        ...Object.fromEntries(
+          committedValues.map(({ binding, value }) => [signalKey(binding.key, INPUT_OUTPUT_PORT), value]),
+        ),
         ...observedSignals,
         ...outputSignals,
       };
-      if (options.countAsAdvance ?? true) {
+      if (options.countAsAdvance) {
         state.simulationStep += 1;
         state.waveform.push({
           step: state.simulationStep,
@@ -591,9 +636,7 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
       state.message = "仿真已稳定，信号已更新。";
       return true;
     } catch (error) {
-      state.message = errorMessage(error, "仿真失败。");
-      state.operationError = state.message;
-      if (!(error instanceof ProtocolResponseError)) state.engineState = "error";
+      recordEngineFailure(error, "仿真失败。");
       return false;
     }
   }
@@ -637,7 +680,9 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
       }
       state.hasCircuit = true;
       state.message = "电路已就绪，试着切换输入。";
-      await runSimulationInternal(state.runtimeBindings);
+      // 加载后的首次稳定求值不是一次推进：它把电路求值到稳定并填满读数，但不加步数、
+      // 不追加波形记录。重置之后的重新求值走同一条规则，两者因此都停在「第 0 步」。
+      await submitInputsAndSettle(state.runtimeBindings, state.inputValues, { countAsAdvance: false });
       state.isBusy = false;
       return { snapshot: createWorkspaceSnapshot(state), bindings };
     } catch (error) {
@@ -663,7 +708,7 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
     if (state.hasCircuit || state.isBusy || state.engineState !== "ready") {
       return Promise.resolve({ snapshot: createWorkspaceSnapshot(state), bindings: null });
     }
-    return enqueue(() => loadCircuitInternal(document));
+    return queue.enqueue(() => loadCircuitInternal(document));
   }
 
   function rebindSimulation(bindings: SimulationBindings | null): WorkspaceSnapshot {
@@ -696,20 +741,20 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
     return createWorkspaceSnapshot(state);
   }
 
-  async function runSimulationQueued(): Promise<WorkspaceSnapshot> {
+  async function refreshReadingsQueued(): Promise<WorkspaceSnapshot> {
     const bindings = state.runtimeBindings;
     if (bindings === null) return createWorkspaceSnapshot(state);
     state.isBusy = true;
     try {
-      await runSimulationInternal(bindings);
+      await submitInputsAndSettle(bindings, state.inputValues, { countAsAdvance: false });
     } finally {
       state.isBusy = false;
     }
     return createWorkspaceSnapshot(state);
   }
 
-  function runSimulation(): Promise<WorkspaceSnapshot> {
-    return enqueue(runSimulationQueued);
+  function refreshReadings(): Promise<WorkspaceSnapshot> {
+    return queue.enqueue(refreshReadingsQueued);
   }
 
   /**
@@ -726,14 +771,14 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
     try {
       const ticked = expectResponse(await adapter.tick(), "ticked");
 
-      // 引擎按引擎身份回传快照，这里映射回工作区既有的 `${editorId}:${portId}` 键空间。
+      // 引擎按引擎身份回传快照，这里按同一套「引擎身份 + 端口名」的键查回工作区的编辑器键。
       const enginePorts = new Map(
-        ticked.signals.map((signal) => [`${signal.componentId}:${signal.port}`, signal.value]),
+        ticked.signals.map((signal) => [signalKey(String(signal.componentId), signal.port), signal.value]),
       );
       const readBindings = (candidates: readonly RuntimeSignalBinding[]): Record<string, Signal> => {
         const values: Record<string, Signal> = {};
         for (const binding of candidates) {
-          const value = enginePorts.get(`${binding.componentId}:${binding.port}`);
+          const value = enginePorts.get(signalKey(String(binding.componentId), binding.port));
           if (value !== undefined) values[binding.key] = value;
         }
         return values;
@@ -745,7 +790,10 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
       // Input 的值来自工作区已提交的输入，不由引擎快照覆盖。
       state.signals = {
         ...Object.fromEntries(
-          bindings.inputs.map((binding) => [`${binding.key}:out`, state.inputValues[binding.key] ?? 0]),
+          bindings.inputs.map((binding) => [
+            signalKey(binding.key, INPUT_OUTPUT_PORT),
+            state.inputValues[binding.key] ?? 0,
+          ]),
         ),
         ...observedSignals,
         ...outputSignals,
@@ -766,16 +814,14 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
       state.message = `已推进到第 ${state.simulationStep} 步。`;
       return true;
     } catch (error) {
-      state.message = errorMessage(error, "推进失败。");
-      state.operationError = state.message;
-      if (!(error instanceof ProtocolResponseError)) state.engineState = "error";
+      recordEngineFailure(error, "推进失败。");
       return false;
     }
   }
 
   function step(): Promise<WorkspaceSnapshot> {
     if (state.simulationState === "running") return Promise.resolve(createWorkspaceSnapshot(state));
-    return enqueue(async () => {
+    return queue.enqueue(async () => {
       const bindings = state.runtimeBindings;
       if (bindings === null) return createWorkspaceSnapshot(state);
       state.isBusy = true;
@@ -798,7 +844,7 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
     // 同步取消已排定的推进：重置必须立刻把连续运行停下来，而不是等下一拍落地。
     cancelTick();
     state.simulationState = "stopped";
-    return enqueue(async () => {
+    return queue.enqueue(async () => {
       const bindings = state.runtimeBindings;
       state.isBusy = true;
       try {
@@ -812,13 +858,11 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
         // 重置把引擎里的 Input 也清回了初值，因此必须重新提交当前输入并求值到稳定，
         // 否则画布会停在「全部 X」上。这次求值不计步数，也不追加波形记录。
         if (bindings !== null) {
-          await runSimulationInternal(bindings, state.inputValues, { countAsAdvance: false });
+          await submitInputsAndSettle(bindings, state.inputValues, { countAsAdvance: false });
         }
         if (state.operationError === null) state.message = "已重置到初始状态。";
       } catch (error) {
-        state.message = errorMessage(error, "重置失败。");
-        state.operationError = state.message;
-        if (!(error instanceof ProtocolResponseError)) state.engineState = "error";
+        recordEngineFailure(error, "重置失败。");
       } finally {
         state.isBusy = false;
       }
@@ -835,11 +879,11 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
     const nextInputValues: Record<InputKey, BinarySignal> = { ...state.inputValues, [key]: value };
     // 运行中只提交 set_input，不额外 settle；下一次推进自然会带上新值。
     const running = state.simulationState === "running";
-    return enqueue(async () => {
+    return queue.enqueue(async () => {
       if (!running) {
         state.isBusy = true;
         try {
-          await runSimulationInternal(bindings, nextInputValues);
+          await submitInputsAndSettle(bindings, nextInputValues, { countAsAdvance: true });
         } finally {
           state.isBusy = false;
         }
@@ -851,45 +895,47 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
         commitInputValues(nextInputValues);
         state.message = "输入已提交，将在下一次推进时生效。";
       } catch (error) {
-        state.message = errorMessage(error, "输入设置失败。");
-        state.operationError = state.message;
-        if (!(error instanceof ProtocolResponseError)) state.engineState = "error";
+        recordEngineFailure(error, "输入设置失败。");
       }
       return createWorkspaceSnapshot(state);
     });
   }
 
-  async function start(): Promise<WorkspaceSnapshot> {
-    if (!createWorkspaceSnapshot(state).canStart) return createWorkspaceSnapshot(state);
+  /**
+   * 让运行循环跑起来：开始与继续是同一个动作，区别只在进入前的运行态。
+   * 调度器每排定一次就只执行一拍，因此这里只负责排定第一拍。
+   */
+  function beginRunning(): WorkspaceSnapshot {
     state.operationError = null;
     state.simulationState = "running";
     state.message = "正在连续推进。";
     scheduleTick();
     return createWorkspaceSnapshot(state);
+  }
+
+  async function start(): Promise<WorkspaceSnapshot> {
+    if (!createWorkspaceSnapshot(state).canStart) return createWorkspaceSnapshot(state);
+    return beginRunning();
   }
 
   async function pause(): Promise<WorkspaceSnapshot> {
     if (state.simulationState !== "running") return createWorkspaceSnapshot(state);
     cancelTick();
     state.simulationState = "paused";
-    state.message = `已暂停在第 ${state.simulationStep} 步。`;
+    state.message = pausedAtStepMessage();
     return createWorkspaceSnapshot(state);
   }
 
   async function resume(): Promise<WorkspaceSnapshot> {
     if (!createWorkspaceSnapshot(state).canResume) return createWorkspaceSnapshot(state);
-    state.operationError = null;
-    state.simulationState = "running";
-    state.message = "正在连续推进。";
-    scheduleTick();
-    return createWorkspaceSnapshot(state);
+    return beginRunning();
   }
 
   return {
     checkEngine,
     loadCircuit,
     rebindSimulation,
-    runSimulation,
+    refreshReadings,
     start,
     pause,
     resume,

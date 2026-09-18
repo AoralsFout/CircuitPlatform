@@ -632,7 +632,7 @@ void restarts_edge_detection_from_the_initial_state_after_reset() {
 
     // 重置后的第一次推进必须还是「Clock 从 0 翻到 1」这个上升沿。
     // 若前值快照被留在重置前（上一 tick 结束时是 1），这一次比较就是 1 对 1，
-    // 既有的边沿会被吞掉，q 会停在 X。
+    // 既有的上升沿会被吞掉，q 会停在 X。
     assert(simulation.tick().succeeded());
     assert(simulation.signal({flipFlopId, "q"}) == circuit::SignalValue::One);
     assert(simulation.step() == 1);
@@ -745,6 +745,8 @@ void initializes_ports_that_appear_after_a_structure_change() {
 }
 
 // 删除时序元件本身：它保存的状态与它的时钟前值一起被丢弃，其余元件的状态不受影响。
+// 时钟前值表的规模是这条断言的唯一观察点：残留条目在行为上不可达（元件身份永不重用），
+// 协议层也读不到，所以这里必须借助 `trackedClockCountForTesting()` 这个测试观察点。
 void drops_tracked_clock_values_of_removed_flip_flops() {
     circuit::Circuit circuit;
     const auto clockId = circuit.addComponent(circuit::ComponentKind::Clock);
@@ -756,18 +758,18 @@ void drops_tracked_clock_values_of_removed_flip_flops() {
 
     circuit::Simulation simulation(circuit);
     assert(simulation.tick().succeeded());
-    assert(simulation.trackedClockCount() == 2);
+    assert(simulation.trackedClockCountForTesting() == 2);
 
     assert(circuit.removeComponent(firstFlopId));
     simulation.reconcile();
 
     // 已删除的 DFlipFlop 不在状态表里留任何残留，也不再占着时钟前值表。
-    assert(simulation.trackedClockCount() == 1);
+    assert(simulation.trackedClockCountForTesting() == 1);
     assert(simulation.outputSignals().size() == 2);
     assert(!simulation.signal({firstFlopId, "q"}).has_value());
     // 另一个 DFlipFlop 仍然被跟踪，后续推进照常。
     assert(simulation.tick().succeeded());
-    assert(simulation.trackedClockCount() == 1);
+    assert(simulation.trackedClockCountForTesting() == 1);
     assert(simulation.signal({secondFlopId, "q"}).has_value());
 }
 
@@ -793,7 +795,7 @@ void keeps_the_sampled_bit_and_its_previous_clock_across_a_structure_change() {
     simulation.reconcile();
 
     assert(simulation.tick().succeeded());
-    // 前值若被结构变更丢掉，本次会以「当前值 1」当作前值，判不出边沿，q 会停在 X。
+    // 前值若被结构变更丢掉，本次会以「当前值 1」当作前值，判不出上升沿，q 会停在 X。
     assert(simulation.signal({flipFlopId, "q"}) == circuit::SignalValue::One);
 
     // 再删掉一个无关元件，采样得到的位仍然是 1。
@@ -801,7 +803,7 @@ void keeps_the_sampled_bit_and_its_previous_clock_across_a_structure_change() {
     simulation.reconcile();
     assert(simulation.signal({flipFlopId, "q"}) == circuit::SignalValue::One);
 
-    // 下一次推进是下降沿：q 按住不动，保留的前值继续参与边沿判定。
+    // 下一次推进是下降沿：q 按住不动，保留的前值继续参与上升沿判定。
     assert(simulation.setInput(clockInputId, circuit::SignalValue::Zero));
     assert(simulation.tick().succeeded());
     assert(simulation.signal({flipFlopId, "q"}) == circuit::SignalValue::One);

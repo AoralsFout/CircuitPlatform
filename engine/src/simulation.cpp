@@ -77,6 +77,30 @@ SignalValue xorValue(SignalValue left, SignalValue right) {
     return left == right ? SignalValue::Zero : SignalValue::One;
 }
 
+// 按元件类型遍历：tick 与 signalSnapshot 都要在整份电路里挑出某一类元件。
+// 模板在调用点完全内联，逐元素执行的代码与手写循环一致，没有额外开销。
+template <typename Visit>
+void forEachComponentOfKind(
+    const std::vector<Component>& components, ComponentKind kind, Visit&& visit) {
+    for (const auto& component : components) {
+        if (component.kind == kind) {
+            visit(component);
+        }
+    }
+}
+
+// 以「输出端口」为单位遍历整份电路：状态表的建立与重建都以端口为粒度。
+template <typename Visit>
+void forEachOutputPort(const std::vector<Component>& components, Visit&& visit) {
+    for (const auto& component : components) {
+        for (const auto& port : component.ports) {
+            if (port.direction == PortDirection::Output) {
+                visit(component, port);
+            }
+        }
+    }
+}
+
 bool isCombinational(ComponentKind kind) {
     switch (kind) {
     case ComponentKind::AndGate:
@@ -122,7 +146,7 @@ std::optional<SignalValue> evaluateBinaryGate(
 
 }  // namespace
 
-// Clock 的输出初值必须是 0：只有 0 → 1 算上升沿，从 X 起步会永远判不出第一次边沿。
+// Clock 的输出初值必须是 0：只有 0 → 1 算上升沿，从 X 起步会永远判不出第一次上升沿。
 SignalValue initialOutputValue(ComponentKind kind) {
     return kind == ComponentKind::Clock ? SignalValue::Zero : SignalValue::Unknown;
 }
@@ -135,13 +159,9 @@ Simulation::Simulation(const Circuit& circuit) : circuit_(circuit) {
 // 按当前 Circuit 重建输出信号表；构造与重置共用同一段「初值长什么样」的规则。
 void Simulation::initializeOutputSignals() {
     signals_.clear();
-    for (const auto& component : circuit_.components_) {
-        for (const auto& port : component.ports) {
-            if (port.direction == PortDirection::Output) {
-                signals_.push_back({{component.id, port.name}, initialOutputValue(component.kind)});
-            }
-        }
-    }
+    forEachOutputPort(circuit_.components_, [this](const Component& component, const Port& port) {
+        signals_.push_back({{component.id, port.name}, initialOutputValue(component.kind)});
+    });
 }
 
 // 结构变更后按元件身份重新推导状态：PortId 没变的端口留着当前值，消失的丢掉，新出现的按初值建立。
@@ -150,21 +170,15 @@ void Simulation::reconcile() {
     std::vector<PortSignal> reconciled;
     reconciled.reserve(signals_.size());
 
-    for (const auto& component : circuit_.components_) {
-        for (const auto& port : component.ports) {
-            if (port.direction != PortDirection::Output) {
-                continue;
-            }
-
-            const PortId portId{component.id, port.name};
-            const auto kept = std::find_if(
-                signals_.begin(), signals_.end(),
-                [&portId](const PortSignal& signal) { return samePort(signal.port, portId); });
-            reconciled.push_back(kept == signals_.end()
-                                     ? PortSignal{portId, initialOutputValue(component.kind)}
-                                     : *kept);
-        }
-    }
+    forEachOutputPort(circuit_.components_, [this, &reconciled](const Component& component, const Port& port) {
+        const PortId portId{component.id, port.name};
+        const auto kept = std::find_if(
+            signals_.begin(), signals_.end(),
+            [&portId](const PortSignal& signal) { return samePort(signal.port, portId); });
+        reconciled.push_back(kept == signals_.end()
+                                 ? PortSignal{portId, initialOutputValue(component.kind)}
+                                 : *kept);
+    });
 
     signals_ = std::move(reconciled);
 
@@ -186,7 +200,7 @@ void Simulation::reconcile() {
 // 重置等价于「用同一份 Circuit 重新构造一个 Simulation」：唯一不重建的是 Circuit 本身，
 // 因为元件与连接的引擎身份属于 Circuit，不能随运行时状态一起丢掉。
 // 前值快照同样必须清空——新建的 Simulation 里它是空的；若留下重置前的值，重置后的第一次
-// 推进就会拿旧前值与新端口值比较，可能凭空造出一个边沿，也可能漏掉真正的 0 → 1。
+// 推进就会拿旧前值与新端口值比较，可能凭空造出一个上升沿，也可能漏掉真正的 0 → 1。
 void Simulation::reset() {
     initializeOutputSignals();
     previousClockValues_.clear();
@@ -267,16 +281,14 @@ SimulationResult Simulation::settle() {
     return {SimulationError::CombinationalLoop};
 }
 
-// 六步顺序本身就是语义：先记前值，再推进时钟，求值到稳定后才判边沿，判完再求值一次。
+// 六步顺序本身就是语义：先记前值，再推进时钟，求值到稳定后才判上升沿，判完再求值一次。
 SimulationResult Simulation::tick() {
-    // ① 为还没有前值的 DFlipFlop 建立快照，作为本次 tick 的前值。
-    //    已经跟踪过的 DFlipFlop 保留上一 tick 记录的值而不重新读取：驱动 clock 端口的
-    //    可能是 Input 元件，它的电平变化发生在两次 tick 之间，只有跨 tick 保留前值才能
-    //    认出这类边沿。Phase 5.5 展平 Subcircuit 后外部时钟正是接到内部 Input 元件上。
-    for (const auto& component : circuit_.components_) {
-        if (component.kind != ComponentKind::DFlipFlop) {
-            continue;
-        }
+    // ① 为还没有前值的 DFlipFlop 建立快照。前值的含义是「上一 tick 求值稳定之后观测到的
+    //    值」，不是「本 tick 开始时读一次」：只有第一次见到某个 DFlipFlop 时才现读一次，
+    //    其后一律沿用第 ④ 步在上一次推进末尾写回的值。驱动 clock 端口的可能是 Input 元件，
+    //    它的电平变化发生在两次 tick 之间，现读会把这期间的 0 → 1 吞掉，永远认不出这类
+    //    上升沿。Phase 5.5 展平 Subcircuit 后外部时钟正是接到内部 Input 元件上。
+    forEachComponentOfKind(circuit_.components_, ComponentKind::DFlipFlop, [this](const Component& component) {
         const PortId clockPort{component.id, "clock"};
         const auto tracked = std::any_of(
             previousClockValues_.begin(), previousClockValues_.end(),
@@ -284,24 +296,21 @@ SimulationResult Simulation::tick() {
         if (!tracked) {
             previousClockValues_.push_back({clockPort, signal(clockPort).value_or(SignalValue::Unknown)});
         }
-    }
+    });
 
     // ② 推进每个 Clock 元件：out 在 0 与 1 之间翻转。初值是 0，因此第一次推进必然是 0 → 1。
-    for (const auto& component : circuit_.components_) {
-        if (component.kind != ComponentKind::Clock) {
-            continue;
-        }
+    forEachComponentOfKind(circuit_.components_, ComponentKind::Clock, [this](const Component& component) {
         const PortId outPort{component.id, "out"};
         const auto next = outputSignal(outPort) == SignalValue::One ? SignalValue::Zero : SignalValue::One;
         setOutputSignal(outPort, next);
-    }
+    });
 
     // ③ 组合求值到稳定，让新的时钟电平经组合逻辑传播到 DFlipFlop 的 clock 端口。
     if (const auto advance = settle(); !advance.succeeded()) {
         return advance;
     }
 
-    // ④ DFlipFlop 的边沿采样：比较前值与 clock 端口的当前值。
+    // ④ DFlipFlop 的上升沿采样：比较前值与 clock 端口的当前值。
     //    只有 0 → 1 算上升沿；1 → 0 不采样，任何一端是 X 的跳变也不采样——
     //    X → 1 无法构成可靠的上升沿，因为上一拍可能本来就是 1。
     //    判定只读端口的前后值，与元件类型无关：Clock、Input 或组合逻辑的输出都一样。
@@ -332,7 +341,7 @@ std::uint64_t Simulation::step() const noexcept {
     return step_;
 }
 
-std::size_t Simulation::trackedClockCount() const noexcept {
+std::size_t Simulation::trackedClockCountForTesting() const noexcept {
     return previousClockValues_.size();
 }
 
@@ -344,13 +353,10 @@ const std::vector<Simulation::PortSignal>& Simulation::outputSignals() const noe
 // 把接收端一并放进快照，调用方就能在一次往返里得到全部可展示读数。
 std::vector<Simulation::PortSignal> Simulation::signalSnapshot() const {
     std::vector<PortSignal> snapshot = outputSignals();
-    for (const auto& component : circuit_.components_) {
-        if (component.kind != ComponentKind::Output) {
-            continue;
-        }
+    forEachComponentOfKind(circuit_.components_, ComponentKind::Output, [this, &snapshot](const Component& component) {
         const PortId receivePort{component.id, "in"};
         snapshot.push_back({receivePort, signal(receivePort).value_or(SignalValue::Unknown)});
-    }
+    });
     return snapshot;
 }
 

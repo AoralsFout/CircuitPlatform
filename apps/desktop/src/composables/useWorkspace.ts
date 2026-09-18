@@ -20,6 +20,7 @@ import {
   type SimulationBindings,
   type WorkspaceSnapshot,
 } from "../workspace/index.ts";
+import { createEngineCallQueue } from "../workspace/engineQueue.ts";
 import type { ComponentKindName } from "@circuit-platform/protocol";
 
 interface WorkspaceBinding {
@@ -27,7 +28,6 @@ interface WorkspaceBinding {
   editorState: DeepReadonly<Ref<EditorSnapshot | null>>;
   bootstrap(): Promise<void>;
   checkEngine(): Promise<void>;
-  runSimulation(): Promise<void>;
   /** 开始连续运行：反复推进，直到暂停或结构修改。 */
   start(): Promise<void>;
   /** 暂停连续运行，画面停在当前状态。 */
@@ -83,7 +83,9 @@ function toEditorBindings(bindings: SimulationBindings): EditorBindings {
  */
 export function useWorkspace(): WorkspaceBinding {
   const adapter = (window as unknown as { circuitPlatform: EngineAdapter }).circuitPlatform;
-  const workspace = createWorkspace(adapter);
+  // 一条队列同时交给工作区与编辑器端口：运行中的推进、输入提交与结构提交因此排在同一个队里。
+  const queue = createEngineCallQueue();
+  const workspace = createWorkspace(adapter, { queue });
   const state = shallowRef(workspace.snapshot());
   // 连续运行的每一拍由工作区自行排定，因此界面靠订阅拿到那部分快照变化。
   workspace.subscribe((snapshot) => {
@@ -101,20 +103,21 @@ export function useWorkspace(): WorkspaceBinding {
   }
 
   // EditorSession 的结构 settle 用于验证 Circuit；工作区仍需重新提交当前输入并读取可展示信号。
+  // 这只是一次读数刷新，不推进电路，因此不增加步数、也不追加波形记录。
   async function refreshSimulationAfterBindingsChange(): Promise<void> {
     if (!simulationRefreshRequested) {
       state.value = workspace.snapshot();
       return;
     }
     simulationRefreshRequested = false;
-    await reflect(() => workspace.runSimulation());
+    await reflect(() => workspace.refreshReadings());
   }
 
   function attachEditor(document: EditorDocument, bindings: SimulationBindings): void {
     unsubscribeEditor?.();
     editor = createEditorSession(
       { document, bindings: toEditorBindings(bindings) },
-      createProtocolEnginePort(adapter),
+      createProtocolEnginePort(adapter, queue),
       {
         // EditorSession 只询问一个布尔可用性 seam；引擎状态仍留在 Workspace 快照中。
         isEngineAvailable: () => workspace.snapshot().engineState === "ready",
@@ -145,10 +148,6 @@ export function useWorkspace(): WorkspaceBinding {
     await reflect(() => workspace.checkEngine());
     editor?.setEngineAvailability(state.value.engineState === "ready");
     await loadExampleWhenReady();
-  }
-
-  async function runSimulation(): Promise<void> {
-    await reflect(() => workspace.runSimulation());
   }
 
   async function start(): Promise<void> {
@@ -254,7 +253,6 @@ export function useWorkspace(): WorkspaceBinding {
     editorState: readonly(editorState),
     bootstrap: checkEngine,
     checkEngine,
-    runSimulation,
     start,
     pause,
     resume,

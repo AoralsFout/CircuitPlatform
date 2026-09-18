@@ -421,7 +421,7 @@ int main() {
                holdCircuit, holdSimulation)
                .find("\"value\":1") != std::string::npos);
 
-    // 下一次推进是下降沿：q 按住不动，保留下来的前值继续参与边沿判定。
+    // 下一次推进是下降沿：q 按住不动，保留下来的前值继续参与上升沿判定。
     assert(dispatch(
                R"({"type":"set_input","requestId":"hold-clock-low-again","componentId":1,"value":0})",
                holdCircuit, holdSimulation)

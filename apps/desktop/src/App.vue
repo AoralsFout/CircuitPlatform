@@ -301,7 +301,6 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           :inspector="inspector"
           :waveform="state.waveform"
           :waveform-rows="waveformRows"
-          :simulation-step="state.simulationStep"
           @select-tab="bottomTab = $event"
           @toggle-panel="toggleBottomPanel"
           @select-component="selectComponent"

@@ -10,9 +10,9 @@ import {
   type CircuitDocument,
   type EngineAdapter,
   type SimulationBindings,
-  type TickScheduler,
   type WorkspaceSnapshot,
 } from "../src/workspace/index.ts";
+import { drain, FakeScheduler } from "./fake-scheduler.ts";
 
 /**
  * 时序电路的端到端回归：真实 `circuit-engine` 二进制 + 真实 JSON Lines 协议 + 真实工作区运行循环。
@@ -23,6 +23,11 @@ import {
  *
  * 引擎二进制由 `pnpm build:engine` 产出。它不存在时（`pnpm test` 跑在 `build:engine` 之前，干净检出上就是这样）
  * 本文件优雅跳过，`pnpm verify` 的 `test:engine` 步骤会在引擎就绪之后把它重跑一遍。
+ *
+ * 这条跳过规则有一处已知冗余：`pnpm test` 的通配本来就包含本文件，因此**在已构建的检出上
+ * `pnpm verify` 会把它跑两次**（`pnpm test` 一次，`test:engine` 一次）。第二次是有意保留的——
+ * 它保证这条回归一定跑在刚刚 `build:engine` 产出的引擎上，而第一次在干净检出上只会跳过。
+ * 两次都不影响正确性，只是多花一次进程启动的时间。
  */
 
 const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -64,46 +69,6 @@ function createEngineAdapter(client: ProtocolEngineClient): EngineAdapter {
     reset: () => client.request({ type: "reset" }),
     getSignal: (componentId: number, port: string) => client.request({ type: "get_signal", componentId, port }),
   };
-}
-
-/** 手动点火的假调度器：连续运行因此不必等真实定时器，撤下下一拍的时刻也能被直接观察。 */
-class FakeScheduler implements TickScheduler {
-  scheduled = 0;
-  cancelled = 0;
-  private pending: { run: () => void; cancelled: boolean } | null = null;
-
-  schedule(_delayMs: number, run: () => void): () => void {
-    this.scheduled += 1;
-    const entry = { run, cancelled: false };
-    this.pending = entry;
-    return () => {
-      if (entry.cancelled) return;
-      entry.cancelled = true;
-      this.cancelled += 1;
-      if (this.pending === entry) this.pending = null;
-    };
-  }
-
-  /** 当前还挂着的排定数量；暂停之后必须是 0。 */
-  pendingCount(): number {
-    return this.pending === null ? 0 : 1;
-  }
-
-  /** 触发已排定的那一拍；当前没有排定（暂停已经取消）时返回 false。 */
-  fire(): boolean {
-    const entry = this.pending;
-    this.pending = null;
-    if (!entry || entry.cancelled) return false;
-    entry.run();
-    return true;
-  }
-}
-
-/** 让出宏任务，把工作区里已经排队的微任务全部跑完。 */
-function drain(): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, 0);
-  });
 }
 
 /**
@@ -153,9 +118,11 @@ test("runs, pauses, resumes, and resets a clock-driven flip-flop on the real eng
   assert.equal(Object.keys(bindings?.connections ?? {}).length, 3);
   assert.equal(bindings?.componentKinds?.flop, "d_flip_flop");
 
-  // 推送后的首次稳定求值不是一次推进：Clock 的输出初值是 0，还没有出现过上升沿。
+  // 推送后的首次稳定求值不是一次推进：Clock 的输出初值是 0，还没有出现过上升沿，
+  // 步数因此停在 0——重置之后的重新求值走同一条规则，同一个状态不会两处显示不同的步数。
   assert.equal(loaded.snapshot.hasCircuit, true);
-  assert.equal(loaded.snapshot.simulationStep, 1);
+  assert.equal(loaded.snapshot.simulationStep, 0);
+  assert.deepEqual(loaded.snapshot.waveform, []);
   assert.equal(loaded.snapshot.simulationState, "stopped");
   assert.equal(signalOf(loaded.snapshot, "clock:out"), 0);
   assert.equal(signalOf(loaded.snapshot, "data:out"), 1);
@@ -202,7 +169,7 @@ test("runs, pauses, resumes, and resets a clock-driven flip-flop on the real eng
   assert.equal(toggled.inputValues.data, 0);
   assert.equal(toggled.simulationState, "running", "运行中切换输入不该打断连续运行");
 
-  // 第 4 拍：下降沿，d 已经变成 0，但 q 必须按住不动——这正是边沿触发的可证伪点。
+  // 第 4 拍：下降沿，d 已经变成 0，但 q 必须按住不动——这正是上升沿触发的可证伪点。
   const afterFalling = await advance();
   assert.equal(signalOf(afterFalling, "data:out"), 0);
   assert.equal(signalOf(afterFalling, "clock:out"), 0);
@@ -214,8 +181,9 @@ test("runs, pauses, resumes, and resets a clock-driven flip-flop on the real eng
   assert.equal(signalOf(afterRising, "flop:q"), 0);
 
   const stepsBeforePause = afterRising.simulationStep;
-  // 推送后的首次稳定求值记作第 1 步，连续运行再过 5 拍。
+  // 推送后的首次稳定求值不计步，连续运行从第 0 步往上走了 5 拍。
   assert.equal(stepsBeforePause, loaded.snapshot.simulationStep + 5);
+  assert.equal(stepsBeforePause, 5);
 
   // ── 暂停：不推进，也不重排下一拍 ────────────────────────────────────────────
   const paused = await workspace.pause();
@@ -254,7 +222,7 @@ test("runs, pauses, resumes, and resets a clock-driven flip-flop on the real eng
     "结构与读数键原样保留，只有值回到初始状态",
   );
 
-  // 重置之后的第一拍仍然是完整的上升沿：前值快照一并清空，不会凭空造出边沿。
+  // 重置之后的第一拍仍然是完整的上升沿：前值快照一并清空，不会凭空造出上升沿。
   const afterResetTick = await workspace.step();
   assert.equal(afterResetTick.simulationStep, 1);
   assert.equal(signalOf(afterResetTick, "clock:out"), 1);

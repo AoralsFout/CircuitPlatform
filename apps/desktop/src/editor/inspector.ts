@@ -42,7 +42,7 @@ function componentSignal(node: CanvasNode): Signal {
 }
 
 /**
- * 未连接的 `clock` 端口意味着元件永远等不到边沿，因此每一步都不会更新。
+ * 未连接的 `clock` 端口意味着元件永远等不到上升沿，因此每一步都不会更新。
  * 按端口判定而不是按元件类型判定：展平 Subcircuit 后时钟同样落在普通输入端口上。
  */
 function structuralHint(ports: readonly InspectorPort[]): string | null {
