@@ -46,11 +46,18 @@ app.whenReady().then(async () => {
       // 每个动画帧只推进一步交互，并把「更新状态 → Vue 渲染完成」计为该帧耗时，
       // 因此样本覆盖投影器几何重算与 DOM patch，而不只是事件处理器本身。
       const samples = [];
+      // 相邻 rAF 回调的真实间隔：包含浏览器样式、布局、合成与动画采样，
+      // 而 p95FrameMs 只覆盖主线程上的 JS 与 DOM patch。前者是诊断字段，不设门槛。
+      const frameDeltas = [];
       const startedAt = performance.now();
       let tick = 0;
+      let lastFrameAt = null;
       await new Promise((resolve) => {
         const step = async () => {
-          if (performance.now() - startedAt >= ${duration}) return resolve();
+          const now = performance.now();
+          if (lastFrameAt !== null) frameDeltas.push(now - lastFrameAt);
+          lastFrameAt = now;
+          if (now - startedAt >= ${duration}) return resolve();
           const frameStarted = performance.now();
           const x = startX + (tick % 240);
           const y = startY + (tick % 240);
@@ -66,9 +73,19 @@ app.whenReady().then(async () => {
       const final = window.__benchmarkState();
       if (config.holds) canvas.dispatchEvent(pointer('pointerup', startX, startY));
 
-      const sorted = samples.slice().sort((a, b) => a - b);
-      const p95 = sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * .95) - 1)] || 0;
-      return { frames: samples.length, p95FrameMs: Number(p95.toFixed(3)), maxFrameMs: Number(Math.max(0, ...samples).toFixed(3)), initial, final };
+      const percentileOf = (values, ratio) => {
+        const sorted = values.slice().sort((a, b) => a - b);
+        return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * ratio) - 1)] || 0;
+      };
+      return {
+        frames: samples.length,
+        p95FrameMs: Number(percentileOf(samples, .95).toFixed(3)),
+        maxFrameMs: Number(Math.max(0, ...samples).toFixed(3)),
+        frameP50Ms: Number(percentileOf(frameDeltas, .5).toFixed(3)),
+        frameP95Ms: Number(percentileOf(frameDeltas, .95).toFixed(3)),
+        initial,
+        final,
+      };
     })()`);
     process.stdout.write(`BENCHMARK_RESULT ${JSON.stringify(result)}\n`);
   } catch (error) {

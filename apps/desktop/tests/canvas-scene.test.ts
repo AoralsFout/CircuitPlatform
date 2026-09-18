@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createComponentDefinitionRegistry, projectCanvasScene } from "../src/canvas/index.ts";
+import { createCanvasSceneProjector, createComponentDefinitionRegistry, projectCanvasScene } from "../src/canvas/index.ts";
 import type { EditorSnapshot } from "../src/editor/index.ts";
 
 function snapshot(): EditorSnapshot {
@@ -49,6 +49,50 @@ test("projects non-default editor identities through explicit routes and signal 
   assert.deepEqual(scene.wires[0].danglingEndpoints, ["target"]);
   assert.equal(scene.wires[0].color, "blue");
   assert.equal(scene.wires[0].selected, false);
+});
+
+/** 画布按对象身份跳过重建与 DOM patch，投影器必须为未变化的对象保留身份。 */
+test("keeps unchanged entity identity so the canvas can skip repatching", () => {
+  const projector = createCanvasSceneProjector(createComponentDefinitionRegistry());
+  const base = snapshot();
+  const first = projector.project(base, { signals: {} });
+
+  // 输入未变时连场景容器都复用，依赖场景引用的观察者不会被打扰。
+  assert.equal(projector.project(base, { signals: {} }), first);
+
+  // 拖动一个 Component：只有它和与它相连的 Wire 变化，其余节点保持对象身份。
+  const dragged = projector.project(base, { signals: {} }, { "source-17": { x: 64, y: 48 } });
+  assert.notEqual(dragged, first);
+  assert.notEqual(dragged.nodes.find((node) => node.id === "source-17"), first.nodes.find((node) => node.id === "source-17"));
+  assert.notEqual(dragged.wires[0], first.wires[0]);
+  assert.equal(dragged.nodes.find((node) => node.id === "or-99"), first.nodes.find((node) => node.id === "or-99"));
+  assert.equal(dragged.nodes.find((node) => node.id === "sink-4"), first.nodes.find((node) => node.id === "sink-4"));
+});
+
+/** 复用基线永远是上一次投影的结果，因此每组断言都用独立的投影器。 */
+test("a signal update replaces only the entities carrying that signal", () => {
+  const projector = createCanvasSceneProjector(createComponentDefinitionRegistry());
+  const base = snapshot();
+  const first = projector.project(base, { signals: {} });
+
+  const signalled = projector.project(base, { signals: { "source-17:out": 1 } });
+  assert.notEqual(signalled, first);
+  assert.notEqual(signalled.wires[0], first.wires[0]);
+  assert.notEqual(signalled.nodes.find((node) => node.id === "source-17"), first.nodes.find((node) => node.id === "source-17"));
+  assert.equal(signalled.nodes.find((node) => node.id === "sink-4"), first.nodes.find((node) => node.id === "sink-4"));
+});
+
+test("a selection change replaces only the two affected nodes", () => {
+  const projector = createCanvasSceneProjector(createComponentDefinitionRegistry());
+  const base = snapshot();
+  const first = projector.project(base, { signals: {} });
+
+  const reselected = structuredClone(base);
+  reselected.selection = { kind: "component", id: "sink-4" };
+  const second = projector.project(reselected, { signals: {} });
+  assert.notEqual(second.nodes.find((node) => node.id === "or-99"), first.nodes.find((node) => node.id === "or-99"));
+  assert.notEqual(second.nodes.find((node) => node.id === "sink-4"), first.nodes.find((node) => node.id === "sink-4"));
+  assert.equal(second.nodes.find((node) => node.id === "source-17"), first.nodes.find((node) => node.id === "source-17"));
 });
 
 test("derives connected endpoint geometry from the current Component and Port definition", () => {

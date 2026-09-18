@@ -71,6 +71,10 @@ const result = {
   frames: measured.frames,
   p95FrameMs: measured.p95FrameMs,
   maxFrameMs: measured.maxFrameMs,
+  // 诊断字段：相邻 rAF 的真实间隔，含浏览器样式、布局、合成与动画采样。
+  // 它不参与 pass 判定——基准环境用 disable-gpu 软件渲染，绝对帧间隔不可跨环境比较。
+  frameP50Ms: measured.frameP50Ms,
+  frameP95Ms: measured.frameP95Ms,
   // 成本定位用：渲染出的 DOM 元素数与 SMIL 动画数。
   domElements: measured.final.elements,
   smilAnimations: measured.final.animated,

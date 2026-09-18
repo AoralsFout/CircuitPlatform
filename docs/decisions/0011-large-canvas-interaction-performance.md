@@ -12,6 +12,8 @@
 
 - 节点拖动、Route 拖动、画布平移和 ConnectionDraft 的指针值通过 `requestAnimationFrame` 合并，每帧最多应用一次；pointerup 提交前立即刷新最后一个值。
 - CanvasScene 投影器按 EditorSnapshot、拖动预览和 Route 预览的引用缓存节点/连线几何；SimulationSnapshot 更新只复制状态叶子，不重新生成 Route。
+- 指针坐标换算按手势缓存画布矩形，只在布局变化与每次 `pointerdown` 时失效。`getBoundingClientRect()` 会强制同步重排，逐帧调用在目标规模下即是一次约 5ms 的全量布局。
+- Canvas 的 Wire 与 Component 列表使用 `v-memo`，依赖各自的对象身份、键盘焦点和悬浮目标；场景未变时 Vue 跳过 vnode 重建与 DOM patch。投影器负责为未变化的 Wire 保留对象身份。
 - 超过 500 个 Component 或 1,000 条 Wire 时，画布只关闭背景次级网格渐变、节点/画布光晕和连线高光；DOM 标签、键盘焦点、命中区域和操作能力保持不变。
 - `apps/desktop/scripts/performance-benchmark.mjs` 启动 Vite 和 Electron，挂载真实 `CircuitCanvas`，构造目标规模并通过 DOM PointerEvent 运行 5 秒 pan/drag 场景；采样包含 DOM 事件、组件更新和 RAF 回调，输出 P95 JSON 并以 20ms 为失败门槛。
 

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import ComponentMenu from "./ComponentMenu.vue";
 import {
   applyWheelViewport,
@@ -148,6 +148,9 @@ function keyboardMenuAnchor(target: EventTarget | null): { x: number; y: number 
   if (rect && canvasRect) return { x: rect.left - canvasRect.left + rect.width / 2, y: rect.top - canvasRect.top + rect.height / 2 };
   return lastPointerAnchor ?? { x: (canvasElement.value?.clientWidth ?? 0) / 2, y: (canvasElement.value?.clientHeight ?? 0) / 2 };
 }
+
+/** 稠密判定只取决于场景规模；逐 Wire 重复计算会放大整树重渲染的成本。 */
+const denseScene = computed(() => isDenseCanvasScene(props.scene));
 
 function signalClass(value: 0 | 1 | "X"): string {
   if (value === 1) return "signal-state--high";
@@ -318,11 +321,31 @@ function gridStyle(): Record<string, string> {
   };
 }
 
+/**
+ * 画布在视口中的左上角。指针热路径每帧都要把 client 坐标换算成画布坐标，
+ * 而 getBoundingClientRect() 会强制同步重排：目标规模下单次约 5ms，是交互帧
+ * 耗时的主要来源。画布在一次手势期间不会移动，因此按布局变化失效、按手势复用。
+ */
+let canvasRect: { left: number; top: number } | null = null;
+
+/** 布局可能已经变化，丢弃缓存；下一次换算时重新测量。 */
+function invalidateCanvasRect(): void {
+  canvasRect = null;
+}
+
+function canvasRectNow(): { left: number; top: number } {
+  if (!canvasRect) {
+    const rect = canvasElement.value?.getBoundingClientRect();
+    canvasRect = { left: rect?.left ?? 0, top: rect?.top ?? 0 };
+  }
+  return canvasRect;
+}
+
 function pointerInCanvas(event: MouseEvent | PointerEvent | WheelEvent): { x: number; y: number } {
-  const rect = canvasElement.value?.getBoundingClientRect();
+  const rect = canvasRectNow();
   return {
-    x: event.clientX - (rect?.left ?? 0),
-    y: event.clientY - (rect?.top ?? 0),
+    x: event.clientX - rect.left,
+    y: event.clientY - rect.top,
   };
 }
 
@@ -567,6 +590,8 @@ function onWheel(event: WheelEvent): void {
 }
 
 function onPointerDown(event: PointerEvent): void {
+  // 手势开始时重新测量一次，保证整段手势用的都是当前布局。
+  invalidateCanvasRect();
   lastPointerAnchor = pointerInCanvas(event);
   if (props.interaction.connectionDraft && event.button === 0 && !spacePressed) {
     emit("connectionWaypoint", { point: pointerInWorld(event), altKey: event.altKey });
@@ -874,6 +899,7 @@ function onCanvasKeydown(event: KeyboardEvent): void {
 }
 
 function reportResize(): void {
+  invalidateCanvasRect();
   const element = canvasElement.value;
   if (element) emit("resize", element.clientWidth, element.clientHeight);
 }
@@ -887,6 +913,9 @@ onMounted(() => {
   window.addEventListener("keydown", onKeydown);
   window.addEventListener("keyup", onKeyup);
   window.addEventListener("blur", onWindowBlur);
+  // 画布可能在尺寸不变的情况下被移动（父容器布局变化），这两个监听补齐那类情形。
+  window.addEventListener("resize", invalidateCanvasRect);
+  window.addEventListener("scroll", invalidateCanvasRect, true);
   document.addEventListener("visibilitychange", onWindowBlur);
 });
 
@@ -897,6 +926,8 @@ onBeforeUnmount(() => {
   window.removeEventListener("keydown", onKeydown);
   window.removeEventListener("keyup", onKeyup);
   window.removeEventListener("blur", onWindowBlur);
+  window.removeEventListener("resize", invalidateCanvasRect);
+  window.removeEventListener("scroll", invalidateCanvasRect, true);
   document.removeEventListener("visibilitychange", onWindowBlur);
 });
 
@@ -934,11 +965,13 @@ watch(() => props.scene.wires, async () => {
 <template>
   <div class="editor-canvas-wrap">
     <div class="canvas-info"><span class="canvas-mode"><span class="mode-dot" aria-hidden="true"></span>场景模式</span><span>Delete 删除 · Ctrl/Cmd+D 复制 · Ctrl/Cmd+Z 撤销 · Alt+方向键 移动元件 · 方向键（聚焦折点）微调 · Ctrl/Cmd+0/=/− 缩放 · Esc 取消</span></div>
-    <div ref="canvasElement" class="circuit-canvas" :class="{ 'circuit-canvas--dense': isDenseCanvasScene(scene), 'circuit-canvas--panning': isPanning, 'circuit-canvas--connecting': interaction.connectionDraft }" role="application" tabindex="0" aria-label="电路画布" @wheel="onWheel" @contextmenu="onContextMenu" @keydown="onCanvasKeydown" @dragover="onDragOver" @drop="onDrop" @pointerdown="onPointerDown" @pointermove="onPointerMove" @pointerup="onPointerUp" @pointercancel="onPointerUp">
+    <div ref="canvasElement" class="circuit-canvas" :class="{ 'circuit-canvas--dense': denseScene, 'circuit-canvas--panning': isPanning, 'circuit-canvas--connecting': interaction.connectionDraft }" role="application" tabindex="0" aria-label="电路画布" @wheel="onWheel" @contextmenu="onContextMenu" @keydown="onCanvasKeydown" @dragover="onDragOver" @drop="onDrop" @pointerdown="onPointerDown" @pointermove="onPointerMove" @pointerup="onPointerUp" @pointercancel="onPointerUp">
       <div class="canvas-grid" :style="gridStyle()" aria-hidden="true"></div>
       <div class="canvas-viewport" :style="viewportStyle()">
         <svg class="signal-map" aria-label="电路连接">
-          <template v-for="wire in scene.wires" :key="wire.id">
+          <!-- v-memo：Wire 自身与焦点/稠密标记都没变时，跳过 vnode 重建与 DOM patch。
+               目标规模下这是整树重渲染的主要成本，投影器会为未变化的 Wire 保留对象身份。 -->
+          <template v-for="wire in scene.wires" :key="wire.id" v-memo="[wire, interaction.focusedId, denseScene]">
             <path class="signal-wire-hit" :d="pathFor(wire.route)" role="button" tabindex="0" data-canvas-focus data-focus-kind="connection" :data-focus-id="wire.id" :class="{ 'signal-wire-hit--focused': interaction.focusedId === wire.id }" :aria-label="`${wire.danglingEndpoints.length > 0 ? '悬空' : '正常'}连线 ${wire.id}，信号 ${wire.signal}`" @focus="emit('focusChange', wire.id)" @click.stop="emit('selectConnection', wire.id)" />
             <template v-if="wire.selected" v-for="(_, segmentIndex) in wire.route.slice(0, -1)" :key="`${wire.id}-segment-${segmentIndex}`">
               <path v-if="segmentIndex > 0 && segmentIndex < wire.route.length - 2" class="route-segment-hit" :d="segmentPath(wire.route, segmentIndex)" role="button" tabindex="0" data-canvas-arrow-focus data-focus-kind="route-segment" :data-focus-id="`route:${wire.id}:segment:${segmentIndex}`" :aria-label="`移动连线 ${wire.id} 线段 ${segmentIndex + 1}，方向键微调`" @focus="focusRouteHandle(wire.id, { kind: 'segment', index: segmentIndex }, `route:${wire.id}:segment:${segmentIndex}`)" @blur="blurRouteHandle" @pointerdown.stop="onRouteSegmentPointerDown($event, wire, segmentIndex)" />
@@ -949,19 +982,15 @@ watch(() => props.scene.wires, async () => {
             <path v-if="wire.selected" class="signal-wire-outline" :d="pathFor(wire.route)" aria-hidden="true" />
             <path :id="wirePathId(wire.id)" class="signal-wire" :class="[wireColorClass(wire.color), { 'signal-wire--dangling': wire.danglingEndpoints.length > 0 }]" :data-signal="wire.signal" :data-wire-color="wire.color ?? DEFAULT_WIRE_COLOR" :data-dangling="wire.danglingEndpoints.length > 0 ? 'true' : 'false'" :d="pathFor(wire.route)" />
             <template v-if="wire.danglingEndpoints.length === 0">
-              <template v-if="!isDenseCanvasScene(scene)">
-                <text v-for="phase in [0, 1, 2]" :key="`${wire.id}-signal-${phase}`" class="wire-signal-flow" :class="wireColorClass(wire.color)" aria-hidden="true">
-                  <textPath :href="`#${wirePathId(wire.id)}`" startOffset="-10%"><animate attributeName="startOffset" from="-10%" to="110%" dur="5.1s" :begin="`${phase * -1.7}s`" repeatCount="indefinite" />{{ wire.signal }}</textPath>
-                </text>
-              </template>
-              <text class="wire-signal-label" :class="[wireColorClass(wire.color), { 'wire-signal-label--dense': isDenseCanvasScene(scene) }]" aria-hidden="true"><textPath :href="`#${wirePathId(wire.id)}`" startOffset="50%">{{ wire.signal }}</textPath></text>
+              <path v-if="!denseScene" class="wire-signal-flow" :class="wireColorClass(wire.color)" :d="pathFor(wire.route)" aria-hidden="true" />
+              <text class="wire-signal-label" :class="wireColorClass(wire.color)" aria-hidden="true"><textPath :href="`#${wirePathId(wire.id)}`" startOffset="50%">{{ wire.signal }}</textPath></text>
             </template>
             <circle v-if="wire.danglingEndpoints.includes('source')" class="dangling-endpoint" :cx="wire.source.point.x" :cy="wire.source.point.y" r="6" role="button" tabindex="0" :aria-label="`修复悬空连接 ${wire.id} 的来源端点`" @pointerdown.stop="onDanglingEndpointPointerDown($event, wire, 'source')" />
             <circle v-if="wire.danglingEndpoints.includes('target')" class="dangling-endpoint" :cx="wire.target.point.x" :cy="wire.target.point.y" r="6" role="button" tabindex="0" :aria-label="`修复悬空连接 ${wire.id} 的目标端点`" @pointerdown.stop="onDanglingEndpointPointerDown($event, wire, 'target')" />
           </template>
           <path v-if="interaction.connectionDraft" class="signal-wire signal-wire--draft" :d="pathFor(interaction.connectionDraft)" />
         </svg>
-        <article v-for="node in scene.nodes" :key="node.id" class="circuit-node" :class="{ 'circuit-node--selected': node.selected, 'circuit-node--focused': interaction.focusedId === node.id, 'circuit-node--dragging': interaction.draggingComponentId === node.id }" :style="nodeStyle(node)" role="button" tabindex="0" data-canvas-focus data-focus-kind="component" :data-focus-id="node.id" :data-selected="node.selected ? 'true' : 'false'" :aria-label="`选择${node.kind.toUpperCase()} 元件`" @focus="emit('focusChange', node.id)" @pointerdown.stop="onNodePointerDown($event, node)" @click="onNodeClick(node.id)">
+        <article v-for="node in scene.nodes" :key="node.id" v-memo="[node, interaction.focusedId, interaction.draggingComponentId, hoveredConnectionTarget]" class="circuit-node" :class="{ 'circuit-node--selected': node.selected, 'circuit-node--focused': interaction.focusedId === node.id, 'circuit-node--dragging': interaction.draggingComponentId === node.id }" :style="nodeStyle(node)" role="button" tabindex="0" data-canvas-focus data-focus-kind="component" :data-focus-id="node.id" :data-selected="node.selected ? 'true' : 'false'" :aria-label="`选择${node.kind.toUpperCase()} 元件`" @focus="emit('focusChange', node.id)" @pointerdown.stop="onNodePointerDown($event, node)" @click="onNodeClick(node.id)">
           <strong>{{ node.kind.toUpperCase() }}</strong>
           <span v-for="port in node.ports" :key="port.id" class="node-port" :class="[port.direction === 'input' ? 'node-port--left' : 'node-port--right', signalClass(port.signal), { 'node-port--dangling': port.dangling, 'node-port--connection-target': isHoveredConnectionTarget(node.id, port.id) }]" :style="{ top: `${port.offset.y}px` }" :data-port-id="port.id" :data-node-id="node.id" :data-signal="port.signal" :data-dangling="port.dangling ? 'true' : 'false'" :data-focus-id="`port:${node.id}:${port.id}`" data-focus-kind="port" data-canvas-focus role="button" tabindex="0" :aria-label="`${port.direction === 'input' ? '输入' : '输出'}端口 ${port.name}，信号 ${port.signal}${port.dangling ? '，悬空' : ''}`" @focus="emit('focusChange', `port:${node.id}:${port.id}`)" @pointerdown.stop="onPortPointerDown($event, node, port)" @pointerup.stop="onPortPointerUp($event, node, port)" @click.stop="onPortClick($event)"><span class="node-port__anchor" aria-hidden="true"></span><span class="node-port__label">{{ port.name }}</span></span>
         </article>
@@ -1020,6 +1049,6 @@ watch(() => props.scene.wires, async () => {
       </div>
       <div class="canvas-crosshair canvas-crosshair--tl" aria-hidden="true"></div><div class="canvas-crosshair canvas-crosshair--br" aria-hidden="true"></div>
     </div>
-    <div class="canvas-legend"><span><i class="legend-line legend-line--flow">1</i>文字沿输出流向输入</span><span><i class="legend-line legend-line--outline"></i>选中描边</span><span><i class="legend-line legend-line--dangling"></i>悬空无流动文字</span></div>
+    <div class="canvas-legend"><span><i class="legend-line legend-line--flow"></i>信号值与虚线沿输出流向输入</span><span><i class="legend-line legend-line--outline"></i>选中描边</span><span><i class="legend-line legend-line--dangling"></i>悬空无流动虚线</span></div>
   </div>
 </template>

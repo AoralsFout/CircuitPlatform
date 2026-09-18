@@ -41,7 +41,13 @@ test("canvas exposes non-color state hooks for ports and wires", async () => {
   assert.match(canvas, /wire-signal-flow/);
   assert.match(canvas, /wire-signal-label/);
   assert.match(canvas, /wire\.danglingEndpoints\.length === 0/);
-  assert.match(canvas, /attributeName="startOffset"/);
+  // 信号值必须是常显的等宽文字，流向只由 CSS 虚线表达：SMIL 动画 textPath 的
+  // startOffset 会让每条 Wire 的文本逐帧重新排版，目标规模下不可用。
+  assert.doesNotMatch(canvas, /<animate/);
+  assert.doesNotMatch(canvas, /startOffset="-"/);
+  assert.match(styles, /\.wire-signal-flow \{[^}]*stroke-dasharray/);
+  assert.match(styles, /@keyframes wire-signal-dash/);
+  assert.match(styles, /\.wire-signal-label \{ display: block;/);
   assert.match(canvas, /signal-wire-outline/);
   assert.doesNotMatch(styles, /\.signal-wire--live\s*\{/);
   assert.doesNotMatch(styles, /\.signal-wire--unknown\s*\{/);

@@ -426,6 +426,85 @@ export function projectCanvasScene(
   return { nodes, wires, bounds: boundsFor(nodes, wires) };
 }
 
+function samePoint(left: Point, right: Point): boolean {
+  return left.x === right.x && left.y === right.y;
+}
+
+function samePointList(left: readonly Point[] | undefined, right: readonly Point[] | undefined): boolean {
+  if (left === right) return true;
+  if (!left || !right || left.length !== right.length) return false;
+  return left.every((point, index) => samePoint(point, right[index]!));
+}
+
+function sameValueList(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+/** 逐字段比较，保证复用只发生在渲染结果完全相同的情况下。 */
+function sameWireContent(left: CanvasWire, right: CanvasWire): boolean {
+  return left.id === right.id
+    && left.signal === right.signal
+    && left.color === right.color
+    && left.selected === right.selected
+    && left.source.componentId === right.source.componentId
+    && left.source.port === right.source.port
+    && samePoint(left.source.point, right.source.point)
+    && left.target.componentId === right.target.componentId
+    && left.target.port === right.target.port
+    && samePoint(left.target.point, right.target.point)
+    && samePointList(left.route, right.route)
+    && samePointList(left.waypoints, right.waypoints)
+    && sameValueList(left.danglingEndpoints, right.danglingEndpoints);
+}
+
+function sameNodeContent(left: CanvasNode, right: CanvasNode): boolean {
+  return left.id === right.id
+    && left.kind === right.kind
+    && left.selected === right.selected
+    && left.displayName === right.displayName
+    && left.symbol === right.symbol
+    && left.description === right.description
+    && samePoint(left.position, right.position)
+    && left.size.width === right.size.width
+    && left.size.height === right.size.height
+    && left.ports.length === right.ports.length
+    && left.ports.every((port, index) => {
+      const other = right.ports[index]!;
+      return port.id === other.id
+        && port.name === other.name
+        && port.direction === other.direction
+        && port.signal === other.signal
+        && port.dangling === other.dangling
+        && samePoint(port.point, other.point)
+        && samePoint(port.offset, other.offset);
+    });
+}
+
+/**
+ * 保留内容未变化的节点与连线对象身份，使下游能按引用跳过重建与 DOM patch。
+ * 拖动一个 Component 时只有它和与之相连的少量 Wire 会变化，其余可以直接复用；
+ * 全部未变时连场景容器本身也复用，让依赖场景引用的观察者保持静默。
+ */
+function reuseUnchangedEntities(previous: CanvasScene | null, next: CanvasScene): CanvasScene {
+  if (!previous) return next;
+  const previousNodes = new Map(previous.nodes.map((node) => [node.id, node]));
+  const previousWires = new Map(previous.wires.map((wire) => [wire.id, wire]));
+  let reusedEverything = previous.nodes.length === next.nodes.length && previous.wires.length === next.wires.length;
+  const nodes = next.nodes.map((node) => {
+    const before = previousNodes.get(node.id);
+    if (before && sameNodeContent(before, node)) return before;
+    reusedEverything = false;
+    return node;
+  });
+  const wires = next.wires.map((wire) => {
+    const before = previousWires.get(wire.id);
+    if (before && sameWireContent(before, wire)) return before;
+    reusedEverything = false;
+    return wire;
+  });
+  return reusedEverything ? previous : { nodes, wires, bounds: next.bounds };
+}
+
 function applySimulationSignals(scene: CanvasScene, simulationSnapshot: SimulationSnapshot): CanvasScene {
   return {
     ...scene,
@@ -454,6 +533,7 @@ export function createCanvasSceneProjector(registry: ComponentDefinitionRegistry
   let cachedPositions: Readonly<Record<string, Point>> | undefined;
   let cachedRoutes: Readonly<Record<string, readonly Point[]>> | undefined;
   let cachedStructure: CanvasScene | null = null;
+  let lastScene: CanvasScene | null = null;
 
   return {
     /** 投影信号并复用上一次的节点/连线几何。 */
@@ -474,7 +554,8 @@ export function createCanvasSceneProjector(registry: ComponentDefinitionRegistry
         cachedRoutes = previewRoutes;
         cachedStructure = projectCanvasScene(editorSnapshot, { signals: {} }, registry, previewPositions, previewRoutes);
       }
-      return applySimulationSignals(cachedStructure, simulationSnapshot);
+      lastScene = reuseUnchangedEntities(lastScene, applySimulationSignals(cachedStructure, simulationSnapshot));
+      return lastScene;
     },
   };
 }
