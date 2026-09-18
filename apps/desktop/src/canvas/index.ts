@@ -7,8 +7,9 @@ import type {
   Point,
 } from "../editor";
 import { createDefaultOrthogonalRoute, routeFromWaypoints } from "../editor/route.ts";
-import { isProjectedDangling } from "../editor/port-width.ts";
+import { isProjectedDangling, hasWidthMismatch } from "../editor/port-width.ts";
 import { DEFAULT_WIRE_COLOR, isWireColorId, type WireColorId } from "../editor/wire-appearance.ts";
+import { NODE_GRID_SIZE } from "./drag.ts";
 
 export type PortDirection = "input" | "output";
 
@@ -41,9 +42,6 @@ export const PORT_LABEL_CHARACTER_WIDTH = 8;
 
 /** 端口标注到盒边的内缩；与 `.node-port--left/.node-port--right .node-port__label` 的 24px 对齐。 */
 export const PORT_LABEL_INSET = 24;
-
-/** 数据驱动元件的尺寸向上取整到的网格；与编辑器的世界坐标网格同一个值。 */
-export const COMPONENT_SIZE_GRID = 16;
 
 /**
  * 元件尺寸从哪里来。
@@ -136,8 +134,10 @@ export function componentGeometryFor(
   };
 }
 
+// 尺寸向上取整到编辑器用的那同一个世界坐标网格。复用 NODE_GRID_SIZE 而不是另立一个常量：
+// 三个同值的网格常量（这里、drag.ts、placement.ts）靠注释维系一致，本来就是分叉的入口。
 function roundUpToGrid(value: number): number {
-  return Math.ceil(value / COMPONENT_SIZE_GRID) * COMPONENT_SIZE_GRID;
+  return Math.ceil(value / NODE_GRID_SIZE) * NODE_GRID_SIZE;
 }
 
 /**
@@ -643,9 +643,18 @@ export function projectCanvasScene(
 
   const selected = editorSnapshot.selection;
   const componentsById = new Map(editorSnapshot.document.components.map((component) => [component.id, component]));
+  // 端口上的悬空与连线上那个 `dangling` 必须是同一个布尔量。悬空有两个来源，规则拆开就会分叉：
+  // 端点解析不出来时只有那一端算悬空，两端位宽不再相同时两端都算——后者此前没有落到端口上，
+  // 于是改位宽造成的悬空点亮了连线却不点亮端口，同一件事在画布上有两种外观。
   const danglingPortsByComponent = new Map<string, Set<string>>();
   for (const connection of editorSnapshot.document.connections) {
-    for (const side of connection.danglingEndpoints) {
+    const danglingSides = new Set<EditorEndpointSide>(connection.danglingEndpoints);
+    if (hasWidthMismatch(connection, componentsById)) {
+      danglingSides.add("source");
+      danglingSides.add("target");
+    }
+
+    for (const side of danglingSides) {
       const endpoint = side === "source" ? connection.source : connection.target;
       const ports = danglingPortsByComponent.get(endpoint.componentId) ?? new Set<string>();
       ports.add(endpoint.port);
