@@ -27,14 +27,47 @@ export interface PortLayout {
 /** 同一方向上相邻端口的纵向间距；与既有元件的端口间距一致。 */
 export const PORT_LAYOUT_PITCH = 24;
 
+/**
+ * 端口数量由数据决定的元件的端口间距（ADR 0017）。
+ * 它比通用规则宽：这类元件的分支数是数据，端口多的时候 24 会让分支标签挤在一起。
+ */
+export const DATA_DRIVEN_PITCH = 32;
+
+/** 数据驱动元件最上一个与最下一个端口到盒边的留白；高度因此是 `留白 * 2 + (端口数 - 1) * 间距`。 */
+export const DATA_DRIVEN_PORT_MARGIN = 30;
+
+/** 估算端口标注宽度时每个字符占的横向空间；估算而不是测量，投影因此不依赖 DOM 文本测量。 */
+export const PORT_LABEL_CHARACTER_WIDTH = 8;
+
+/** 端口标注到盒边的内缩；与 `.node-port--left/.node-port--right .node-port__label` 的 24px 对齐。 */
+export const PORT_LABEL_INSET = 24;
+
+/** 数据驱动元件的尺寸向上取整到的网格；与编辑器的世界坐标网格同一个值。 */
+export const COMPONENT_SIZE_GRID = 16;
+
+/**
+ * 元件尺寸从哪里来。
+ * - `fixed`（缺省）：尺寸就是展示定义里的 `size`，端口间距是通用规则的 `PORT_LAYOUT_PITCH`；
+ * - `by-port-count`：端口数量由数据决定的元件用 ADR 0017 那套规则，`size` 只作为下限，
+ *   实际尺寸按当前端口清单算出来（见 `componentGeometryFor`）。
+ */
+export type ComponentSizing = "fixed" | "by-port-count";
+
 export interface ComponentDefinition {
   kind: ComponentKindName;
-  category: "input-output" | "logic" | "sequential";
+  category: "input-output" | "logic" | "sequential" | "bus";
   sortOrder: number;
   symbol: string;
   displayName: string;
   description: string;
   size: { width: number; height: number };
+  /**
+   * 尺寸来源；省略时是 `"fixed"`。
+   *
+   * 拆线器与合线器要 `"by-port-count"`：一份展示定义只能写下一个固定尺寸，而它们的端口数量
+   * 由数据决定，高度必须跟着端口数增长。既有元件全部是 `"fixed"`，几何因此逐像素不变。
+   */
+  sizing?: ComponentSizing;
   /**
    * 按引擎端口名索引的展示布局。
    *
@@ -51,17 +84,89 @@ export interface ComponentDefinition {
   searchAliases: readonly string[];
 }
 
+/** 一个元件当前的画布几何：多大、端口之间隔多远。 */
+export interface ComponentGeometry {
+  size: { width: number; height: number };
+  /** 同一方向上相邻端口的纵向间距。 */
+  pitch: number;
+}
+
+/**
+ * 解析一个端口当前的画布几何：多大、端口之间隔多远。
+ *
+ * 内置元件的尺寸是展示定义里写死的常量，端口间距是通用规则的 `PORT_LAYOUT_PITCH`——这条规则
+ * 复现了既有元件的全部坐标，几何因此与引入数据驱动元件之前逐像素相同。
+ *
+ * 端口数量由数据决定的元件相反：一份展示定义只能写下一个固定尺寸，而拆线器与合线器的分支数
+ * 由数据决定。这类元件把 `size` 当作**下限**，实际尺寸按当前端口清单算出来（ADR 0017）：
+ * 高度 = 留白 * 2 + (最多一侧的端口数 - 1) * `DATA_DRIVEN_PITCH`，宽度取最长的端口标注估算
+ * 并向上取整到网格。默认的 8 位拆线器是 148 × 284。
+ * @param definition 元件展示定义。
+ * @param ports 该元件当前的端口清单，来自编辑器文档里的引擎清单。
+ * @returns 该元件当前该画多大、端口该隔多远。
+ */
+export function componentGeometryFor(
+  definition: ComponentDefinition,
+  ports: readonly PortSpec[],
+): ComponentGeometry {
+  if (definition.sizing !== "by-port-count") {
+    return { size: { ...definition.size }, pitch: PORT_LAYOUT_PITCH };
+  }
+
+  // 高度跟着最多的一侧走，而不是端口总数：拆线器的输入永远只有一条，端口都堆在输出那一侧。
+  const sideCount = (direction: PortDirection): number =>
+    ports.filter((port) => port.direction === direction).length;
+  const tallestSide = Math.max(sideCount("input"), sideCount("output"), 1);
+  const grownHeight = DATA_DRIVEN_PORT_MARGIN * 2 + (tallestSide - 1) * DATA_DRIVEN_PITCH;
+
+  // 两侧的标注都画在盒子里，因此宽度要同时容下最长的那条标注。文本宽度是估算：投影是纯函数，
+  // 不引入 DOM 文本测量，估算偏大只会让盒子更宽，不会让标注溢出。
+  const longestLabel = ports.reduce(
+    (longest, port) => Math.max(longest, portTextFor(definition, port).length),
+    0,
+  );
+  const grownWidth = longestLabel * PORT_LABEL_CHARACTER_WIDTH + PORT_LABEL_INSET * 2;
+
+  return {
+    size: {
+      width: Math.max(definition.size.width, roundUpToGrid(grownWidth)),
+      height: Math.max(definition.size.height, grownHeight),
+    },
+    pitch: DATA_DRIVEN_PITCH,
+  };
+}
+
+function roundUpToGrid(value: number): number {
+  return Math.ceil(value / COMPONENT_SIZE_GRID) * COMPONENT_SIZE_GRID;
+}
+
+/**
+ * 一个端口画在画布上的标注文本（不含偏移）：展示定义登记的显示名优先，否则是端口名，再按
+ * 位宽或位区间补上 `[7:0]` 这样的后缀。
+ * @param definition 元件展示定义。
+ * @param port 引擎回传的端口声明。
+ * @returns 画布与检查器共用的端口标注文本。
+ */
+export function portTextFor(definition: ComponentDefinition, port: PortSpec): string {
+  return circuitPortLabel(definition.portLayout[port.name]?.label ?? port.name, port);
+}
+
 /**
  * 解析一个端口在画布上的展示几何。
  *
  * 先看展示定义里有没有为这个端口名登记的布局，没有就回退到通用规则：同方向的端口在元件
  * 垂直中线上等距排开，输入贴左边、输出贴右边。规则给出的坐标与既有元件逐个吻合，因此
  * 回退不是「降级」，而是这些元件本来就没有需要特别登记的形状。
+ *
+ * 盒子的高度与端口间距来自 `componentGeometryFor` 而不是展示定义里的那个固定尺寸：端口数量
+ * 由数据决定的元件尺寸是按当前端口清单算出来的，几何必须与 `projectCanvasScene` 报出的
+ * `node.size` 是同一份，否则端口会画到盒子外面。
  * @param definition 元件展示定义。
  * @param portName 引擎端口名。
  * @param direction 端口方向，决定它贴哪一边。
  * @param sideIndex 同一方向上这一项的下标。
  * @param sideCount 同一方向上的端口总数。
+ * @param geometry 该元件当前的画布几何。
  * @returns 该端口的标签与偏移。
  */
 export function portLayoutFor(
@@ -70,13 +175,14 @@ export function portLayoutFor(
   direction: PortDirection,
   sideIndex: number,
   sideCount: number,
+  geometry: ComponentGeometry,
 ): PortLayout {
   const explicit = definition.portLayout[portName];
-  const centered = definition.size.height / 2 + (sideIndex - (sideCount - 1) / 2) * PORT_LAYOUT_PITCH;
+  const centered = geometry.size.height / 2 + (sideIndex - (sideCount - 1) / 2) * geometry.pitch;
   return {
     label: explicit?.label ?? portName,
     offset: explicit?.offset ?? {
-      x: direction === "input" ? 0 : definition.size.width,
+      x: direction === "input" ? 0 : geometry.size.width,
       y: centered,
     },
   };
@@ -236,6 +342,37 @@ export const DEFAULT_COMPONENT_DEFINITIONS: readonly ComponentDefinition[] = [
     disabledReason: null,
     searchAliases: ["dff", "flip flop", "触发器"],
   },
+  // 拆线器与合线器是数据驱动的元件：端口清单由前端生成、随 add_component 一起发给引擎，
+  // 引擎按清单建立端口并回传。它们的形状因此没有一份写得死的展示定义，`sizing` 声明尺寸
+  // 跟着端口数量走（ADR 0017），端口坐标全部走通用排布规则。
+  {
+    kind: "splitter",
+    category: "bus",
+    sortOrder: 120,
+    symbol: "⇤",
+    displayName: "拆线器",
+    description: "把一条多位总线按位区间拆成若干条分支。",
+    size,
+    sizing: "by-port-count",
+    portLayout: noPortLayout,
+    available: true,
+    disabledReason: null,
+    searchAliases: ["splitter", "拆线", "总线", "bus"],
+  },
+  {
+    kind: "merger",
+    category: "bus",
+    sortOrder: 130,
+    symbol: "⇥",
+    displayName: "合线器",
+    description: "把若干条位区间分支合并成一条多位总线。",
+    size,
+    sizing: "by-port-count",
+    portLayout: noPortLayout,
+    available: true,
+    disabledReason: null,
+    searchAliases: ["merger", "合线", "总线", "bus"],
+  },
 ];
 
 /** 创建默认元件定义注册表。返回新实例以避免调用方共享可变集合。 */
@@ -383,7 +520,14 @@ function portLayoutOf(
   const port = ports.find((candidate) => candidate.name === portName);
   if (!port) return undefined;
   const sameSide = ports.filter((candidate) => candidate.direction === port.direction);
-  return portLayoutFor(definition, port.name, port.direction, sameSide.indexOf(port), sameSide.length);
+  return portLayoutFor(
+    definition,
+    port.name,
+    port.direction,
+    sameSide.indexOf(port),
+    sameSide.length,
+    componentGeometryFor(definition, ports),
+  );
 }
 
 function routeFor(connection: EditorConnection): readonly Point[] {
@@ -445,6 +589,7 @@ function projectPorts(
   connectedPoints: ReadonlyMap<string, Point>,
   danglingPorts: ReadonlySet<string>,
   simulationSnapshot: SimulationSnapshot,
+  geometry: ComponentGeometry,
 ): CanvasPort[] {
   const ports = component.ports ?? [];
   const sideCounts: Record<PortDirection, number> = { input: 0, output: 0 };
@@ -458,6 +603,7 @@ function projectPorts(
       port.direction,
       sideIndexes[port.direction]++,
       sideCounts[port.direction],
+      geometry,
     );
     const key = endpointKey(component.id, port.name);
     return {
@@ -466,7 +612,7 @@ function projectPorts(
       direction: port.direction,
       width: port.width,
       ...(port.bitRange ? { bitRange: { ...port.bitRange } } : {}),
-      label: circuitPortLabel(layout.label ?? port.name, port),
+      label: portTextFor(definition, port),
       point: connectedPoints.get(key) ?? {
         x: nodePosition.x + layout.offset.x,
         y: nodePosition.y + layout.offset.y,
@@ -516,6 +662,9 @@ export function projectCanvasScene(
     if (!definition) return null;
     const danglingPorts = danglingPortsByComponent.get(component.id) ?? new Set<string>();
     const nodePosition = previewPositions?.[component.id] ?? component.position;
+    // 尺寸与端口偏移必须来自同一份几何：端口数量由数据决定的元件高度是按端口算出来的，
+    // 盒子与端口分别算就会让端口画到盒子外面。
+    const geometry = componentGeometryFor(definition, component.ports ?? []);
     return {
       id: component.id,
       kind: component.kind,
@@ -523,9 +672,9 @@ export function projectCanvasScene(
       symbol: definition.symbol,
       description: definition.description,
       position: { ...nodePosition },
-      size: { ...definition.size },
+      size: { ...geometry.size },
       // 端口清单来自编辑器文档，也就是引擎回传的那一份；展示定义只决定画在哪、显示成什么。
-      ports: projectPorts(component, definition, nodePosition, connectedPoints, danglingPorts, simulationSnapshot),
+      ports: projectPorts(component, definition, nodePosition, connectedPoints, danglingPorts, simulationSnapshot, geometry),
       selected: selected?.kind === "component" && selected.id === component.id,
     } satisfies CanvasNode;
   }).filter((node) => node !== null) as CanvasNode[];

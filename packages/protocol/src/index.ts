@@ -47,7 +47,11 @@ export type ComponentKindName =
   | "xnor"
   | "not"
   | "clock"
-  | "d_flip_flop";
+  | "d_flip_flop"
+  /** 拆线器：一条多位输入按位区间拆成若干条分支输出。端口清单由前端生成。 */
+  | "splitter"
+  /** 合线器：若干条位区间输入按位区间合并成一条多位输出。端口清单由前端生成。 */
+  | "merger";
 
 export interface HealthCheckRequest {
   type: "health_check";

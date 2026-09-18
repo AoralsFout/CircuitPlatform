@@ -243,6 +243,8 @@ button:disabled { cursor: not-allowed; }
 .inspector-attributes { display: grid; gap: 4px; margin-bottom: 8px; }
 .inspector-attribute { display: flex; align-items: center; gap: 8px; color: var(--color-text-muted); font-size: 9px; }
 .inspector-attribute input { width: 64px; padding: 2px 6px; border: 1px solid var(--color-border); border-radius: 4px; background: var(--color-surface); color: var(--color-text); font-family: var(--font-data); font-size: 11px; }
+/* 位区间列表是一整行文本，比位宽那个数字框长得多；窄框会把正在编辑的那份清单截掉大半。 */
+.inspector-attribute input[type="text"] { width: 260px; }
 .inspector-port-list { display: grid; gap: 4px; min-width: 190px; }
 .inspector-port-row { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; align-items: center; color: var(--color-text-muted); font-size: 9px; }
 .inspector-port-row strong { font-family: var(--font-data); font-size: 12px; }

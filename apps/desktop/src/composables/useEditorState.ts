@@ -1,5 +1,5 @@
 import { computed, ref, watch, type DeepReadonly, type Ref } from "vue";
-import type { ComponentKindName, PortSpec, Signal } from "@circuit-platform/protocol";
+import type { BitRange, ComponentKindName, PortSpec, Signal } from "@circuit-platform/protocol";
 import {
   readDefaultWireColor,
   writeDefaultWireColor,
@@ -12,6 +12,7 @@ import {
 } from "../editor";
 import type { InputKey, WorkspaceSnapshot } from "../workspace";
 import {
+  componentGeometryFor,
   createComponentDefinitionRegistry,
   createCanvasSceneProjector,
   createFrameCoalescer,
@@ -26,6 +27,7 @@ import {
   type ViewportState,
 } from "../canvas";
 import { createInspectorModel, type InspectorModel } from "../editor/inspector.ts";
+import { defaultPortsFor, portsWithBitRanges } from "../editor/bus-ports.ts";
 import {
   readRecentComponentKinds,
   writeRecentComponentKind,
@@ -177,6 +179,10 @@ export function useEditorState(
     }
     const pending = editorState.value.pendingPlacement;
     const definition = pending ? registry.get(pending.kind) : undefined;
+    // 放置预览的盒子与放下去之后的节点必须是同一份尺寸：端口数量由数据决定的元件高度按端口数
+    // 增长，用展示定义里那个固定尺寸画出来的预览会比真节点矮一大截，点下去就像跳了一下。
+    const pendingPorts = pending ? defaultPortsFor(pending.kind) ?? [] : [];
+    const pendingSize = definition ? componentGeometryFor(definition, pendingPorts).size : undefined;
     return {
       focusedId: focusedId.value,
       draggingComponentId: draggingComponentId.value,
@@ -184,8 +190,8 @@ export function useEditorState(
       connectionDraft: connectionDraft.value.origin ? connectionDraftRoute(connectionDraft.value) : null,
       connectionDraftError: connectionDraft.value.error?.message ?? null,
       routeEditPreview: routeEditPreview.value,
-      pendingPlacement: pending && pending.center && definition
-        ? { kind: pending.kind, position: positionFromPlacementCenter(pending.center, definition.size, pending.altKey), size: definition.size, error: editorState.value.error?.message ?? null }
+      pendingPlacement: pending && pending.center && pendingSize
+        ? { kind: pending.kind, position: positionFromPlacementCenter(pending.center, pendingSize, pending.altKey), size: pendingSize, error: editorState.value.error?.message ?? null }
         : null,
     };
   });
@@ -328,6 +334,27 @@ export function useEditorState(
     void setPortWidthCommand(componentId, ports);
   }
 
+  /**
+   * 提交一次位区间列表编辑。
+   *
+   * 与改位宽走同一条结构提交：载荷是整份端口清单，分支数量、名字与位宽都按新列表重算，宿主
+   * 总线端口原样保留。覆盖规则由引擎判定，这里不做第二份——越界、重叠、漏位各自带着可展示的
+   * 原因回来，而模型在提交成功之前不会变，因此失败时用户看到的仍是提交前的列表。
+   * @param componentId 要改的元件。
+   * @param ranges 新的位区间列表，从最高位段到最低位段。
+   */
+  function setBitRanges(componentId: EditorComponentId, ranges: readonly BitRange[]): void {
+    const node = canvasScene.value.nodes.find((candidate) => candidate.id === componentId);
+    if (!node) return;
+    const ports = node.ports.map((port) => ({
+      name: port.id,
+      direction: port.direction,
+      width: port.width,
+      ...(port.bitRange ? { bitRange: { ...port.bitRange } } : {}),
+    }));
+    void setPortWidthCommand(componentId, portsWithBitRanges(node.kind, ports, ranges));
+  }
+
   const selectedComponent = computed(() => canvasScene.value.nodes.find((node) => node.id === selectedComponentId.value));
   const selectedComponentName = computed(() => selectedConnection.value ? `Wire ${selectedConnection.value}` : selectedComponent.value?.displayName ?? "未选择");
   const selectedComponentValue = computed<Signal>(() => selectedConnection.value ? canvasScene.value.wires.find((wire) => wire.id === selectedConnection.value)?.signal ?? "X" : selectedComponent.value?.ports.find((port) => port.direction === "output")?.signal ?? selectedComponent.value?.ports[0]?.signal ?? "X");
@@ -460,6 +487,7 @@ export function useEditorState(
     selectComponent,
     selectConnection,
     setPortWidth,
+    setBitRanges,
     selectRailPage,
     adjustZoom,
     fitViewport,

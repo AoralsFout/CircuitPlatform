@@ -1,5 +1,6 @@
 import type { Signal } from "@circuit-platform/protocol";
 import type { ComponentDefinitionRegistry, CanvasNode, CanvasScene, CanvasWire } from "../canvas";
+import { branchBitRanges, formatBitRangeList, isDataDrivenKind } from "./bus-ports.ts";
 import type { EditorSelection } from "./index";
 
 export interface InspectorPort {
@@ -17,15 +18,33 @@ export interface InspectorPort {
 /**
  * 检查器里的一条可编辑属性。
  *
- * 第一版只有位宽，而它是列表里的第一项——ADR 0014 说过第一版不引入没有实际用例的可编辑
- * 属性，位宽是第一个真实例外。
+ * ADR 0014 说过第一版不引入没有实际用例的可编辑属性，位宽是第一个真实例外，位区间列表是
+ * 第二个——它们都是「编辑一份端口清单」这件事的入口。
  */
-export interface InspectorAttribute {
+export type InspectorAttribute = WidthAttribute | BitRangeAttribute;
+
+export interface WidthAttribute {
   id: "width";
   label: string;
   /** 当前值。提交失败时这里仍是提交前的值，因为模型是从文档投影出来的。 */
   value: number;
   /** 这个属性作用在哪个端口上；提交时用它拼出整份端口清单。 */
+  portName: string;
+}
+
+/**
+ * 拆线器与合线器的位区间列表。
+ *
+ * 一整份列表编辑一次而不是逐条改：分支数量与各分支覆盖的范围是同一份清单的两个方面，而一次
+ * 合法的整体变更（改成两条 4 位分支以后宿主总线的每一位仍然被盖满）用「改其中一条」的形状
+ * 表达不出来。
+ */
+export interface BitRangeAttribute {
+  id: "bit-ranges";
+  label: string;
+  /** 文本形式，形如 `7:7, 6:6, …, 0:0`。提交失败时这里仍是提交前的值。 */
+  value: string;
+  /** 宿主总线端口名；提交时用它认出哪一条端口是宿主。 */
   portName: string;
 }
 
@@ -37,7 +56,7 @@ export interface ComponentInspector {
   behavior: string;
   signal: Signal;
   ports: readonly InspectorPort[];
-  /** 可编辑属性；位宽是第一个。元件没有可编辑属性时为空数组。 */
+  /** 可编辑属性；位宽在前，拆线器与合线器的位区间列表跟在后面。元件没有可编辑属性时为空数组。 */
   attributes: readonly InspectorAttribute[];
   /**
    * 结构提示：组件缺少能驱动它的连接时给出一行可展示的说明；没有问题时为 null。
@@ -80,11 +99,33 @@ function structuralHint(ports: readonly InspectorPort[]): string | null {
  * 有多宽」。逻辑门、Clock 与 D Flip-Flop 固定按 1 位工作，不随输入变宽，因此不给它们开——
  * 需要更宽的值由用户显式用合线器构造。
  */
-function widthAttributes(node: CanvasNode): InspectorAttribute[] {
+function widthAttributes(node: CanvasNode): WidthAttribute[] {
   if (node.kind !== "input" && node.kind !== "output") return [];
   const port = node.ports[0];
   if (!port || node.ports.length !== 1) return [];
   return [{ id: "width", label: "位宽", value: port.width, portName: port.id }];
+}
+
+/**
+ * 位区间列表是拆线器与合线器的可编辑属性。
+ *
+ * 只给这两个数据驱动的元件开这个口子：它们的分支数量与每条分支覆盖的范围都由数据决定，
+ * 而内置元件（逻辑门、Clock、D Flip-Flop）的端口形状是固定的，不随输入变宽。
+ *
+ * 宿主总线端口只用来标识「这笔提交改的是哪个元件的清单」，它的位宽不在这一条里改：改位区间
+ * 不改变总线有多宽，而覆盖规则要求两者同时自洽。
+ */
+function bitRangeAttributes(node: CanvasNode): BitRangeAttribute[] {
+  if (!isDataDrivenKind(node.kind)) return [];
+  const host = node.ports.find((port) => !port.bitRange);
+  const branches = branchBitRanges(node.ports);
+  if (!host || branches.length === 0) return [];
+  return [{
+    id: "bit-ranges",
+    label: "位区间",
+    value: formatBitRangeList(branches),
+    portName: host.id,
+  }];
 }
 
 /**
@@ -128,7 +169,7 @@ export function createInspectorModel(scene: CanvasScene, selection: EditorSelect
       behavior: definition?.description ?? node.description,
       signal: componentSignal(node),
       ports,
-      attributes: widthAttributes(node),
+      attributes: [...widthAttributes(node), ...bitRangeAttributes(node)],
       hint: structuralHint(ports),
     };
   }

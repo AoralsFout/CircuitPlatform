@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import type { Signal } from "@circuit-platform/protocol";
+import type { BitRange, Signal } from "@circuit-platform/protocol";
 import type { BottomTab, WaveformKey, WaveformRow } from "../composables/useEditorState";
 import type { EditorConnectionId } from "../editor";
-import type { InspectorAttribute, InspectorModel } from "../editor/inspector";
+import type { BitRangeAttribute, InspectorModel, WidthAttribute } from "../editor/inspector";
+import { parseBitRangeList } from "../editor/bus-ports.ts";
 import type { WaveformPoint, WorkspaceEngineState } from "../workspace";
 
 interface OutputItem {
@@ -37,6 +38,7 @@ const emit = defineEmits<{
   selectComponent: [componentId: string];
   toggleDetails: [];
   setPortWidth: [componentId: string, portName: string, width: number];
+  setBitRanges: [componentId: string, ranges: readonly BitRange[]];
 }>();
 
 /**
@@ -45,13 +47,29 @@ const emit = defineEmits<{
  * 非法输入就地还原成当前值，不发出命令。提交后的 DOM 值先退回模型里的当前值：成功时模型
  * 更新会把输入框重新渲染成新值，失败时它就停在原值上——「失败保留原值」因此不需要额外状态。
  */
-function onWidthChange(attribute: InspectorAttribute, event: Event): void {
+function onWidthChange(attribute: WidthAttribute, event: Event): void {
   const input = event.target as HTMLInputElement;
   const width = Number.parseInt(input.value, 10);
   input.value = String(attribute.value);
   if (props.inspector?.kind !== "component") return;
   if (!Number.isSafeInteger(width) || width < 1 || width === attribute.value) return;
   emit("setPortWidth", props.inspector.id, attribute.portName, width);
+}
+
+/**
+ * 提交一次位区间列表编辑。
+ *
+ * 与位宽一样就地还原成当前值再发出命令：列表是文本，形状不对的一行连一份端口清单都拼不出来，
+ * 因此这里只判断形状，覆盖是否完整交给引擎——它的拒绝信息里带着「越界 / 重叠 / 漏位」里的
+ * 哪一种，那正是用户需要看到的那条。
+ */
+function onBitRangesChange(attribute: BitRangeAttribute, event: Event): void {
+  const input = event.target as HTMLInputElement;
+  const ranges = parseBitRangeList(input.value);
+  input.value = attribute.value;
+  if (props.inspector?.kind !== "component") return;
+  if (!ranges) return;
+  emit("setBitRanges", props.inspector.id, ranges);
 }
 
 // 信号值是逐位文本，因此这里比的是字符串；多位值落到未知一档，位宽为 1 时与改造前相同。
@@ -98,7 +116,8 @@ const waveformRange = computed(() => {
         <div v-if="inspector.attributes.length > 0" class="inspector-attributes" aria-label="可编辑属性">
           <label v-for="attribute in inspector.attributes" :key="attribute.id" class="inspector-attribute">
             <span>{{ attribute.label }}</span>
-            <input type="number" min="1" step="1" :value="attribute.value" :aria-label="`${attribute.label}：${attribute.portName}`" @change="onWidthChange(attribute, $event)" />
+            <input v-if="attribute.id === 'width'" type="number" min="1" step="1" :value="attribute.value" :aria-label="`${attribute.label}：${attribute.portName}`" @change="onWidthChange(attribute, $event)" />
+            <input v-else type="text" spellcheck="false" :value="attribute.value" placeholder="7:4, 3:0" :aria-label="`${attribute.label}：${attribute.portName}`" @change="onBitRangesChange(attribute, $event)" />
           </label>
         </div>
         <div class="inspector-port-list" aria-label="端口信号">
