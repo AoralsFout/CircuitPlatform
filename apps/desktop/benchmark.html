@@ -7,11 +7,21 @@
   // 交互状态由真实 DOM PointerEvent 驱动，不直接改写场景几何。
   import { createApp, computed, h, nextTick, ref } from "vue";
   import CircuitCanvas from "/src/components/CircuitCanvas.vue";
-  import { createCanvasSceneProjector, createComponentDefinitionRegistry, createFrameCoalescer } from "/src/canvas/index.ts";
+  import {
+    componentGeometryFor,
+    createCanvasSceneProjector,
+    createComponentDefinitionRegistry,
+    createFrameCoalescer,
+    portLayoutFor,
+  } from "/src/canvas/index.ts";
   import { createRouteEditController } from "/src/canvas/route-edit.ts";
   import { createConnectionDraft, connectionDraftRoute, reduceConnectionDraft } from "/src/editor/connection-draft.ts";
   import { positionFromPlacementCenter } from "/src/editor/placement.ts";
   import { createDefaultOrthogonalRoute } from "/src/editor/route.ts";
+  // 这一页不连引擎，端口清单必须有个本地来源。它扮演的就是引擎，因此用的正是假引擎那份内置
+  // 定义——前端源码里不该再有第二份，端口清单的唯一权威来源是引擎（ADR 0020）。
+  // 本页不进入生产构建（`vite build` 只出 index.html），因此引入测试夹不会把 tests/ 带进产品。
+  import { BUILT_IN_PORTS } from "/tests/fake-ports.ts";
 
   const params = new URLSearchParams(location.search);
   const mode = params.get("mode") || "pan";
@@ -19,6 +29,13 @@
   const wireCount = Number(params.get("wires") || 1000);
   const registry = createComponentDefinitionRegistry();
   const projector = createCanvasSceneProjector(registry);
+
+  // 端口位宽默认 1（与既有基线逐像素一致）；`--width=8` 把每个端口都变成多位总线，
+  // 用来量多位电路的成本——位区间标注与二进制信号文本比 1 位端口更长，是唯一随位宽变化的
+  // 渲染成本（线路外观不随位宽改变，ADR 0013）。
+  const busWidth = Math.max(1, Number(params.get("width") || 1));
+  const portsForKind = (kind) =>
+    busWidth > 1 ? BUILT_IN_PORTS[kind].map((port) => ({ ...port, width: busWidth })) : BUILT_IN_PORTS[kind];
 
   const kinds = ["input", "and", "or", "not", "output"];
   const components = Array.from({ length: count }, (_, index) => {
@@ -29,12 +46,30 @@
       displayName: `Component ${index + 1}`,
       position: { x: 32 + (index % 25) * 74, y: 32 + Math.floor(index / 25) * 58 },
       lifecycle: "active",
+      // 端口清单不再来自展示定义：展示定义只有元数据，端口由引擎回传（ADR 0020）。这一页
+      // 不连引擎，因此由它自己的引擎替身给出，与真实引擎的回退规则同源。
+      ports: portsForKind(kind),
     };
   });
-  const portPoint = (component, direction) => {
+  /**
+   * 一个端口相对元件左上角的偏移。
+   *
+   * 用投影器自己的排布规则算，不另抄一份几何：端口画在哪由 `componentGeometryFor` 与
+   * `portLayoutFor` 决定，基准若自己算一套，连线端点迟早会与端口错位。
+   */
+  const portOffsetFor = (component, port, side) => {
     const definition = registry.get(component.kind);
-    const port = definition.ports.find((candidate) => candidate.direction === direction) || definition.ports[0];
-    return { port, point: { x: component.position.x + port.offset.x, y: component.position.y + port.offset.y } };
+    const geometry = componentGeometryFor(definition, component.ports);
+    const layout = portLayoutFor(definition, port.name, port.direction, side.indexOf(port), side.length, geometry);
+    return layout.offset;
+  };
+  const portPoint = (component, direction) => {
+    const ports = component.ports;
+    // 优先取该方向的端口；没有时退回第一个，与既有的合成文档取值口径一致。
+    const port = ports.find((candidate) => candidate.direction === direction) ?? ports[0];
+    const side = ports.filter((candidate) => candidate.direction === port.direction);
+    const offset = portOffsetFor(component, port, side);
+    return { port, point: { x: component.position.x + offset.x, y: component.position.y + offset.y } };
   };
   const connections = Array.from({ length: wireCount }, (_, index) => {
     const source = components[index % count];
@@ -43,8 +78,8 @@
     const to = portPoint(target, "input");
     return {
       id: `connection-${index}`,
-      source: { componentId: source.id, port: from.port.id, point: from.point },
-      target: { componentId: target.id, port: to.port.id, point: to.point },
+      source: { componentId: source.id, port: from.port.name, point: from.point },
+      target: { componentId: target.id, port: to.port.name, point: to.point },
       lifecycle: "visible",
       danglingEndpoints: [],
       route: createDefaultOrthogonalRoute(from.point, to.point),
