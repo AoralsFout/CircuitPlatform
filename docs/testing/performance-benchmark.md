@@ -32,7 +32,27 @@ pnpm --filter @circuit-platform/desktop performance:benchmark --mode=route
 
 输出 JSON 中的 `p95FrameMs` 必须不超过 `20`，且 `interacted` 必须为 `true`。`frameP50Ms` / `frameP95Ms` 是诊断字段，**不参与 `pass` 判定**：基准固定使用软件渲染（`disable-gpu`），绝对帧间隔不可跨环境比较。`interacted` 由基准自检得出：每种模式都要求可观察的交互证据（视口移动、预览出现、草稿点数、折点预览），只测到空转的基准会直接失败，而不是给出漂亮的数字。基准失败时命令返回非零状态；本地排查可加 `--no-fail` 只输出数据。
 
-`--components=` 与 `--wires=` 可改变规模，只用于定位成本随规模的变化，验收口径固定为 500 / 1,000。输出中的 `domElements` 与 `smilAnimations` 用于成本定位。
+`--components=` 与 `--wires=` 可改变规模，只用于定位成本随规模的变化，验收口径固定为 500 / 1,000。`--width=` 改变合成文档里端口的位置数，默认为 1（既有基线口径），`--width=8` 用来量多位电路的成本。输出中的 `portWidth` 回报本次用的位宽，`domElements` 与 `smilAnimations` 用于成本定位。
+
+## 端口清单的来源（Phase 4.5 的一次修复）
+
+基准页要自己造 500 元件 / 1000 连线的合成文档，而它**不连引擎**，端口清单因此必须有个本地来源。
+
+Phase 4.5 里 `ComponentDefinition` 去掉了 `ports`（端口清单改由引擎回传，展示定义只保留元数据，`963e77d`），但那次改动漏了 `benchmark.html`——它仍在读 `definition.ports`。后果不是「跑得慢」，而是**五种模式全部挂死**：`undefined.find(...)` 抛 TypeError 让模块脚本在构造连线时中断，`window.__benchmarkReady` 永不置上，`performance-benchmark-runner.cjs` 一直等下去，命令既不报错也不打印。本基准不在 `pnpm verify` 里，所以合并时没有任何一步会碰它。
+
+修法遵循 ADR 0020：基准页**不新增端口定义**，而是复用它自己的引擎替身——`tests/fake-ports.ts` 的 `BUILT_IN_PORTS`。那一份与 `visual-regression.html` 的 `visualPorts` 同类，都是「扮演引擎的夹具必须有的内置定义」，不是前端源码里的第二份副本。本页不进入生产构建（`vite build` 只出 `index.html`），引入测试夹不会把 `tests/` 带进产品。
+
+连线端点也不再由基准页自己拼几何，而是走投影器自己的 `componentGeometryFor` + `portLayoutFor`——端口画在哪由它们决定，基准若自己算一套，端点迟早与端口错位。**修复后 DOM 元素数与修复前的基线逐项相同**（下表），说明这套几何重建是忠实的。
+
+## 多位电路的成本（`--width=`）
+
+端口位宽默认 1，既有基线因此逐像素不变。`--width=8` 把合成文档里每个端口都变成 8 位总线，用来回答「多位电路的帧耗时是否仍满足 Phase 3 的预算」：位区间标注（`out[7:0]`）与二进制信号文本（`1010`）比 1 位端口更长，这是唯一随位宽变化的渲染成本——线路外观不随位宽改变（ADR 0013）。
+
+```powershell
+pnpm --filter @circuit-platform/desktop performance:benchmark --mode=wire --width=8
+```
+
+结果见下表「8 位」一栏：五种模式 P95 全部 ≤ 5.9ms，远在 20ms 预算内；DOM 元素数与 1 位完全相同（位宽只改文本内容，不改元素数量）。
 
 ## 当前结果
 
@@ -47,6 +67,32 @@ pnpm --filter @circuit-platform/desktop performance:benchmark --mode=route
 | Route 折点拖动 | 0.2ms | 55.8ms | 78.7ms | 9,032 | 0 | 达标 |
 
 五种模式的 P95 全部满足 20ms 预算，`interacted` 全部为 `true`。这是 Phase 4 完整落地之后的复测（issue #24）：本阶段改了工具栏、新增了运行控制按钮、改了工作区绑定，但基准直接挂 `CircuitCanvas`、不经过 Workspace，实测 P95 与 DOM 元素数都没有变化。帧间隔 P50/P95 是诊断字段，含义与局限见下。
+
+### Phase 4.5 复测（2026-09-18，issue #32）
+
+同一台机器、同一命令、500 Component / 1,000 Wire。先修好上一节的端口清单来源问题，再重跑：
+
+| 交互 | P95 | 帧间隔 P50 | 帧间隔 P95 | DOM 元素 | SMIL 动画 | 结果 |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| 连续视口平移 | 0.2ms | 5.6ms | 7.8ms | 9,026 | 0 | 达标 |
+| Component 拖动预览 | 0.2ms | 68.9ms | 86.2ms | 9,026 | 0 | 达标 |
+| 放置 ghost 跟随 | 2.5ms | 4.2ms | 5.3ms | 9,031 | 0 | 达标 |
+| ConnectionDraft 布线 | 1.1ms | 4.7ms | 8.7ms | 9,027 | 0 | 达标 |
+| Route 折点拖动 | 0.2ms | 60.2ms | 97.4ms | 9,032 | 0 | 达标 |
+
+P95 逐项与上一次持平或更低（布线 1.8 → 1.1ms），**DOM 元素数五项全部逐项相同**——这是端口几何重建忠实的一处旁证。帧间隔 P50 的 60.2 / 68.9ms 落在既有记录的 60–71ms 区间内，与记录一致。
+
+多位电路（`--width=8`，每个端口都是 8 位总线）：
+
+| 交互 | P95 | 帧间隔 P50 | 帧间隔 P95 | DOM 元素 | 结果 |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 连续视口平移 | 0.2ms | 6.1ms | 8.4ms | 9,026 | 达标 |
+| Component 拖动预览 | 0.2ms | 67.7ms | 92.1ms | 9,026 | 达标 |
+| 放置 ghost 跟随 | 2.2ms | 4.2ms | 5.2ms | 9,031 | 达标 |
+| ConnectionDraft 布线 | 5.9ms | 4.7ms | 8.8ms | 9,027 | 达标 |
+| Route 折点拖动 | 0.2ms | 68.1ms | 91.1ms | 9,032 | 达标 |
+
+五种模式 P95 全部 ≤ 5.9ms，落在 Phase 3 的 20ms 预算内。位宽带来的唯一变化在布线与放置这两个「渲染落在采样窗口内」的模式上（布线 1.1 → 5.9ms），来源是更长的位区间标注与二进制信号文本；平移、拖动、Route 的渲染本就不在采样窗口内，因此读数不变。DOM 元素数与 1 位完全相同——位宽只改文本内容，不改元素数量。
 
 ### 采样口径的一个已知不对称
 

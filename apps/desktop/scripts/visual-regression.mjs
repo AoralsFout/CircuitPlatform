@@ -7,7 +7,12 @@ import { createServer } from "vite";
 
 const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const outputRoot = resolve(desktopRoot, "artifacts", "visual-regression");
-const states = ["default", "empty", "selected-component", "selected-wire", "draft", "dangling", "pending", "error", "running", "paused"];
+const states = [
+  "default", "empty", "selected-component", "selected-wire", "draft", "dangling", "pending", "error", "running", "paused",
+  // 多位电路（Phase 4.5）：画布上的位区间标注与二进制信号文本、检查器的位宽编辑与位区间列表、
+  // 输入设置里的按位按钮组（展开 / 收起，8 位与 1 位两种）。
+  "bus-canvas", "bus-inspector", "bus-ranges", "bus-bits-expanded", "bus-bits-collapsed", "bus-bit-single",
+];
 const themes = ["dark", "light"];
 const viewports = {
   regular: { width: 1440, height: 900 },
