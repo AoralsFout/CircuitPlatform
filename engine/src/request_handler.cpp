@@ -1,9 +1,13 @@
 #include "circuit/request_handler.hpp"
 
+#include <algorithm>
 #include <cstddef>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace circuit {
 namespace {
@@ -42,12 +46,6 @@ std::string signalValueToJson(const SignalValue& value) {
     return "\"" + value.bits() + "\"";
 }
 
-/**
- * 本票所有端口的位宽恒为 1。位宽成为 `Port` 的属性后（Phase 4.5 的下一票），这个常量
- * 换成读目标端口声明的位宽。
- */
-constexpr std::size_t portWidth = 1;
-
 std::string responseWithId(std::string_view type, std::string_view requestId) {
     return "{\"type\":\"" + protocol::escapeJson(type) +
            "\",\"requestId\":\"" + protocol::escapeJson(requestId) + "\"";
@@ -56,6 +54,126 @@ std::string responseWithId(std::string_view type, std::string_view requestId) {
 std::string missingField(const protocol::Request& request, std::string_view field) {
     return protocol::errorResponse(
         request.requestId, "bad_request", "缺少字段: " + std::string(field));
+}
+
+std::optional<std::uint32_t> toPortWidth(std::uint64_t value) {
+    if (value == 0 || value > std::numeric_limits<std::uint32_t>::max()) {
+        return std::nullopt;
+    }
+    return static_cast<std::uint32_t>(value);
+}
+
+// 位区间的两端是从 0 开始的位序号，因此 0 是合法取值；只有超出范围才拒绝。
+std::optional<std::uint32_t> toBitIndex(std::uint64_t value) {
+    if (value > std::numeric_limits<std::uint32_t>::max()) {
+        return std::nullopt;
+    }
+    return static_cast<std::uint32_t>(value);
+}
+
+/** 端口清单翻译的结果：要么是一份领域端口清单，要么是一条可展示的错误。 */
+struct PortListResult {
+    std::optional<std::vector<Port>> ports;
+    std::string code;
+    std::string message;
+};
+
+/**
+ * 把协议里的端口清单翻译成领域端口，并逐项校验。
+ *
+ * 校验分两层：方向名、位宽取值、重复端口名这些是清单本身能不能成立的问题；位宽与位区间是否
+ * 自洽交给 `validatePort`，因为那是端口的领域规则，与协议形状无关。
+ * @param specs 协议层解析出的端口声明。
+ * @return 全部合法时返回领域端口清单，否则返回应报告的错误码与文案。
+ */
+PortListResult portListFromSpecs(const std::vector<protocol::PortSpec>& specs) {
+    std::vector<Port> ports;
+    ports.reserve(specs.size());
+
+    for (const auto& spec : specs) {
+        PortDirection direction{};
+        if (spec.direction == "input") {
+            direction = PortDirection::Input;
+        } else if (spec.direction == "output") {
+            direction = PortDirection::Output;
+        } else {
+            return {{}, "bad_request", "端口方向必须是 input 或 output"};
+        }
+
+        const auto width = toPortWidth(spec.width);
+        if (!width.has_value()) {
+            return {{}, "invalid_width", "端口位宽必须是正整数"};
+        }
+
+        Port port{.name = spec.name, .direction = direction, .width = *width, .bitRange = std::nullopt};
+        if (spec.bitRange.has_value()) {
+            const auto msb = toBitIndex(spec.bitRange->msb);
+            const auto lsb = toBitIndex(spec.bitRange->lsb);
+            if (!msb.has_value() || !lsb.has_value()) {
+                return {{}, "invalid_bit_range", "位区间的两端必须是非负整数"};
+            }
+            port.bitRange = PortBitRange{*msb, *lsb};
+        }
+
+        // 重名的端口会让 PortId 指不到唯一一个端口，这份清单因此不成立。
+        const auto duplicate = std::find_if(
+            ports.begin(), ports.end(),
+            [&port](const Port& existing) { return existing.name == port.name; });
+        if (duplicate != ports.end()) {
+            return {{}, "bad_request", "端口清单里的端口名不能重复"};
+        }
+
+        switch (validatePort(port)) {
+        case PortError::None:
+            break;
+        case PortError::InvalidWidth:
+            return {{}, "invalid_width", "端口位宽必须是正整数"};
+        case PortError::InvalidBitRange:
+            return {{}, "invalid_bit_range",
+                    "位区间必须满足 msb >= lsb，且位宽等于 msb - lsb + 1"};
+        }
+        ports.push_back(std::move(port));
+    }
+
+    return {std::move(ports), "", ""};
+}
+
+// 端口清单的出协议形状与 `component_added` / `port_width_set` 共用一份，避免两处漂移。
+std::string portListToJson(const std::vector<Port>& ports) {
+    std::string result = "[";
+    bool first = true;
+    for (const auto& port : ports) {
+        if (!first) result += ",";
+        first = false;
+        result += "{\"name\":\"" + protocol::escapeJson(port.name) + "\",\"direction\":\"" +
+                  (port.direction == PortDirection::Input ? "input" : "output") +
+                  "\",\"width\":" + std::to_string(port.width);
+        if (port.bitRange.has_value()) {
+            result += ",\"bitRange\":{\"msb\":" + std::to_string(port.bitRange->msb) +
+                      ",\"lsb\":" + std::to_string(port.bitRange->lsb) + "}";
+        }
+        result += "}";
+    }
+    return result + "]";
+}
+
+// 读取一个元件当前的端口清单；元件不存在时给出空清单，调用方只在元件确实存在时使用它。
+std::vector<Port> portsOf(const Circuit& circuit, ComponentId id) {
+    const auto component = circuit.component(id);
+    return component.has_value() ? component->ports : std::vector<Port>{};
+}
+
+// Input 元件唯一那个输出端口的位宽。长度校验因此读的是端口自己声明的位宽，而不是全局常量。
+std::optional<std::uint32_t> inputPortWidth(const Circuit& circuit, ComponentId id) {
+    const auto component = circuit.component(id);
+    if (!component.has_value() || component->kind != ComponentKind::Input) {
+        return std::nullopt;
+    }
+
+    const auto port = std::find_if(
+        component->ports.begin(), component->ports.end(),
+        [](const Port& candidate) { return candidate.name == "out"; });
+    return port == component->ports.end() ? std::nullopt : std::optional{port->width};
 }
 
 // 从零建立一份仿真状态，等价于「刚创建时」的样子：全部输出回到初始值、Clock 回到 0、
@@ -96,10 +214,66 @@ std::string handleRequest(
             return protocol::errorResponse(request.requestId, "invalid_kind", "不支持的元件类型");
         }
 
-        const auto id = circuit.addComponent(*kind);
+        // 端口清单是位宽的唯一权威来源：带着清单来就按清单建立，省略时回退到内置定义。
+        // 前端对内置类型不自己写一份清单再发过来——那正好重建了本变更要消灭的第二份定义。
+        ComponentId id{};
+        if (!request.ports.present) {
+            id = circuit.addComponent(*kind);
+        } else {
+            if (!request.ports.wellFormed) {
+                return protocol::errorResponse(
+                    request.requestId, "bad_request", "ports 字段形状不合法");
+            }
+            const auto ports = portListFromSpecs(request.ports.ports);
+            if (!ports.ports.has_value()) {
+                return protocol::errorResponse(request.requestId, ports.code, ports.message);
+            }
+            id = circuit.addComponent(*kind, *ports.ports);
+        }
+
         reconcileSimulation(circuit, simulation);
+        // 回传该元件实际的端口清单，调用方因此不必内置一份无人校验的副本。
         return responseWithId("component_added", request.requestId) +
-               ",\"componentId\":" + std::to_string(id) + "}";
+               ",\"componentId\":" + std::to_string(id) +
+               ",\"ports\":" + portListToJson(portsOf(circuit, id)) + "}";
+    }
+
+    if (request.type == "set_port_width") {
+        if (!request.componentId.has_value()) return missingField(request, "componentId");
+        if (!request.ports.present) return missingField(request, "ports");
+        if (!request.ports.wellFormed) {
+            return protocol::errorResponse(request.requestId, "bad_request", "ports 字段形状不合法");
+        }
+
+        const auto ports = portListFromSpecs(request.ports.ports);
+        if (!ports.ports.has_value()) {
+            return protocol::errorResponse(request.requestId, ports.code, ports.message);
+        }
+
+        // 回传的是一份差分：本次改宽**造成**的悬空连接，即改宽前不悬空、改宽后悬空的那些。
+        // 改宽前就因为端点缺失而悬空的连接不是这次变更的结果，调用方本来就知道它们。
+        const auto danglingBefore = circuit.danglingConnections();
+        if (!circuit.setComponentPorts(*request.componentId, *ports.ports)) {
+            return protocol::errorResponse(request.requestId, "component_not_found", "找不到元件");
+        }
+        reconcileSimulation(circuit, simulation);
+
+        std::string dangling = ",\"danglingConnectionIds\":[";
+        bool first = true;
+        for (const auto connectionId : circuit.danglingConnections()) {
+            if (std::find(danglingBefore.begin(), danglingBefore.end(), connectionId) !=
+                danglingBefore.end()) {
+                continue;
+            }
+            if (!first) dangling += ",";
+            first = false;
+            dangling += std::to_string(connectionId);
+        }
+        dangling += "]";
+
+        return responseWithId("port_width_set", request.requestId) +
+               ",\"componentId\":" + std::to_string(*request.componentId) +
+               ",\"ports\":" + portListToJson(portsOf(circuit, *request.componentId)) + dangling + "}";
     }
 
     if (request.type == "remove_component") {
@@ -127,6 +301,13 @@ std::string handleRequest(
             {*request.sourceComponentId, *request.sourcePort},
             {*request.targetComponentId, *request.targetPort});
         if (!result.succeeded()) {
+            // 位宽不匹配是一个用户能修、也需要理解原因的拒绝，与「端点方向不对」这类
+            // 编辑器不该发出的请求分开报告，调用方才能给出可展示的理由。
+            if (result.error == ConnectionError::WidthMismatch) {
+                return protocol::errorResponse(
+                    request.requestId, "width_mismatch",
+                    "两端端口位宽不同，不能直接连接；需要换宽度时用合线器显式构造");
+            }
             return protocol::errorResponse(
                 request.requestId, "invalid_connection", "连接端点不符合 Circuit 规则");
         }
@@ -154,13 +335,18 @@ std::string handleRequest(
     if (request.type == "set_input") {
         if (!request.componentId.has_value()) return missingField(request, "componentId");
         if (!request.value.has_value()) return missingField(request, "value");
+        // 长度先按字符集判定再按位宽判定：空串与含其它字符的值连信号值都不是，报 invalid_signal；
+        // 只含 0/1/X 但长度不对的值本身合法，只是放不进这个端口，报 invalid_width。
         const auto value = signalValueFromName(*request.value);
         if (!value.has_value()) {
             return protocol::errorResponse(request.requestId, "invalid_signal", "信号值必须是 0、1 或 X");
         }
-        // 长度先按字符集判定再按位宽判定：空串与含其它字符的值连信号值都不是，报 invalid_signal；
-        // 只含 0/1/X 但长度不对的值本身合法，只是放不进这个端口，报 invalid_width。
-        if (value->width() != portWidth) {
+
+        const auto width = inputPortWidth(circuit, *request.componentId);
+        if (!width.has_value()) {
+            return protocol::errorResponse(request.requestId, "invalid_input", "目标元件不是有效的 Input");
+        }
+        if (value->width() != *width) {
             return protocol::errorResponse(
                 request.requestId, "invalid_width", "信号值长度必须等于端口位宽");
         }

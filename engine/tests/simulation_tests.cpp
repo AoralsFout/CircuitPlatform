@@ -909,6 +909,124 @@ void keeps_the_sampled_bit_and_its_previous_clock_across_a_structure_change() {
     assert(simulation.signal({flipFlopId, "q"}) == circuit::SignalValue::one());
 }
 
+// 逐位值不是「整体确定或整体未知」：某一位未知只影响那一位，其余位照常传播。
+void carries_a_multi_bit_value_through_a_wide_connection() {
+    circuit::Circuit circuit;
+    const auto inputId = circuit.addComponent(
+        circuit::ComponentKind::Input,
+        {{"out", circuit::PortDirection::Output, 8, std::nullopt}});
+    const auto outputId = circuit.addComponent(
+        circuit::ComponentKind::Output,
+        {{"in", circuit::PortDirection::Input, 8, std::nullopt}});
+
+    assert(circuit.addConnection({inputId, "out"}, {outputId, "in"}).succeeded());
+
+    circuit::Simulation simulation(circuit);
+    assert(simulation.setInput(inputId, circuit::SignalValue::fromBits("10X10010")));
+    assert(simulation.settle().succeeded());
+
+    const auto received = simulation.signal({outputId, "in"});
+    assert(received.has_value());
+    assert(*received == circuit::SignalValue::fromBits("10X10010"));
+}
+
+// 位宽不再匹配的连接与悬空连接是同一种表达：不参与仿真，接收端读到的是全 X。
+void skips_a_connection_whose_ends_no_longer_share_a_width() {
+    circuit::Circuit circuit;
+    const auto sourceId = circuit.addComponent(
+        circuit::ComponentKind::Input,
+        {{"out", circuit::PortDirection::Output, 8, std::nullopt}});
+    const auto targetId = circuit.addComponent(
+        circuit::ComponentKind::Output,
+        {{"in", circuit::PortDirection::Input, 8, std::nullopt}});
+    assert(circuit.addConnection({sourceId, "out"}, {targetId, "in"}).succeeded());
+
+    circuit::Simulation simulation(circuit);
+    assert(simulation.setInput(sourceId, circuit::SignalValue::fromBits("10101010")));
+    assert(simulation.settle().succeeded());
+    assert(simulation.signal({targetId, "in"}) == circuit::SignalValue::fromBits("10101010"));
+
+    // 改宽之后不再匹配：接收端按自己的位宽读到全 X，而不是被截断成 "1010" 或补零成 "00001010"。
+    assert(circuit.setComponentPorts(
+        targetId, {{"in", circuit::PortDirection::Input, 4, std::nullopt}}));
+    simulation.reconcile();
+    assert(simulation.settle().succeeded());
+    assert(simulation.signal({targetId, "in"}) == circuit::SignalValue::fromBits("XXXX"));
+}
+
+// 位宽变了的端口按初值重建，不留长度对不上端口的陈旧值。
+void rebuilds_a_widened_port_as_unknown_of_the_new_width() {
+    circuit::Circuit circuit;
+    const auto inputId = circuit.addComponent(
+        circuit::ComponentKind::Input,
+        {{"out", circuit::PortDirection::Output, 2, std::nullopt}});
+
+    circuit::Simulation simulation(circuit);
+    assert(simulation.setInput(inputId, circuit::SignalValue::fromBits("10")));
+    assert(simulation.settle().succeeded());
+    assert(simulation.signal({inputId, "out"}) == circuit::SignalValue::fromBits("10"));
+
+    // 不采用「按位对齐保留低位」：旧值不以任何形式保留，新值是按新位宽构造的初值。
+    assert(circuit.setComponentPorts(
+        inputId, {{"out", circuit::PortDirection::Output, 5, std::nullopt}}));
+    simulation.reconcile();
+    assert(simulation.signal({inputId, "out"}) == circuit::SignalValue::fromBits("XXXXX"));
+}
+
+// 位宽没变的端口照旧按身份保留当前值——改宽只影响真正变了的那些端口。
+void keeps_the_value_of_ports_whose_width_did_not_change() {
+    circuit::Circuit circuit;
+    const auto inputId = circuit.addComponent(circuit::ComponentKind::Input);
+    const auto clockId = circuit.addComponent(circuit::ComponentKind::Clock);
+
+    circuit::Simulation simulation(circuit);
+    assert(simulation.setInput(inputId, circuit::SignalValue::one()));
+    assert(simulation.settle().succeeded());
+
+    // 给电路加一个元件并重新推导：两个既有端口的位宽都没变，值必须原样保留。
+    circuit.addComponent(circuit::ComponentKind::Output);
+    simulation.reconcile();
+
+    assert(simulation.signal({inputId, "out"}) == circuit::SignalValue::one());
+    assert(simulation.signal({clockId, "out"}) == circuit::SignalValue::zero());
+}
+
+// 位宽大于 1 的 Clock 同样在「整值全 0」与「整值全 1」之间翻转，长度始终等于端口位宽。
+void flips_a_wide_clock_within_its_own_width() {
+    circuit::Circuit circuit;
+    const auto clockId = circuit.addComponent(
+        circuit::ComponentKind::Clock,
+        {{"out", circuit::PortDirection::Output, 4, std::nullopt}});
+
+    circuit::Simulation simulation(circuit);
+    assert(simulation.signal({clockId, "out"}) == circuit::SignalValue::fromBits("0000"));
+
+    assert(simulation.tick().succeeded());
+    const auto high = simulation.signal({clockId, "out"});
+    assert(high.has_value());
+    assert(high->width() == 4);
+    assert(*high == circuit::SignalValue::fromBits("1111"));
+
+    assert(simulation.tick().succeeded());
+    assert(simulation.signal({clockId, "out"}) == circuit::SignalValue::fromBits("0000"));
+}
+
+// reset 在多位的时钟上同样回到等宽初值。
+void resets_a_wide_clock_to_its_initial_value() {
+    circuit::Circuit circuit;
+    const auto clockId = circuit.addComponent(
+        circuit::ComponentKind::Clock,
+        {{"out", circuit::PortDirection::Output, 4, std::nullopt}});
+
+    circuit::Simulation simulation(circuit);
+    assert(simulation.tick().succeeded());
+    assert(simulation.signal({clockId, "out"}) == circuit::SignalValue::fromBits("1111"));
+
+    simulation.reset();
+    assert(simulation.signal({clockId, "out"}) == circuit::SignalValue::fromBits("0000"));
+    assert(simulation.step() == 0);
+}
+
 int main() {
     initializes_the_clock_output_to_zero();
     flips_the_clock_once_per_tick();
@@ -945,5 +1063,11 @@ int main() {
     inverts_a_multi_bit_value_bit_by_bit();
     settles_a_multi_bit_not_chain();
     rejects_a_combinational_feedback_loop();
+    carries_a_multi_bit_value_through_a_wide_connection();
+    skips_a_connection_whose_ends_no_longer_share_a_width();
+    rebuilds_a_widened_port_as_unknown_of_the_new_width();
+    keeps_the_value_of_ports_whose_width_did_not_change();
+    flips_a_wide_clock_within_its_own_width();
+    resets_a_wide_clock_to_its_initial_value();
     return 0;
 }

@@ -501,5 +501,178 @@ int main() {
                widthCircuit, widthSimulation)
                .find("\"code\":\"bad_request\"") != std::string::npos);
 
+    // ---- 端口清单、位宽与 set_port_width ----
+
+    // 省略端口清单时引擎回退到内置定义，并把实际清单回传。前端因此不必内置一份无人校验的副本。
+    const auto addedWithoutPorts = dispatch(
+        R"({"type":"add_component","requestId":"ports-builtin","kind":"and"})",
+        circuit, simulation);
+    assert(addedWithoutPorts.find("\"code\"") == std::string::npos);
+    assert(addedWithoutPorts.find("\"componentId\":5") != std::string::npos);
+    assert(addedWithoutPorts.find(
+               "\"ports\":[{\"name\":\"in1\",\"direction\":\"input\",\"width\":1},"
+               "{\"name\":\"in2\",\"direction\":\"input\",\"width\":1},"
+               "{\"name\":\"out\",\"direction\":\"output\",\"width\":1}]") != std::string::npos);
+
+    // 携带端口清单时按清单建立，位区间跟着端口一起回传。
+    const auto addedWithPorts = dispatch(
+        R"({"type":"add_component","requestId":"ports-supplied","kind":"input","ports":[{"name":"out","direction":"output","width":4,"bitRange":{"msb":7,"lsb":4}}]})",
+        circuit, simulation);
+    assert(addedWithPorts.find("\"code\"") == std::string::npos);
+    assert(addedWithPorts.find("\"componentId\":6") != std::string::npos);
+    assert(addedWithPorts.find(
+               "\"ports\":[{\"name\":\"out\",\"direction\":\"output\",\"width\":4,"
+               "\"bitRange\":{\"msb\":7,\"lsb\":4}}]") != std::string::npos);
+
+    const auto wideOutput = dispatch(
+        R"({"type":"add_component","requestId":"ports-wide-output","kind":"output","ports":[{"name":"in","direction":"input","width":4}]})",
+        circuit, simulation);
+    assert(wideOutput.find("\"componentId\":7") != std::string::npos);
+
+    // 长度按目标端口自己声明的位宽判定，不再是常量 1。
+    assert(dispatch(
+               R"({"type":"set_input","requestId":"set-wide","componentId":6,"value":"10X1"})",
+               circuit, simulation)
+               .find("\"type\":\"input_set\"") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"set_input","requestId":"set-wide-wrong-length","componentId":6,"value":"10"})",
+               circuit, simulation)
+               .find("\"code\":\"invalid_width\"") != std::string::npos);
+
+    // 两端位宽不同直接拒绝，报的是专门的 width_mismatch：不做零扩展、符号扩展或截断。
+    const auto widthMismatch = dispatch(
+        R"({"type":"add_connection","requestId":"connect-width-mismatch","sourceComponentId":6,"sourcePort":"out","targetComponentId":4,"targetPort":"in"})",
+        circuit, simulation);
+    assert(widthMismatch.find("\"code\":\"width_mismatch\"") != std::string::npos);
+
+    // 位宽匹配时正常连接，且逐位值原样通过协议往返：某一位未知不影响其余位。
+    assert(dispatch(
+               R"({"type":"add_connection","requestId":"connect-wide","sourceComponentId":6,"sourcePort":"out","targetComponentId":7,"targetPort":"in"})",
+               circuit, simulation)
+               .find("\"connectionId\"") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"settle","requestId":"settle-wide"})", circuit, simulation)
+               .find("\"type\":\"settled\"") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"get_signal","requestId":"read-wide","componentId":7,"port":"in"})",
+               circuit, simulation)
+               .find("\"value\":\"10X1\"") != std::string::npos);
+
+    // 改宽是一次整体替换：回传替换后的端口清单，以及因本次改宽而转为悬空的连接。
+    const auto widthSet = dispatch(
+        R"({"type":"set_port_width","requestId":"widen","componentId":7,"ports":[{"name":"in","direction":"input","width":2}]})",
+        circuit, simulation);
+    assert(widthSet.find("\"type\":\"port_width_set\"") != std::string::npos);
+    assert(widthSet.find("\"componentId\":7") != std::string::npos);
+    assert(widthSet.find("\"ports\":[{\"name\":\"in\",\"direction\":\"input\",\"width\":2}]") !=
+           std::string::npos);
+    assert(widthSet.find("\"danglingConnectionIds\":[4]") != std::string::npos);
+
+    // 改宽后不再匹配的连接不参与仿真：接收端按自己的位宽读到全 X。
+    assert(dispatch(
+               R"({"type":"settle","requestId":"settle-after-widen"})", circuit, simulation)
+               .find("\"type\":\"settled\"") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"get_signal","requestId":"read-after-widen","componentId":7,"port":"in"})",
+               circuit, simulation)
+               .find("\"value\":\"XX\"") != std::string::npos);
+
+    // 改回原宽，连接自动恢复有效，而且不再被报告为「本次转为悬空」。
+    const auto widthRestored = dispatch(
+        R"({"type":"set_port_width","requestId":"narrow-again","componentId":7,"ports":[{"name":"in","direction":"input","width":4}]})",
+        circuit, simulation);
+    assert(widthRestored.find("\"danglingConnectionIds\":[]") != std::string::npos);
+
+    // 改宽保留元件身份：同一个 componentId 仍然可用，连接的读数也回来了。
+    assert(dispatch(
+               R"({"type":"get_signal","requestId":"read-restored","componentId":7,"port":"in"})",
+               circuit, simulation)
+               .find("\"value\":\"10X1\"") != std::string::npos);
+
+    // 端口清单本身的形状与领域规则各有稳定的错误码。
+    const auto zeroWidth = dispatch(
+        R"({"type":"set_port_width","requestId":"zero-width","componentId":7,"ports":[{"name":"in","direction":"input","width":0}]})",
+        circuit, simulation);
+    assert(zeroWidth.find("\"code\":\"invalid_width\"") != std::string::npos);
+
+    const auto badRange = dispatch(
+        R"({"type":"set_port_width","requestId":"bad-range","componentId":7,"ports":[{"name":"in","direction":"input","width":4,"bitRange":{"msb":2,"lsb":5}}]})",
+        circuit, simulation);
+    assert(badRange.find("\"code\":\"invalid_bit_range\"") != std::string::npos);
+
+    const auto inconsistentRange = dispatch(
+        R"({"type":"set_port_width","requestId":"inconsistent-range","componentId":7,"ports":[{"name":"in","direction":"input","width":3,"bitRange":{"msb":7,"lsb":4}}]})",
+        circuit, simulation);
+    assert(inconsistentRange.find("\"code\":\"invalid_bit_range\"") != std::string::npos);
+
+    const auto badDirection = dispatch(
+        R"({"type":"set_port_width","requestId":"bad-direction","componentId":7,"ports":[{"name":"in","direction":"sideways","width":1}]})",
+        circuit, simulation);
+    assert(badDirection.find("\"code\":\"bad_request\"") != std::string::npos);
+
+    const auto duplicateName = dispatch(
+        R"({"type":"set_port_width","requestId":"duplicate-name","componentId":7,"ports":[{"name":"in","direction":"input","width":1},{"name":"in","direction":"input","width":2}]})",
+        circuit, simulation);
+    assert(duplicateName.find("\"code\":\"bad_request\"") != std::string::npos);
+
+    // ports 字段存在但形状不合法，与「省略该字段」必须区分开：前者是一次应当被拒绝的请求。
+    const auto malformedPorts = dispatch(
+        R"({"type":"set_port_width","requestId":"malformed-ports","componentId":7,"ports":5})",
+        circuit, simulation);
+    assert(malformedPorts.find("\"code\":\"bad_request\"") != std::string::npos);
+
+    const auto malformedPortElement = dispatch(
+        R"({"type":"add_component","requestId":"malformed-element","kind":"input","ports":[{"direction":"output","width":1}]})",
+        circuit, simulation);
+    assert(malformedPortElement.find("\"code\":\"bad_request\"") != std::string::npos);
+
+    const auto missingPortsField = dispatch(
+        R"({"type":"set_port_width","requestId":"missing-ports","componentId":7})",
+        circuit, simulation);
+    assert(missingPortsField.find("\"code\":\"bad_request\"") != std::string::npos);
+
+    const auto unknownComponentForWidth = dispatch(
+        R"({"type":"set_port_width","requestId":"unknown-width-component","componentId":99,"ports":[{"name":"in","direction":"input","width":1}]})",
+        circuit, simulation);
+    assert(unknownComponentForWidth.find("\"code\":\"component_not_found\"") != std::string::npos);
+
+    // 失败的请求不留下半成品：被拒之后端口清单仍是上一次成功的那一份。
+    assert(dispatch(
+               R"({"type":"get_signal","requestId":"read-after-rejects","componentId":7,"port":"in"})",
+               circuit, simulation)
+               .find("\"value\":\"10X1\"") != std::string::npos);
+
+    // 位区间是端口自己的属性，跟着清单一起走。
+    const auto rangedPort = dispatch(
+        R"({"type":"set_port_width","requestId":"branch-range","componentId":7,"ports":[{"name":"in","direction":"input","width":4,"bitRange":{"msb":3,"lsb":0}}]})",
+        circuit, simulation);
+    assert(rangedPort.find("\"bitRange\":{\"msb\":3,\"lsb\":0}") != std::string::npos);
+
+    // 解析层要认得出嵌套结构：端口名与某个键名相同不能被当成那个键。
+    const auto nestedNames = circuit::protocol::parseRequest(
+        R"({"type":"add_component","requestId":"nested","kind":"input","ports":[{"name":"bitRange","direction":"output","width":2,"bitRange":{"msb":1,"lsb":0}}]})");
+    assert(nestedNames.has_value());
+    assert(nestedNames->ports.present);
+    assert(nestedNames->ports.wellFormed);
+    assert(nestedNames->ports.ports.size() == 1);
+    assert(nestedNames->ports.ports[0].name == "bitRange");
+    assert(nestedNames->ports.ports[0].direction == "output");
+    assert(nestedNames->ports.ports[0].width == 2);
+    assert(nestedNames->ports.ports[0].bitRange.has_value());
+    assert(nestedNames->ports.ports[0].bitRange->msb == 1);
+    assert(nestedNames->ports.ports[0].bitRange->lsb == 0);
+
+    // 省略 ports 字段时 present 为假，与「声明了一份空清单」区分开。
+    const auto withoutPortsField = circuit::protocol::parseRequest(
+        R"({"type":"add_component","requestId":"absent","kind":"input"})");
+    assert(withoutPortsField.has_value());
+    assert(!withoutPortsField->ports.present);
+
+    const auto withEmptyPorts = circuit::protocol::parseRequest(
+        R"({"type":"add_component","requestId":"empty","kind":"input","ports":[]})");
+    assert(withEmptyPorts.has_value());
+    assert(withEmptyPorts->ports.present);
+    assert(withEmptyPorts->ports.wellFormed);
+    assert(withEmptyPorts->ports.ports.empty());
     return 0;
 }

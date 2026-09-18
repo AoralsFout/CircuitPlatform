@@ -167,6 +167,165 @@ void rejects_connections_with_invalid_port_directions() {
     assert(circuit.connectionCount() == 0);
 }
 
+// 内置定义的端口位宽都是 1：位宽成为 Port 的属性之后，既有元件的形状不变。
+void built_in_port_lists_declare_width_one() {
+    circuit::Circuit circuit;
+    const auto gateId = circuit.addComponent(circuit::ComponentKind::AndGate);
+    const auto gate = circuit.component(gateId);
+
+    assert(gate.has_value());
+    for (const auto& port : gate->ports) {
+        assert(port.width == 1);
+        assert(!port.bitRange.has_value());
+    }
+}
+
+// 携带端口清单时按清单建立；端口清单是位宽的唯一权威来源。
+void uses_a_supplied_port_list_instead_of_the_built_in_one() {
+    circuit::Circuit circuit;
+    const auto inputId = circuit.addComponent(
+        circuit::ComponentKind::Input,
+        {{"out", circuit::PortDirection::Output, 8, std::nullopt}});
+
+    const auto input = circuit.component(inputId);
+    assert(input.has_value());
+    assert(input->ports.size() == 1);
+    assert(input->ports[0].name == "out");
+    assert(input->ports[0].width == 8);
+}
+
+// 位区间跟着端口清单一起走，是 Port 自己的属性。
+void carries_a_bit_range_on_the_port_that_declares_it() {
+    circuit::Circuit circuit;
+    const auto splitterId = circuit.addComponent(
+        circuit::ComponentKind::Input,
+        {{"out", circuit::PortDirection::Output, 4, circuit::PortBitRange{7, 4}}});
+
+    const auto splitter = circuit.component(splitterId);
+    assert(splitter.has_value());
+    assert(splitter->ports[0].bitRange.has_value());
+    assert(splitter->ports[0].bitRange->msb == 7);
+    assert(splitter->ports[0].bitRange->lsb == 4);
+}
+
+// 两端位宽不同直接拒绝，不做零扩展、符号扩展或截断：连接根本没被创建。
+void rejects_a_connection_between_different_widths() {
+    circuit::Circuit circuit;
+    const auto wideInput = circuit.addComponent(
+        circuit::ComponentKind::Input,
+        {{"out", circuit::PortDirection::Output, 8, std::nullopt}});
+    const auto narrowOutput = circuit.addComponent(circuit::ComponentKind::Output);
+
+    const auto result = circuit.addConnection({wideInput, "out"}, {narrowOutput, "in"});
+
+    assert(!result.succeeded());
+    assert(result.error == circuit::ConnectionError::WidthMismatch);
+    assert(!result.id.has_value());
+    assert(circuit.connectionCount() == 0);
+}
+
+// 悬空的第二个条件：两端位宽不再相同。连接保留在 Circuit 里，只是不参与仿真。
+void a_width_mismatch_makes_a_connection_dangling() {
+    circuit::Circuit circuit;
+    const auto sourceId = circuit.addComponent(
+        circuit::ComponentKind::Input,
+        {{"out", circuit::PortDirection::Output, 8, std::nullopt}});
+    const auto targetId = circuit.addComponent(
+        circuit::ComponentKind::Output,
+        {{"in", circuit::PortDirection::Input, 8, std::nullopt}});
+    const auto connection = circuit.addConnection({sourceId, "out"}, {targetId, "in"});
+
+    assert(connection.succeeded());
+    assert(!circuit.isDangling(*connection.id));
+
+    assert(circuit.setComponentPorts(
+        targetId, {{"in", circuit::PortDirection::Input, 4, std::nullopt}}));
+    assert(circuit.isDangling(*connection.id));
+    assert(circuit.connectionCount() == 1);
+
+    // 改宽是一次整体替换：改回原样，两端重新匹配，连接自动恢复有效——没有需要清理的存档标志。
+    assert(circuit.setComponentPorts(
+        targetId, {{"in", circuit::PortDirection::Input, 8, std::nullopt}}));
+    assert(!circuit.isDangling(*connection.id));
+}
+
+// 改宽后不再匹配的输入端口不再占用该输入端，因此可以重接一条新的有效连接。
+void a_width_mismatched_connection_does_not_block_reconnecting_the_input() {
+    circuit::Circuit circuit;
+    const auto wideSourceId = circuit.addComponent(
+        circuit::ComponentKind::Input,
+        {{"out", circuit::PortDirection::Output, 8, std::nullopt}});
+    const auto targetId = circuit.addComponent(
+        circuit::ComponentKind::Output,
+        {{"in", circuit::PortDirection::Input, 8, std::nullopt}});
+    const auto stale = circuit.addConnection({wideSourceId, "out"}, {targetId, "in"});
+    assert(stale.succeeded());
+
+    assert(circuit.setComponentPorts(
+        targetId, {{"in", circuit::PortDirection::Input, 4, std::nullopt}}));
+    assert(circuit.isDangling(*stale.id));
+
+    const auto narrowSourceId = circuit.addComponent(
+        circuit::ComponentKind::Input,
+        {{"out", circuit::PortDirection::Output, 4, std::nullopt}});
+    const auto replacement = circuit.addConnection({narrowSourceId, "out"}, {targetId, "in"});
+
+    assert(replacement.succeeded());
+    assert(!circuit.isDangling(*replacement.id));
+    assert(circuit.connectionCount() == 2);
+}
+
+// 悬空连接的枚举与逐个询问必须给出同一套判定。
+void lists_dangling_connections_in_creation_order() {
+    circuit::Circuit circuit;
+    const auto sourceId = circuit.addComponent(circuit::ComponentKind::Input);
+    const auto firstTargetId = circuit.addComponent(circuit::ComponentKind::Output);
+    const auto secondTargetId = circuit.addComponent(circuit::ComponentKind::Output);
+    const auto first = circuit.addConnection({sourceId, "out"}, {firstTargetId, "in"});
+    const auto second = circuit.addConnection({sourceId, "out"}, {secondTargetId, "in"});
+
+    assert(first.succeeded() && second.succeeded());
+    assert(circuit.danglingConnections().empty());
+
+    assert(circuit.removeComponent(firstTargetId));
+    const auto dangling = circuit.danglingConnections();
+    assert(dangling.size() == 1);
+    assert(dangling[0] == *first.id);
+}
+
+// 端口声明本身的领域规则：位宽至少为 1，位区间必须落在自己的位宽内。
+void validates_port_width_and_bit_range() {
+    assert(circuit::validatePort({"out", circuit::PortDirection::Output, 1, std::nullopt}) ==
+           circuit::PortError::None);
+    assert(circuit::validatePort({"out", circuit::PortDirection::Output, 0, std::nullopt}) ==
+           circuit::PortError::InvalidWidth);
+    assert(circuit::validatePort(
+               {"out", circuit::PortDirection::Output, 4, circuit::PortBitRange{7, 4}}) ==
+           circuit::PortError::None);
+    assert(circuit::validatePort(
+               {"out", circuit::PortDirection::Output, 4, circuit::PortBitRange{4, 7}}) ==
+           circuit::PortError::InvalidBitRange);
+    // 位区间决定位宽，两者不一致就不是一份自洽的声明。
+    assert(circuit::validatePort(
+               {"out", circuit::PortDirection::Output, 3, circuit::PortBitRange{7, 4}}) ==
+           circuit::PortError::InvalidBitRange);
+}
+
+// 替换端口清单只动清单；元件身份不变，不存在的元件仍由返回值报告。
+void replacing_ports_keeps_the_component_identity() {
+    circuit::Circuit circuit;
+    const auto componentId = circuit.addComponent(circuit::ComponentKind::Input);
+    assert(!circuit.setComponentPorts(99, {{"out", circuit::PortDirection::Output, 2, std::nullopt}}));
+
+    assert(circuit.setComponentPorts(
+        componentId, {{"a", circuit::PortDirection::Output, 2, std::nullopt}}));
+    const auto component = circuit.component(componentId);
+    assert(component.has_value());
+    assert(component->ports.size() == 1);
+    assert(component->ports[0].name == "a");
+    assert(component->ports[0].width == 2);
+}
+
 int main() {
     adds_an_and_gate_with_two_inputs_and_one_output();
     adds_a_connection_between_valid_ports();
@@ -177,5 +336,14 @@ int main() {
     rejects_a_second_source_for_an_input_port();
     allows_one_output_to_fan_out_to_multiple_inputs();
     rejects_connections_with_invalid_port_directions();
+    built_in_port_lists_declare_width_one();
+    uses_a_supplied_port_list_instead_of_the_built_in_one();
+    carries_a_bit_range_on_the_port_that_declares_it();
+    rejects_a_connection_between_different_widths();
+    a_width_mismatch_makes_a_connection_dangling();
+    a_width_mismatched_connection_does_not_block_reconnecting_the_input();
+    lists_dangling_connections_in_creation_order();
+    validates_port_width_and_bit_range();
+    replacing_ports_keeps_the_component_identity();
     return 0;
 }

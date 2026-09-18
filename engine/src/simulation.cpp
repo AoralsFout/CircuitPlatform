@@ -61,6 +61,15 @@ char xorBit(char left, char right) {
     return left == right ? '0' : '1';
 }
 
+// Clock 的每一次推进都在「整值全 0」与「整值全 1」之间翻转，长度等于端口位宽。
+// 1 位时这就是普通的 0/1 翻转；从 X 起步同样落到全 1，因此第一次推进必然是 0 → 1。
+// 长度取端口位宽而不是常量 1：位宽大于 1 的 Clock 若写出 1 个字符，那个端口的值长度就永远
+// 对不上它自己的位宽了。
+SignalValue flippedClockValue(const SignalValue& current, std::size_t width) {
+    const bool allOnes = current.bits().find_first_not_of('1') == std::string::npos;
+    return SignalValue::fromBits(std::string(width, allOnes ? '0' : '1'));
+}
+
 // 把逐位规则套在整值上：结果与输入同位宽，每一位只由两个输入的同一位置决定。
 // 两个值的位宽必须相同——同一条 Connection 的两端声明同一个位宽。长度不等是结构错误，
 // 位宽校验会挡住产生它的连接，因此这里退回「整值未知」而不是静默产出一个长度对不上的结果。
@@ -172,9 +181,17 @@ std::optional<SignalValue> evaluateBinaryGate(
 
 }  // namespace
 
+// 端口读不到值时按它自己声明的位宽给出全 X。位宽是 Port 的属性，长度对不上就不是这个端口的值。
+SignalValue unknownPortValue(const std::vector<Component>& components, const PortId& portId) {
+    const auto* port = findPort(components, portId);
+    return SignalValue::unknown(port == nullptr ? 1 : port->width);
+}
+
 // Clock 的输出初值必须是 0：只有 0 → 1 算上升沿，从 X 起步会永远判不出第一次上升沿。
-SignalValue initialOutputValue(ComponentKind kind) {
-    return kind == ComponentKind::Clock ? SignalValue::zero() : SignalValue::unknown();
+// 位宽大于 1 时对应的是等宽的整值全 0，而不是单个 `0`——端口的初值长度永远等于它的位宽。
+SignalValue initialOutputValue(ComponentKind kind, std::size_t width) {
+    return kind == ComponentKind::Clock ? SignalValue::fromBits(std::string(width, '0'))
+                                        : SignalValue::unknown(width);
 }
 
 // 建立仿真状态，并把每个输出端初始化为该元件类型的初值。
@@ -186,12 +203,14 @@ Simulation::Simulation(const Circuit& circuit) : circuit_(circuit) {
 void Simulation::initializeOutputSignals() {
     signals_.clear();
     forEachOutputPort(circuit_.components_, [this](const Component& component, const Port& port) {
-        signals_.push_back({{component.id, port.name}, initialOutputValue(component.kind)});
+        signals_.push_back({{component.id, port.name}, initialOutputValue(component.kind, port.width)});
     });
 }
 
 // 结构变更后按元件身份重新推导状态：PortId 没变的端口留着当前值，消失的丢掉，新出现的按初值建立。
 // 按身份保留之所以安全，是因为元件身份单调递增、永不重用——同一个 id 不会换一个元件回来。
+// 保留还多一个前提：值的长度必须等于端口当前的位宽。改宽后的端口留着旧长度就成了一条永远
+// 对不上端口的陈旧值，因此位宽变了的端口按初值重建——旧值不以任何形式保留。
 void Simulation::reconcile() {
     std::vector<PortSignal> reconciled;
     reconciled.reserve(signals_.size());
@@ -201,9 +220,9 @@ void Simulation::reconcile() {
         const auto kept = std::find_if(
             signals_.begin(), signals_.end(),
             [&portId](const PortSignal& signal) { return samePort(signal.port, portId); });
-        reconciled.push_back(kept == signals_.end()
-                                 ? PortSignal{portId, initialOutputValue(component.kind)}
-                                 : *kept);
+        const bool reusable = kept != signals_.end() && kept->value.width() == port.width;
+        reconciled.push_back(reusable ? *kept
+                                      : PortSignal{portId, initialOutputValue(component.kind, port.width)});
     });
 
     signals_ = std::move(reconciled);
@@ -287,11 +306,11 @@ SimulationResult Simulation::settle() {
 
         for (const auto& component : circuit_.components_) {
             if (component.kind == ComponentKind::NotGate) {
-                const auto input = signal({component.id, "in"}).value_or(SignalValue::unknown());
+                const auto input = signal({component.id, "in"}).value_or(unknownPortValue(circuit_.components_, {component.id, "in"}));
                 changed = setOutputSignal({component.id, "out"}, invert(input)) || changed;
             } else {
-                const auto first = signal({component.id, "in1"}).value_or(SignalValue::unknown());
-                const auto second = signal({component.id, "in2"}).value_or(SignalValue::unknown());
+                const auto first = signal({component.id, "in1"}).value_or(unknownPortValue(circuit_.components_, {component.id, "in1"}));
+                const auto second = signal({component.id, "in2"}).value_or(unknownPortValue(circuit_.components_, {component.id, "in2"}));
                 const auto output = evaluateBinaryGate(component.kind, first, second);
                 if (output.has_value()) {
                     changed = setOutputSignal({component.id, "out"}, *output) || changed;
@@ -320,15 +339,15 @@ SimulationResult Simulation::tick() {
             previousClockValues_.begin(), previousClockValues_.end(),
             [&clockPort](const PortSignal& signal) { return samePort(signal.port, clockPort); });
         if (!tracked) {
-            previousClockValues_.push_back({clockPort, signal(clockPort).value_or(SignalValue::unknown())});
+            previousClockValues_.push_back({clockPort, signal(clockPort).value_or(unknownPortValue(circuit_.components_, clockPort))});
         }
     });
 
     // ② 推进每个 Clock 元件：out 在 0 与 1 之间翻转。初值是 0，因此第一次推进必然是 0 → 1。
     forEachComponentOfKind(circuit_.components_, ComponentKind::Clock, [this](const Component& component) {
         const PortId outPort{component.id, "out"};
-        const auto next = outputSignal(outPort) == SignalValue::one() ? SignalValue::zero() : SignalValue::one();
-        setOutputSignal(outPort, next);
+        const auto* port = findPort(circuit_.components_, outPort);
+        setOutputSignal(outPort, flippedClockValue(outputSignal(outPort), port == nullptr ? 1 : port->width));
     });
 
     // ③ 组合求值到稳定，让新的时钟电平经组合逻辑传播到 DFlipFlop 的 clock 端口。
@@ -341,14 +360,14 @@ SimulationResult Simulation::tick() {
     //    X → 1 无法构成可靠的上升沿，因为上一拍可能本来就是 1。
     //    判定只读端口的前后值，与元件类型无关：Clock、Input 或组合逻辑的输出都一样。
     for (auto& previous : previousClockValues_) {
-        const auto current = signal(previous.port).value_or(SignalValue::unknown());
+        const auto current = signal(previous.port).value_or(unknownPortValue(circuit_.components_, previous.port));
         // 这是「整值从全 0 变成全 1」的比较，在 1 位端口上是「该位 0 → 1」的特例：
         // 每一位独立判定（哪一位出现上升沿就采哪一位的 d）要等位宽进来、端口能声明位宽之后
         // 才有意义，那时这里的整值比较会因 `"0"` 与 `"00"` 这类长度差异静默失效。
         if (previous.value == SignalValue::zero() && current == SignalValue::one()) {
             // 采样的是第 ③ 步求值稳定之后的 d：时钟可以经组合逻辑到达 clock 端口，
             // 数据同样可能经组合逻辑到达 d，两者都必须在采样那一刻处在稳定值上。
-            const auto data = signal({previous.port.component, "d"}).value_or(SignalValue::unknown());
+            const auto data = signal({previous.port.component, "d"}).value_or(unknownPortValue(circuit_.components_, {previous.port.component, "d"}));
             setOutputSignal({previous.port.component, "q"}, data);
         }
 
@@ -384,14 +403,13 @@ std::vector<Simulation::PortSignal> Simulation::signalSnapshot() const {
     std::vector<PortSignal> snapshot = outputSignals();
     forEachComponentOfKind(circuit_.components_, ComponentKind::Output, [this, &snapshot](const Component& component) {
         const PortId receivePort{component.id, "in"};
-        snapshot.push_back({receivePort, signal(receivePort).value_or(SignalValue::unknown())});
+        snapshot.push_back({receivePort, signal(receivePort).value_or(unknownPortValue(circuit_.components_, receivePort))});
     });
     return snapshot;
 }
 
 // 输出端直接读取保存值；输入端沿 Connection 读取来源输出值。
-// 下面两处「读不到来源」返回的都是按 1 位构造的全 X：所有端口的位宽目前都是 1，
-// 位宽成为 Port 的属性后，这里与各处 `value_or` 兜底都要换成按端口声明的位宽构造。
+// 读不到来源时按**这个端口自己声明的位宽**给出全 X：长度对不上的值不是这个端口的值。
 std::optional<SignalValue> Simulation::signal(PortId portId) const {
     const auto* port = findPort(circuit_.components_, portId);
     if (port == nullptr) {
@@ -402,16 +420,20 @@ std::optional<SignalValue> Simulation::signal(PortId portId) const {
         return outputSignal(portId);
     }
 
+    // 只认两端位宽仍然相同的 Connection。位宽不再匹配的连接与悬空连接是同一种表达——
+    // 不参与仿真——因此它不提供来源，输入端读到的是全 X，而不是一条被静默截断的值。
     const auto connection = std::find_if(
         circuit_.connections_.begin(), circuit_.connections_.end(),
-        [&portId](const Connection& candidate) { return samePort(candidate.target, portId); });
+        [this, &portId, port](const Connection& candidate) {
+            if (!samePort(candidate.target, portId)) {
+                return false;
+            }
+            const auto* sourcePort = findPort(circuit_.components_, candidate.source);
+            return sourcePort != nullptr && sourcePort->direction == PortDirection::Output &&
+                   sourcePort->width == port->width;
+        });
     if (connection == circuit_.connections_.end()) {
-        return SignalValue::unknown();
-    }
-
-    const auto* sourcePort = findPort(circuit_.components_, connection->source);
-    if (sourcePort == nullptr || sourcePort->direction != PortDirection::Output) {
-        return SignalValue::unknown();
+        return SignalValue::unknown(port->width);
     }
 
     return outputSignal(connection->source);
@@ -434,12 +456,12 @@ bool Simulation::setOutputSignal(const PortId& portId, SignalValue value) {
     return true;
 }
 
-// 读取输出端的当前值；不存在的内部状态按 Unknown 处理。
+// 读取输出端的当前值；不存在的内部状态按该端口的位宽给出全 X。
 SignalValue Simulation::outputSignal(const PortId& portId) const {
     const auto found = std::find_if(
         signals_.begin(), signals_.end(),
         [&portId](const PortSignal& signal) { return samePort(signal.port, portId); });
-    return found == signals_.end() ? SignalValue::unknown() : found->value;
+    return found == signals_.end() ? unknownPortValue(circuit_.components_, portId) : found->value;
 }
 
 }  // namespace circuit
