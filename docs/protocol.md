@@ -136,7 +136,7 @@ reset 之后引擎里的 Input 也回到初值 `X`，因此调用方需要重新
 {"type":"error","requestId":"r4","code":"combinational_loop","message":"检测到组合逻辑环路"}
 ```
 
-当前可能出现的错误代码包括 `bad_json`、`bad_request`、`invalid_kind`、`invalid_connection`、`component_not_found`、`connection_not_found`、`invalid_signal`、`invalid_width`、`invalid_bit_range`、`invalid_input`、`port_not_found`、`combinational_loop` 和 `unsupported_message`。
+当前可能出现的错误代码包括 `bad_json`、`bad_request`、`invalid_kind`、`invalid_connection`、`component_not_found`、`connection_not_found`、`invalid_signal`、`invalid_width`、`invalid_bit_range`、`width_mismatch`、`invalid_input`、`port_not_found`、`combinational_loop` 和 `unsupported_message`。
 
 三个与位宽有关的错误码各管一件事：
 

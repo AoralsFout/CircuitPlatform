@@ -10,7 +10,7 @@
 - Phase 2.5：跨进程协议，已完成；
 - Phase 3：图形编辑器，已完成；
 - Phase 4：时序逻辑，已完成（五个交付切片全部落地，逐条记录见本文件 `### Phase 4` 的「已交付」各节；已并入 `main`，merge commit `957ebce`，PR #25）；
-- Phase 4.5：多位 Port 与总线，已完成（七个交付切片全部落地，端到端回归与截图基准由 issue #32 收口；已知限制见本文件 `### Phase 4.5` 的「已知限制」）；
+- Phase 4.5：多位 Port 与总线，已完成（七个交付切片全部落地，端到端回归与截图基准由 issue #32 收口；逐条记录见本文件 `### Phase 4.5` 的「已交付」各节，已知限制见其中「已交付（切片 7）」一节）；
 - Phase 5：波形和持久化，未开始；
 - Phase 5.5：层次化电路，未开始；
 - Phase 5.6：多文档与下钻，未开始；
@@ -248,27 +248,7 @@ issue #20 接上了 `tick` 的第 ④ 步：
 
 第一版明确不做：常量字面量、加法器、MUX 和比较器等运算元件；多位 D Flip-Flop；多位值的十六进制或十进制显示；传统波形形态的总线菱形带渲染；位宽上限；任何隐式位宽转换。
 
-### 已交付（切片 7）
-
-2026-09-18，切片 7 的端到端回归与截图基准（issue #32）给本阶段收口：
-
-- [x] 一条 8 位数据通路跑通仿真：Input(8) → 拆线器 → 八个逐位 NOT 门 → 合线器 → Output(8)，跑的是真实 `circuit-engine` 二进制、真实 JSON Lines 协议与真实工作区运行循环（`apps/desktop/tests/temporal-e2e.test.ts`）。它覆盖 C++ 单测与前端假引擎都够不到的接缝——只有把两者接起来才能证明一条 8 位总线真的走完了「拆开 → 逐位求值 → 合回」；
-- [x] 断言一：某一位为 `X` 时其余位仍按值传播。`10X00001` 经拆线、逐位取反、合线之后是 `01X11110`——不是 `XXXXXXXX`，也不是被截断或被零扩展的值；
-- [x] 断言二：改位宽后不匹配的 Connection 悬空并可重接。8 位改成 4 位时 `danglingConnectionIds` 报出那条 Connection，接收端随后读到全 `X`；改成 8 位时同一条 Connection 身份原样复活；
-- [x] 截图回归新增六个多位电路状态，状态由真实 DOM 交互产生（`bus-canvas`、`bus-inspector`、`bus-ranges`、`bus-bits-expanded`、`bus-bits-collapsed`、`bus-bit-single`）；
-- [x] 五种既有性能交互模式全部重跑，无回归：P95 逐项持平或更低，DOM 元素数五项逐项相同；多位电路（`--width=8`）P95 全部 ≤ 5.9ms，满足 Phase 3 的 20ms 预算。详见 [docs/testing/performance-benchmark.md](testing/performance-benchmark.md)。
-
-本票同时修掉一处 #28 的遗漏：`benchmark.html` 仍在读已经被移除的 `ComponentDefinition.ports`，导致五种性能模式**全部挂死**（既不报错也不打印，一直等下去）。因为基准不在 `pnpm verify` 里，合并时没有任何一步会碰它。修法是让基准页复用它自己的引擎替身（`tests/fake-ports.ts` 的 `BUILT_IN_PORTS`），连线几何改走投影器自己的 `componentGeometryFor` + `portLayoutFor`，不在 `src/**` 里新增端口定义（ADR 0020）。
-
-已知限制，都是本阶段设计与既有工具链的直接结果，不是缺陷：
-
-- **截图基线不具备自动回归能力。** 这台机器上同一份代码连跑两次，64 张截图里会有大量 PNG 的 sha256 不同（文件只差几十字节），`manifest.json` 里的哈希不能当作逐位基线。多位电路状态的正确性因此由 DOM 层断言保证（`apps/desktop/scripts/visual-state-probe.mjs`，`pnpm --filter @circuit-platform/desktop visual:probe`），而不是由哈希保证。详见 [docs/testing/visual-regression.md](testing/visual-regression.md)；
-- **`set_port_width` 的端到端断言走协议层，不经过工作区。** 工作区的公开接口没有改位宽这一项，`set_port_width` 的入口在编辑器会话里；因此「悬空并可重接」是对真实引擎与真实 JSON Lines 协议断言的，而「编辑器对位宽不匹配的悬空投影」仍由编辑器会话测试用假引擎覆盖。两者的一致性是前端规则与引擎规则之间的一处接缝，本阶段没有端到端覆盖；
-- **改位宽后端口值按初值重建。** 位宽变了的端口无法保留旧值（长度对不上），按初值重建（Clock 的 `out` 是 `"0"`，其余是等宽的 `X`），旧值不以任何形式保留；
-- **波形仍不逐 tick 记录**（沿用切片 6 的限制）。连续运行时画布逐拍更新，但波形历史只记录用户发起的推进；由仿真状态产生的逐 tick 波形属于 Phase 5 切片 4；
-- **撤销会丢掉触发器状态**（沿用 Phase 4 的限制）。撤销删除会用新的引擎身份重建被删元件，新身份的 `q` 从 `X` 开始。
-
-切片 7 的完成即本阶段完成，Phase 5 可以开始。
+本阶段的交付记录见下面的「已交付」各节，按切片序号排列：切片 3、5、6、7 各有独立小节，切片 1、2、4 没有单独的小节，其交付内容就是上面「交付切片」清单里已勾选的第 1、2、4 条。
 
 ### 已交付（切片 3）
 
@@ -303,6 +283,29 @@ issue #20 接上了 `tick` 的第 ④ 步：
 - [x] 表头步区间仍从已记录的点推出，不宣称不存在的历史。
 
 已知限制（沿用 Phase 4，本切片不改变）：**波形面板仍不逐 tick 记录。** 连续运行时画布会逐拍更新，但波形历史只记录用户发起的推进——单步与输入切换各追加一点，自动 tick 不追加，所以运行中波形列不会增长。切片 6 只改了记录的形状与行的来源，没有改记录的时机；由仿真状态产生的逐 tick 波形属于 Phase 5 切片 4。
+
+### 已交付（切片 7）
+
+2026-09-18，切片 7 的端到端回归与截图基准（issue #32）给本阶段收口：
+
+- [x] 一条 8 位数据通路跑通仿真：Input(8) → 拆线器 → 八个逐位 NOT 门 → 合线器 → Output(8)，跑的是真实 `circuit-engine` 二进制、真实 JSON Lines 协议与真实工作区运行循环（`apps/desktop/tests/temporal-e2e.test.ts`）。它覆盖 C++ 单测与前端假引擎都够不到的接缝——只有把两者接起来才能证明一条 8 位总线真的走完了「拆开 → 逐位求值 → 合回」；
+- [x] 断言一：某一位为 `X` 时其余位仍按值传播。`10X00001` 经拆线、逐位取反、合线之后是 `01X11110`——不是 `XXXXXXXX`，也不是被截断或被零扩展的值；
+- [x] 断言二：改位宽后不匹配的 Connection 悬空并可重接。8 位改成 4 位时 `danglingConnectionIds` 报出那条 Connection，接收端随后读到全 `X`；改成 8 位时同一条 Connection 身份原样复活；
+- [x] 截图回归新增六个多位电路状态，状态由真实 DOM 交互产生（`bus-canvas`、`bus-inspector`、`bus-ranges`、`bus-bits-expanded`、`bus-bits-collapsed`、`bus-bit-single`）；
+- [x] 五种既有性能交互模式全部重跑，无回归：P95 逐项持平或更低，DOM 元素数五项逐项相同；多位电路（`--width=8`）P95 全部 ≤ 5.9ms，满足 Phase 3 的 20ms 预算。详见 [docs/testing/performance-benchmark.md](testing/performance-benchmark.md)。
+
+本票同时修掉一处 #28 的遗漏：`benchmark.html` 仍在读已经被移除的 `ComponentDefinition.ports`，导致五种性能模式**全部挂死**（既不报错也不打印，一直等下去）。因为基准不在 `pnpm verify` 里，合并时没有任何一步会碰它。修法是让基准页复用它自己的引擎替身（`tests/fake-ports.ts` 的 `BUILT_IN_PORTS`），连线几何改走投影器自己的 `componentGeometryFor` + `portLayoutFor`，不在 `src/**` 里新增端口定义（ADR 0020）。
+
+已知限制，都是本阶段设计与既有工具链的直接结果，不是缺陷：
+
+- **截图基线不具备自动回归能力。** 这台机器上同一份代码连跑两次，64 张截图里会有大量 PNG 的 sha256 不同（文件只差几十字节），`manifest.json` 里的哈希不能当作逐位基线。多位电路状态的正确性因此由 DOM 层断言保证（`apps/desktop/scripts/visual-state-probe.mjs`，`pnpm --filter @circuit-platform/desktop visual:probe`），而不是由哈希保证。详见 [docs/testing/visual-regression.md](testing/visual-regression.md)；
+- **`set_port_width` 的端到端断言走协议层，不经过工作区。** 工作区的公开接口没有改位宽这一项，`set_port_width` 的入口在编辑器会话里；因此「悬空并可重接」是对真实引擎与真实 JSON Lines 协议断言的，而「编辑器对位宽不匹配的悬空投影」仍由编辑器会话测试用假引擎覆盖。两者的一致性是前端规则与引擎规则之间的一处接缝，本阶段没有端到端覆盖；
+- **改位宽后端口值按初值重建。** 位宽变了的端口无法保留旧值（长度对不上），按初值重建（Clock 的 `out` 是 `"0"`，其余是等宽的 `X`），旧值不以任何形式保留；
+- **波形仍不逐 tick 记录**（沿用切片 6 的限制）。连续运行时画布逐拍更新，但波形历史只记录用户发起的推进；由仿真状态产生的逐 tick 波形属于 Phase 5 切片 4；
+- **元件库每一行的小字少了端口数标注。** 验收标准要求「位宽为 1 的既有电路……外观均不变」，这一处是那条标准唯一的例外：元件库条目的小字从 `AND / 2 → 1` 变成了 `AND`。它原本渲染的是 `ComponentDefinition.ports` 的输入与输出个数，而 ADR 0020 之后前端不再持有任何端口定义，那个数据已经不存在了。恢复它有两条路，都不通：让前端再持有一份端口清单正是本阶段要消灭的东西；从引擎取则不可能——协议里没有一条「不建立元件就返回内置端口清单」的请求，为它加一条属于新功能。因此这里记录为外观变化而不是缺陷：元件本身的功能不受影响，放下之后画布上的端口一个不少（那些端口本来就来自引擎回传的清单）；
+- **撤销会丢掉触发器状态**（沿用 Phase 4 的限制）。撤销删除会用新的引擎身份重建被删元件，新身份的 `q` 从 `X` 开始。
+
+切片 7 的完成即本阶段完成，Phase 5 可以开始。
 
 ### Phase 5：波形和持久化
 

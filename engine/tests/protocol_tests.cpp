@@ -514,15 +514,27 @@ int main() {
                "{\"name\":\"in2\",\"direction\":\"input\",\"width\":1},"
                "{\"name\":\"out\",\"direction\":\"output\",\"width\":1}]") != std::string::npos);
 
-    // 携带端口清单时按清单建立，位区间跟着端口一起回传。
+    // 携带端口清单时按清单建立：Input 的位宽是端口清单里唯一可以改的一处。
     const auto addedWithPorts = dispatch(
-        R"({"type":"add_component","requestId":"ports-supplied","kind":"input","ports":[{"name":"out","direction":"output","width":4,"bitRange":{"msb":7,"lsb":4}}]})",
+        R"({"type":"add_component","requestId":"ports-supplied","kind":"input","ports":[{"name":"out","direction":"output","width":4}]})",
         circuit, simulation);
     assert(addedWithPorts.find("\"code\"") == std::string::npos);
     assert(addedWithPorts.find("\"componentId\":6") != std::string::npos);
     assert(addedWithPorts.find(
-               "\"ports\":[{\"name\":\"out\",\"direction\":\"output\",\"width\":4,"
-               "\"bitRange\":{\"msb\":7,\"lsb\":4}}]") != std::string::npos);
+               "\"ports\":[{\"name\":\"out\",\"direction\":\"output\",\"width\":4}]") !=
+           std::string::npos);
+
+    // 位宽可改不代表整份清单可改：Input / Output 的端口名与方向同样是内置定义的一部分。
+    const auto renamedInput = dispatch(
+        R"({"type":"add_component","requestId":"renamed-input","kind":"input","ports":[{"name":"a","direction":"output","width":4}]})",
+        circuit, simulation);
+    assert(renamedInput.find("\"code\":\"bad_request\"") != std::string::npos);
+
+    // 位区间是「分支落在宿主总线的哪一段上」，Input / Output 没有宿主总线，因此不接受。
+    const auto rangedInput = dispatch(
+        R"({"type":"add_component","requestId":"ranged-input","kind":"input","ports":[{"name":"out","direction":"output","width":4,"bitRange":{"msb":7,"lsb":4}}]})",
+        circuit, simulation);
+    assert(rangedInput.find("\"code\":\"bad_request\"") != std::string::npos);
 
     const auto wideOutput = dispatch(
         R"({"type":"add_component","requestId":"ports-wide-output","kind":"output","ports":[{"name":"in","direction":"input","width":4}]})",
@@ -642,11 +654,95 @@ int main() {
                circuit, simulation)
                .find("\"value\":\"10X1\"") != std::string::npos);
 
-    // 位区间是端口自己的属性，跟着清单一起走。
+    // 位区间是端口自己的属性，但它属于「分支落在宿主总线的哪一段上」。Output 没有宿主总线，
+    // 因此给它挂位区间同样被拒，而不是被悄悄接受。
     const auto rangedPort = dispatch(
         R"({"type":"set_port_width","requestId":"branch-range","componentId":7,"ports":[{"name":"in","direction":"input","width":4,"bitRange":{"msb":3,"lsb":0}}]})",
         circuit, simulation);
-    assert(rangedPort.find("\"bitRange\":{\"msb\":3,\"lsb\":0}") != std::string::npos);
+    assert(rangedPort.find("\"code\":\"bad_request\"") != std::string::npos);
+
+    // ---- 端口形状是一条被校验的领域规则 ----
+
+    // 单开一份电路，元件的编号因此从 1 开始，与上面那串逐个推进的断言互不干扰。
+    circuit::Circuit shapeCircuit;
+    std::optional<circuit::Simulation> shapeSimulation;
+
+    // 逻辑门固定 1 位：把 NOT 门改成 4 位输入直接违反规格的「逻辑门不随输入宽度自动变宽」。
+    assert(dispatch(R"({"type":"add_component","requestId":"add-not","kind":"not"})", shapeCircuit,
+                    shapeSimulation)
+               .find("\"componentId\":1") != std::string::npos);
+
+    const auto widenedNot = dispatch(
+        R"({"type":"set_port_width","requestId":"widen-not","componentId":1,"ports":[{"name":"in","direction":"input","width":4},{"name":"out","direction":"output","width":1}]})",
+        shapeCircuit, shapeSimulation);
+    assert(widenedNot.find("\"code\":\"bad_request\"") != std::string::npos);
+    assert(widenedNot.find("\"type\":\"port_width_set\"") == std::string::npos);
+
+    // 被拒之后元件端口清单原样不变：输入端仍然是 1 位的 X，而不是改宽后的四字符。
+    // 逐字比到收尾的花括号，免得 `"X"` 这个前缀在 `"XXXX"` 上也匹配得上。
+    assert(dispatch(
+               R"({"type":"get_signal","requestId":"read-not-in","componentId":1,"port":"in"})",
+               shapeCircuit, shapeSimulation)
+               .find("\"value\":\"X\"}") != std::string::npos);
+
+    // 同一条规则也让「把 D Flip-Flop 的 clock 加宽」不可能发生：加宽之后整值从全 0 变全 1
+    // 永远不成立，上升沿会静默不采样且不报任何错。这里守住采样仍然照常发生。
+    assert(dispatch(R"({"type":"add_component","requestId":"add-clock","kind":"clock"})",
+                    shapeCircuit, shapeSimulation)
+               .find("\"componentId\":2") != std::string::npos);
+    assert(dispatch(R"({"type":"add_component","requestId":"add-source","kind":"input"})",
+                    shapeCircuit, shapeSimulation)
+               .find("\"componentId\":3") != std::string::npos);
+    assert(dispatch(R"({"type":"add_component","requestId":"add-dff","kind":"d_flip_flop"})",
+                    shapeCircuit, shapeSimulation)
+               .find("\"componentId\":4") != std::string::npos);
+
+    assert(dispatch(
+               R"({"type":"add_connection","requestId":"clock-to-dff","sourceComponentId":2,"sourcePort":"out","targetComponentId":4,"targetPort":"clock"})",
+               shapeCircuit, shapeSimulation)
+               .find("\"connectionId\"") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"add_connection","requestId":"source-to-d","sourceComponentId":3,"sourcePort":"out","targetComponentId":4,"targetPort":"d"})",
+               shapeCircuit, shapeSimulation)
+               .find("\"connectionId\"") != std::string::npos);
+    assert(dispatch(R"({"type":"set_input","requestId":"drive-d","componentId":3,"value":"1"})",
+                    shapeCircuit, shapeSimulation)
+               .find("\"type\":\"input_set\"") != std::string::npos);
+
+    const auto widenedClockPort = dispatch(
+        R"({"type":"set_port_width","requestId":"widen-clock-port","componentId":4,"ports":[{"name":"d","direction":"input","width":1},{"name":"clock","direction":"input","width":4},{"name":"q","direction":"output","width":1}]})",
+        shapeCircuit, shapeSimulation);
+    assert(widenedClockPort.find("\"code\":\"bad_request\"") != std::string::npos);
+
+    // clock 端口仍是 1 位：推进一拍之后 q 确实采到了 d 的 1，上升沿没有被静默吞掉。
+    assert(dispatch(R"({"type":"tick","requestId":"tick-after-reject"})", shapeCircuit,
+                    shapeSimulation)
+               .find("\"type\":\"ticked\"") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"get_signal","requestId":"read-q","componentId":4,"port":"q"})",
+               shapeCircuit, shapeSimulation)
+               .find("\"value\":\"1\"}") != std::string::npos);
+
+    // 合法的改宽仍然成立：Input / Output 可以改，改完的清单原样回传。
+    const auto legalWiden = dispatch(
+        R"({"type":"set_port_width","requestId":"legal-widen","componentId":3,"ports":[{"name":"out","direction":"output","width":6}]})",
+        shapeCircuit, shapeSimulation);
+    assert(legalWiden.find("\"type\":\"port_width_set\"") != std::string::npos);
+    assert(legalWiden.find("\"ports\":[{\"name\":\"out\",\"direction\":\"output\",\"width\":6}]") !=
+           std::string::npos);
+
+    // 空端口清单是规格没有的第三态：既不当成省略，也不留一个零端口、永远无法连线的死件。
+    // 内置类型上它报的是与内置定义不符，数据驱动的两个元件上它报的是缺少宿主总线（见下一节）。
+    const auto emptyPortsForBuiltin = dispatch(
+        R"({"type":"add_component","requestId":"empty-ports-builtin","kind":"and","ports":[]})",
+        shapeCircuit, shapeSimulation);
+    assert(emptyPortsForBuiltin.find("\"code\":\"bad_request\"") != std::string::npos);
+    assert(emptyPortsForBuiltin.find("\"type\":\"component_added\"") == std::string::npos);
+
+    // 元件根本没有被建立：下一个元件拿到的仍是紧接着的 5，而不是被空清单那一次占掉的号。
+    assert(dispatch(R"({"type":"add_component","requestId":"after-empty-ports","kind":"input"})",
+                    shapeCircuit, shapeSimulation)
+               .find("\"componentId\":5") != std::string::npos);
 
     // 解析层要认得出嵌套结构：端口名与某个键名相同不能被当成那个键。
     const auto nestedNames = circuit::protocol::parseRequest(
@@ -834,6 +930,44 @@ int main() {
                R"({"type":"get_signal","requestId":"read-gone-branch","componentId":1,"port":"out1"})",
                busCircuit, busSimulation)
                .find("\"code\":\"port_not_found\"") != std::string::npos);
+
+    // ---- 一条只经过悬空边的回路不报环路 ----    // 只经过悬空边的回路是可以走合法路径造出来的：拆线器与合线器首尾相接成一条回路，
+    // 再把拆线器的位区间重划一次，那条出边就因两端位宽不再相同而悬空。求值从此不再沿它传播，
+    // 环路判定因此也要跳过它——两处对同一件事说同一种话。
+    circuit::Circuit danglingLoopCircuit;
+    std::optional<circuit::Simulation> danglingLoopSimulation;
+
+    assert(dispatch(
+               R"({"type":"add_component","requestId":"loop-splitter","kind":"splitter","ports":[{"name":"in","direction":"input","width":8},{"name":"out0","direction":"output","width":1,"bitRange":{"msb":7,"lsb":7}},{"name":"out1","direction":"output","width":1,"bitRange":{"msb":6,"lsb":6}},{"name":"out2","direction":"output","width":1,"bitRange":{"msb":5,"lsb":5}},{"name":"out3","direction":"output","width":1,"bitRange":{"msb":4,"lsb":4}},{"name":"out4","direction":"output","width":1,"bitRange":{"msb":3,"lsb":3}},{"name":"out5","direction":"output","width":1,"bitRange":{"msb":2,"lsb":2}},{"name":"out6","direction":"output","width":1,"bitRange":{"msb":1,"lsb":1}},{"name":"out7","direction":"output","width":1,"bitRange":{"msb":0,"lsb":0}}]})",
+               danglingLoopCircuit, danglingLoopSimulation)
+               .find("\"componentId\":1") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"add_component","requestId":"loop-merger","kind":"merger","ports":[{"name":"in0","direction":"input","width":1,"bitRange":{"msb":7,"lsb":7}},{"name":"in1","direction":"input","width":1,"bitRange":{"msb":6,"lsb":6}},{"name":"in2","direction":"input","width":1,"bitRange":{"msb":5,"lsb":5}},{"name":"in3","direction":"input","width":1,"bitRange":{"msb":4,"lsb":4}},{"name":"in4","direction":"input","width":1,"bitRange":{"msb":3,"lsb":3}},{"name":"in5","direction":"input","width":1,"bitRange":{"msb":2,"lsb":2}},{"name":"in6","direction":"input","width":1,"bitRange":{"msb":1,"lsb":1}},{"name":"in7","direction":"input","width":1,"bitRange":{"msb":0,"lsb":0}},{"name":"out","direction":"output","width":8}]})",
+               danglingLoopCircuit, danglingLoopSimulation)
+               .find("\"componentId\":2") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"add_connection","requestId":"loop-forward","sourceComponentId":1,"sourcePort":"out0","targetComponentId":2,"targetPort":"in0"})",
+               danglingLoopCircuit, danglingLoopSimulation)
+               .find("\"connectionId\":1") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"add_connection","requestId":"loop-back","sourceComponentId":2,"sourcePort":"out","targetComponentId":1,"targetPort":"in"})",
+               danglingLoopCircuit, danglingLoopSimulation)
+               .find("\"connectionId\":2") != std::string::npos);
+
+    // 两端位宽都还匹配时这是一条真实的组合环路，报它是对的。
+    assert(dispatch(R"({"type":"settle","requestId":"loop-settle"})", danglingLoopCircuit, danglingLoopSimulation)
+               .find("\"code\":\"combinational_loop\"") != std::string::npos);
+
+    // 重划位区间：出边两端变成 4 位与 1 位，它因此悬空；回来的那条边仍然匹配。
+    const auto loopResplit = dispatch(
+        R"({"type":"set_port_width","requestId":"loop-resplit","componentId":1,"ports":[{"name":"in","direction":"input","width":8},{"name":"out0","direction":"output","width":4,"bitRange":{"msb":7,"lsb":4}},{"name":"out1","direction":"output","width":4,"bitRange":{"msb":3,"lsb":0}}]})",
+        danglingLoopCircuit, danglingLoopSimulation);
+    assert(loopResplit.find("\"danglingConnectionIds\":[1]") != std::string::npos);
+
+    // 求值不再沿悬空边传播，回路因此不成立：这里报的是稳定，而不是环路。
+    assert(dispatch(R"({"type":"settle","requestId":"loop-settle-after"})", danglingLoopCircuit,
+                    danglingLoopSimulation)
+               .find("\"type\":\"settled\"") != std::string::npos);
 
     return 0;
 }

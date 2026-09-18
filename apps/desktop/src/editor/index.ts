@@ -863,6 +863,9 @@ export function createEditorSession(
    *
    * 端口数量由数据决定的元件（拆线器、合线器）高度按端口数增长，写死的尺寸会让「点在哪、
    * 元件落在哪」差出半个高度，而且与放置预览画出的那个盒子对不上。
+   *
+   * 正常路径上尺寸一律来自 `componentGeometryFor`；兜底的那个 148 × 84 只在展示定义查不到时
+   * 生效——那意味着调用方绕过了注册表，画布本来也画不出这个元件，这里只是让位置仍然算得出来。
    */
   function componentPosition(
     kind: ComponentKindName,

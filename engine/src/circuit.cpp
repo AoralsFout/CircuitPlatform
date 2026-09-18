@@ -123,14 +123,19 @@ PortError validatePort(const Port& port) noexcept {
     return range.msb - range.lsb + 1 == port.width ? PortError::None : PortError::InvalidBitRange;
 }
 
+// 位宽可编辑的类型只有 Input 与 Output。规格把它们列成检查器里唯一开编辑入口的两类，
+// 其余类型的宽度都由内置定义钉死——逻辑门不随输入变宽，D Flip-Flop 的 clock 也必须保持 1 位。
+bool isPortWidthEditable(ComponentKind kind) noexcept {
+    return kind == ComponentKind::Input || kind == ComponentKind::Output;
+}
+
 // 校验数据驱动元件的端口清单：一条宿主总线端口，加若干条盖满它、互不重叠的位区间分支。
 // 按宿主总线的位序号从小到大走一遍已排序的分支，走到哪一位就是哪一位，因此不需要一张与总线
 // 等宽的覆盖表——位宽可以是任意大的数，校验的代价只与分支数量有关。
-PortListError validatePortList(ComponentKind kind, const std::vector<Port>& ports) noexcept {
-    if (kind != ComponentKind::Splitter && kind != ComponentKind::Merger) {
-        return PortListError::None;
-    }
+namespace {
 
+PortListError validateSplitterOrMergerPorts(
+    ComponentKind kind, const std::vector<Port>& ports) noexcept {
     // 拆线器从输入取位、往分支输出放位；合线器从分支输入取位、往输出放位。方向决定了两者
     // 谁是宿主、谁是分支，也决定了求值时读哪一端、写哪一端。
     const bool splitting = kind == ComponentKind::Splitter;
@@ -193,6 +198,44 @@ PortListError validatePortList(ComponentKind kind, const std::vector<Port>& port
     }
 
     return next == host->width ? PortListError::None : PortListError::Incomplete;
+}
+
+// 其余类型的形状由内置定义给出，因此清单必须与内置定义逐条相同；位宽只在可编辑的类型上放开。
+PortListError validateBuiltinPorts(ComponentKind kind, const std::vector<Port>& ports) noexcept {
+    const auto builtin = portsFor(kind);
+    if (ports.size() != builtin.size()) {
+        return PortListError::NotBuiltinShape;
+    }
+
+    for (std::size_t index = 0; index < ports.size(); ++index) {
+        const auto& port = ports[index];
+        const auto& expected = builtin[index];
+        if (port.name != expected.name || port.direction != expected.direction) {
+            return PortListError::NotBuiltinShape;
+        }
+        // 内置定义里没有一条端口带位区间：位区间属于「分支落在宿主总线的哪一段上」，
+        // 而内置类型没有宿主总线。
+        if (port.bitRange.has_value()) {
+            return PortListError::NotBuiltinShape;
+        }
+        // 唯一可以不同的一处：Input / Output 的位宽。其余类型必须保持 1 位。
+        if (!isPortWidthEditable(kind) && port.width != expected.width) {
+            return PortListError::NotBuiltinShape;
+        }
+    }
+
+    return PortListError::None;
+}
+
+}  // namespace
+
+// 分派到两条规则之一：数据驱动的两个元件走覆盖规则，其余类型走内置定义。
+PortListError validatePortList(ComponentKind kind, const std::vector<Port>& ports) noexcept {
+    if (kind == ComponentKind::Splitter || kind == ComponentKind::Merger) {
+        return validateSplitterOrMergerPorts(kind, ports);
+    }
+
+    return validateBuiltinPorts(kind, ports);
 }
 
 // 返回元件副本，避免调用者直接修改 Circuit 内部保存的结构。
@@ -302,12 +345,13 @@ bool Circuit::isDangling(ConnectionId id) const noexcept {
         connections_.begin(), connections_.end(),
         [id](const Connection& candidate) { return candidate.id == id; });
 
-    if (found == connections_.end()) {
-        return false;
-    }
+    return found != connections_.end() && isDangling(*found);
+}
 
-    const auto* sourcePort = findPort(components_, found->source);
-    const auto* targetPort = findPort(components_, found->target);
+// 判定条件本身只有这一处：已经拿着 Connection 的调用方走这个重载，不必把条件抄第二遍。
+bool Circuit::isDangling(const Connection& connection) const noexcept {
+    const auto* sourcePort = findPort(components_, connection.source);
+    const auto* targetPort = findPort(components_, connection.target);
     if (sourcePort == nullptr || targetPort == nullptr) {
         return true;
     }

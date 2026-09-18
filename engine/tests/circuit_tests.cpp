@@ -399,18 +399,86 @@ void rejects_a_port_list_that_is_not_one_host_plus_branches() {
            circuit::PortListError::Malformed);
 }
 
-// 覆盖规则只对数据驱动的两个元件成立；内置元件的形状不归这份清单管。
-void applies_the_coverage_rule_only_to_the_data_driven_kinds() {
+// 端口形状是一份被校验的领域规则，不是「谁爱写什么就写什么」：内置类型的清单必须与内置定义
+// 逐条相同，位宽是唯一的例外，而且只在 Input / Output 上放开。
+void rejects_port_lists_that_do_not_match_the_built_in_definition() {
+    const auto port = [](std::string name, circuit::PortDirection direction, std::uint32_t width) {
+        return circuit::Port{std::move(name), direction, width, std::nullopt};
+    };
+
+    // 内置定义的形状正是合法的形状。
     assert(circuit::validatePortList(
                circuit::ComponentKind::AndGate,
-               {{"in1", circuit::PortDirection::Input, 1, std::nullopt},
-                {"in2", circuit::PortDirection::Input, 1, std::nullopt},
-                {"out", circuit::PortDirection::Output, 1, std::nullopt}}) ==
+               {port("in1", circuit::PortDirection::Input, 1),
+                port("in2", circuit::PortDirection::Input, 1),
+                port("out", circuit::PortDirection::Output, 1)}) ==
            circuit::PortListError::None);
 
-    // 端口清单是空的时候也一样：没有分支就没有覆盖问题。
-    assert(circuit::validatePortList(circuit::ComponentKind::Input, {}) ==
+    // 逻辑门固定 1 位：把 NOT 门改成 4 位输入会造出一个值长度与端口位宽不再相等的元件。
+    assert(circuit::validatePortList(
+               circuit::ComponentKind::NotGate,
+               {port("in", circuit::PortDirection::Input, 4),
+                port("out", circuit::PortDirection::Output, 1)}) ==
+           circuit::PortListError::NotBuiltinShape);
+
+    // D Flip-Flop 的 clock 同样固定 1 位：加宽之后整值从全 0 变全 1 永远不成立，
+    // 上升沿会静默不采样，而且不报任何错。
+    assert(circuit::validatePortList(
+               circuit::ComponentKind::DFlipFlop,
+               {port("d", circuit::PortDirection::Input, 1),
+                port("clock", circuit::PortDirection::Input, 4),
+                port("q", circuit::PortDirection::Output, 1)}) ==
+           circuit::PortListError::NotBuiltinShape);
+
+    // Clock 的输出也是 1 位。
+    assert(circuit::validatePortList(
+               circuit::ComponentKind::Clock, {port("out", circuit::PortDirection::Output, 8)}) ==
+           circuit::PortListError::NotBuiltinShape);
+
+    // Input / Output 的位宽是唯一可以改的一处。
+    assert(circuit::validatePortList(
+               circuit::ComponentKind::Input, {port("out", circuit::PortDirection::Output, 8)}) ==
            circuit::PortListError::None);
+    assert(circuit::validatePortList(
+               circuit::ComponentKind::Output, {port("in", circuit::PortDirection::Input, 3)}) ==
+           circuit::PortListError::None);
+
+    // 数量、名称、方向都不在可改之列。
+    assert(circuit::validatePortList(circuit::ComponentKind::Input, {}) ==
+           circuit::PortListError::NotBuiltinShape);
+    assert(circuit::validatePortList(
+               circuit::ComponentKind::Input, {port("a", circuit::PortDirection::Output, 8)}) ==
+           circuit::PortListError::NotBuiltinShape);
+    assert(circuit::validatePortList(
+               circuit::ComponentKind::Input, {port("out", circuit::PortDirection::Input, 8)}) ==
+           circuit::PortListError::NotBuiltinShape);
+    assert(circuit::validatePortList(
+               circuit::ComponentKind::AndGate,
+               {port("in1", circuit::PortDirection::Input, 1),
+                port("in2", circuit::PortDirection::Input, 1)}) ==
+           circuit::PortListError::NotBuiltinShape);
+
+    // 位区间属于「分支落在宿主总线的哪一段上」，内置类型没有宿主总线，因此也不接受。
+    assert(circuit::validatePortList(
+               circuit::ComponentKind::Input,
+               {{"out", circuit::PortDirection::Output, 4, circuit::PortBitRange{7, 4}}}) ==
+           circuit::PortListError::NotBuiltinShape);
+}
+
+// 哪一类的位宽可以改，是一件被命名的领域事实，而不是散在各调用点的 if。
+void only_input_and_output_allow_an_editable_width() {
+    assert(circuit::isPortWidthEditable(circuit::ComponentKind::Input));
+    assert(circuit::isPortWidthEditable(circuit::ComponentKind::Output));
+
+    assert(!circuit::isPortWidthEditable(circuit::ComponentKind::AndGate));
+    assert(!circuit::isPortWidthEditable(circuit::ComponentKind::OrGate));
+    assert(!circuit::isPortWidthEditable(circuit::ComponentKind::NandGate));
+    assert(!circuit::isPortWidthEditable(circuit::ComponentKind::NorGate));
+    assert(!circuit::isPortWidthEditable(circuit::ComponentKind::XorGate));
+    assert(!circuit::isPortWidthEditable(circuit::ComponentKind::XnorGate));
+    assert(!circuit::isPortWidthEditable(circuit::ComponentKind::NotGate));
+    assert(!circuit::isPortWidthEditable(circuit::ComponentKind::Clock));
+    assert(!circuit::isPortWidthEditable(circuit::ComponentKind::DFlipFlop));
 }
 
 // 替换端口清单只动清单；元件身份不变，不存在的元件仍由返回值报告。
@@ -449,7 +517,8 @@ int main() {
     accepts_bit_ranges_that_cover_the_whole_host_bus();
     rejects_bit_ranges_that_do_not_tile_the_host_bus();
     rejects_a_port_list_that_is_not_one_host_plus_branches();
-    applies_the_coverage_rule_only_to_the_data_driven_kinds();
+    rejects_port_lists_that_do_not_match_the_built_in_definition();
+    only_input_and_output_allow_an_editable_width();
     replacing_ports_keeps_the_component_identity();
     return 0;
 }

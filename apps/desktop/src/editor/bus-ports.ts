@@ -25,16 +25,20 @@ export function isDataDrivenKind(kind: ComponentKindName): boolean {
   return DATA_DRIVEN_KINDS.includes(kind);
 }
 
-/** 宿主总线端口的名字：拆线器从它取位，合线器把位放回它。 */
-export function hostPortNameFor(kind: ComponentKindName): string {
+/**
+ * 宿主总线端口的名字：拆线器从它取位，合线器把位放回它。
+ * 不导出：宿主名是这份清单内部的一处构造细节，外部只该拿到整份清单（`defaultPortsFor` /
+ * `portsWithBitRanges`），否则调用方又会照着名字自己拼第三份定义。
+ */
+function hostPortNameFor(kind: ComponentKindName): string {
   return kind === "merger" ? "out" : "in";
 }
 
 /**
- * 第 `index` 条分支的端口名。
+ * 第 `index` 条分支的端口名；与宿主名一样不导出。
  * 分支按位区间从高到低排列，因此 0 号分支拿的是最高位段——画布上它因此在最上面（ADR 0017）。
  */
-export function branchPortNameFor(kind: ComponentKindName, index: number): string {
+function branchPortNameFor(kind: ComponentKindName, index: number): string {
   return kind === "merger" ? `in${index}` : `out${index}`;
 }
 

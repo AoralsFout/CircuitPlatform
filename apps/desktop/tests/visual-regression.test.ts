@@ -16,7 +16,7 @@ test("visual fixture covers the required state matrix and reduced motion mode", 
   }
   // 多位电路的状态必须同时出现在脚本的状态表和夹具的 `prepare()` 里：只进状态表会在准备阶段
   // 什么都不做，截出来的是一张与 `default` 无异的画面，而断言仍然全绿。
-  for (const state of ["bus-canvas", "bus-inspector", "bus-ranges", "bus-bits-expanded", "bus-bits-collapsed", "bus-bit-single"]) {
+  for (const state of ["bus-canvas", "bus-inspector", "bus-ranges", "bus-bits-expanded", "bus-bits-collapsed", "bus-bit-single", "bus-bit-space"]) {
     assert.match(script, new RegExp(state.replace("-", "\\-")), `截图脚本的状态表里没有 ${state}`);
     assert.match(fixture, new RegExp(`state === "${state}"`), `视觉夹具的 prepare() 里没有 ${state}`);
   }
@@ -100,6 +100,36 @@ test("canvas starts pointer panning only from background for an ordinary left dr
   assert.match(canvas, /circuit-canvas--panning/);
   assert.match(styles, /\.circuit-canvas \{[^}]+cursor: grab;/);
   assert.match(styles, /\.circuit-canvas--panning \{ cursor: grabbing; \}/);
+});
+
+/**
+ * Space 在两个作用域里含义不同，画布的窗口级处理器必须先问一句「这个键现在是谁的」。
+ *
+ * 这里只守住「那一次询问还在」——它是不是真的按作用域分派过，由 `visual:probe` 的
+ * `bus-bit-space` 状态用真实输入验证：派发合成事件不会触发原生激活，因此那一类缺陷在
+ * 源码层与结构层都看不出来。
+ */
+test("the window level Space handler defers to the focused control", async () => {
+  const canvas = await readFile(join(desktopRoot, "src", "components", "CircuitCanvas.vue"), "utf8");
+  const keyboard = await readFile(join(desktopRoot, "src", "editor", "keyboard.ts"), "utf8");
+  assert.match(
+    canvas,
+    /import \{[^}]*isNativeActivationTarget[^}]*\} from "\.\.\/editor\/keyboard\.ts"/,
+  );
+  assert.match(canvas, /if \(isNativeActivationTarget\(event\.target\)\) return;/);
+  assert.match(keyboard, /export function isNativeActivationTarget/);
+  // 让路必须发生在窗口处理器认领 Space 之前，否则先 preventDefault 就已经把默认动作取消了。
+  // 只看 `onKeydown` 这一段：画布元素上的 `onCanvasKeyboard` 里也有一处轴向切换，位置更靠前。
+  const windowHandler = canvas.slice(
+    canvas.indexOf("function onKeydown("),
+    canvas.indexOf("function onPortPointerDown("),
+  );
+  assert.ok(windowHandler.includes("isNativeActivationTarget(event.target)"), "onKeydown 里没有那次询问");
+  assert.ok(
+    windowHandler.indexOf("isNativeActivationTarget(event.target)") <
+      windowHandler.indexOf('emit("connectionAxisToggle")'),
+    "让路必须排在窗口处理器认领 Space 之前",
+  );
 });
 
 test("context menu removes a draft waypoint or cancels an empty draft", async () => {

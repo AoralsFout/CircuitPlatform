@@ -288,6 +288,30 @@ test("marks a width-mismatched connection dangling without freezing its endpoint
   // 位宽不匹配不是端点缺失：两端仍然跟着元件位置走，因此不会被冻结在原坐标上。
   assert.deepEqual(scene.wires[0]!.danglingEndpoints, []);
   assert.deepEqual(scene.wires[0]!.source.point, { x: 180, y: 90 });
+
+  // 悬空只有一种表达：连线上那个布尔量为真时，两端端口也必须为真。只按 danglingEndpoints
+  // 推导端口会让改位宽造成的悬空点亮连线却不点亮端口，同一件事在画布上有两种外观。
+  const ports = scene.nodes.flatMap((node) => node.ports.map((port) => ({ node: node.id, ...port })));
+  assert.deepEqual(
+    ports.filter((port) => port.dangling).map((port) => `${port.node}:${port.id}`),
+    ["source-17:out", "or-99:in1"],
+  );
+  // 同一条规则的另一半：没被这条连接碰到的端口不跟着亮。
+  assert.equal(ports.find((port) => port.node === "or-99" && port.id === "out")?.dangling, false);
+});
+
+/** 端点缺失只让解析不出来的那一端算悬空，另一端与它上面的端口都不受影响。 */
+test("marks only the unresolvable endpoint of a connection dangling", () => {
+  const scene = projectCanvasScene(snapshot(), { signals: {} }, createComponentDefinitionRegistry());
+
+  assert.deepEqual(scene.wires[0]!.danglingEndpoints, ["target"]);
+  assert.equal(scene.wires[0]!.dangling, true);
+
+  const ports = scene.nodes.flatMap((node) => node.ports.map((port) => ({ node: node.id, ...port })));
+  assert.deepEqual(
+    ports.filter((port) => port.dangling).map((port) => `${port.node}:${port.id}`),
+    ["or-99:in1"],
+  );
 });
 
 test("derives connected endpoint geometry from the current Component and Port definition", () => {

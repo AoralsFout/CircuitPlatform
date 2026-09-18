@@ -6,7 +6,7 @@
 
 ## 背景
 
-[ADR 0015](0015-width-as-port-attribute.md) 把位宽定为 Port 的固有属性，[ADR 0016](0016-strict-port-width.md) 定下位宽严格声明、不做隐式转换，[ADR 0017](0017-paired-splitter-and-merger.md) 定下拆线器与合线器。这三条决策在落地时留下了四处本文档记录的具体形状——它们不是重新决策，而是把上面三条落到实现时必须选定的做法。
+[ADR 0015](0015-width-as-port-attribute.md) 把位宽定为 Port 的固有属性，[ADR 0016](0016-strict-port-width.md) 定下位宽严格声明、不做隐式转换，[ADR 0017](0017-paired-splitter-and-merger.md) 定下拆线器与合线器。这三条决策在落地时留下了四处本文档记录的具体形状——它们不是重新决策，而是把上面三条落到实现时必须选定的做法。本文档是这三条决策的落地记录：Phase 4.5 把它们落成下面这四处具体形状，0015、0016 与 0017 也各自在文末指回这里。
 
 落地之前，端口定义有两份且互不校验：引擎的 `portsFor` 与前端 `ComponentDefinitionRegistry`。这个分歧真实地伤过一次——前端给 D Flip-Flop 声明 `clk`，引擎期望 `clock`，只因为该元件当时被标为不可用才没暴露。位宽进来以后，如果还保留两份副本，分歧面会翻倍。
 

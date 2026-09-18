@@ -6,7 +6,6 @@ import {
   branchBitRanges,
   defaultPortsFor,
   formatBitRangeList,
-  hostPortNameFor,
   isDataDrivenKind,
   parseBitRangeList,
   portsWithBitRanges,
@@ -50,8 +49,6 @@ test("a new splitter and a new merger default to eight one-bit branches", () => 
   assert.equal(merger.at(-1)?.bitRange, undefined);
   // 两个元件互为镜像：分支的位区间逐条相同，只有方向相反。
   assert.deepEqual(branchBitRanges(merger), branchBitRanges(splitter));
-  assert.equal(hostPortNameFor("splitter"), "in");
-  assert.equal(hostPortNameFor("merger"), "out");
 });
 
 /** 数据驱动元件的尺寸按端口清单算出来：高度跟着端口数走，宽度有下限。 */

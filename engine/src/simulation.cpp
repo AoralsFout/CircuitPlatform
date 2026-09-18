@@ -227,9 +227,8 @@ std::optional<SignalValue> evaluateBinaryGate(
     }
 }
 
-}  // namespace
-
 // 端口读不到值时按它自己声明的位宽给出全 X。位宽是 Port 的属性，长度对不上就不是这个端口的值。
+// 只在这里出现一次：文件内的任何自由函数都不该被外部链接到。
 SignalValue unknownPortValue(const std::vector<Component>& components, const PortId& portId) {
     const auto* port = findPort(components, portId);
     return SignalValue::unknown(port == nullptr ? 1 : port->width);
@@ -241,6 +240,8 @@ SignalValue initialOutputValue(ComponentKind kind, std::size_t width) {
     return kind == ComponentKind::Clock ? SignalValue::fromBits(std::string(width, '0'))
                                         : SignalValue::unknown(width);
 }
+
+}  // namespace
 
 // 建立仿真状态，并把每个输出端初始化为该元件类型的初值。
 Simulation::Simulation(const Circuit& circuit) : circuit_(circuit) {
@@ -329,6 +330,12 @@ SimulationResult Simulation::settle() {
             if (connection.source.component != componentId) {
                 continue;
             }
+            // 悬空连接不参与仿真，环路判定因此也要跳过它们，两处对同一件事说同一种话：
+            // 求值只沿不悬空的连接传播，一条只经过悬空边的回路不会把任何输出卡在振荡上，
+            // 报它是假警报。改宽造成的不匹配正是悬空的一种，所以这里读的是同一个判定。
+            if (circuit_.isDangling(connection)) {
+                continue;
+            }
 
             const auto* target = findComponent(circuit_.components_, connection.target.component);
             if (target != nullptr && isCombinational(target->kind) &&
@@ -354,15 +361,15 @@ SimulationResult Simulation::settle() {
 
         for (const auto& component : circuit_.components_) {
             if (component.kind == ComponentKind::NotGate) {
-                const auto input = signal({component.id, "in"}).value_or(unknownPortValue(circuit_.components_, {component.id, "in"}));
+                const auto input = valueAt({component.id, "in"});
                 changed = setOutputSignal({component.id, "out"}, invert(input)) || changed;
             } else if (component.kind == ComponentKind::Splitter) {
                 changed = settleSplitter(component) || changed;
             } else if (component.kind == ComponentKind::Merger) {
                 changed = settleMerger(component) || changed;
             } else {
-                const auto first = signal({component.id, "in1"}).value_or(unknownPortValue(circuit_.components_, {component.id, "in1"}));
-                const auto second = signal({component.id, "in2"}).value_or(unknownPortValue(circuit_.components_, {component.id, "in2"}));
+                const auto first = valueAt({component.id, "in1"});
+                const auto second = valueAt({component.id, "in2"});
                 const auto output = evaluateBinaryGate(component.kind, first, second);
                 if (output.has_value()) {
                     changed = setOutputSignal({component.id, "out"}, *output) || changed;
@@ -387,7 +394,7 @@ bool Simulation::settleSplitter(const Component& component) {
     }
 
     const PortId hostId{component.id, host->name};
-    const auto value = signal(hostId).value_or(unknownPortValue(circuit_.components_, hostId));
+    const auto value = valueAt(hostId);
 
     bool changed = false;
     for (const auto& port : component.ports) {
@@ -422,7 +429,7 @@ bool Simulation::settleMerger(const Component& component) {
         }
 
         const PortId branchId{component.id, port.name};
-        const auto value = signal(branchId).value_or(unknownPortValue(circuit_.components_, branchId));
+        const auto value = valueAt(branchId);
         if (!placeBits(assembled, value.bits(), *port.bitRange)) {
             // 分支值与本条分支声明的位区间长度对不上：与其把错位的位拼出去，不如整条输出未知。
             return setOutputSignal(hostId, SignalValue::unknown(host->width));
@@ -445,7 +452,7 @@ SimulationResult Simulation::tick() {
             previousClockValues_.begin(), previousClockValues_.end(),
             [&clockPort](const PortSignal& signal) { return samePort(signal.port, clockPort); });
         if (!tracked) {
-            previousClockValues_.push_back({clockPort, signal(clockPort).value_or(unknownPortValue(circuit_.components_, clockPort))});
+            previousClockValues_.push_back({clockPort, valueAt(clockPort)});
         }
     });
 
@@ -466,14 +473,14 @@ SimulationResult Simulation::tick() {
     //    X → 1 无法构成可靠的上升沿，因为上一拍可能本来就是 1。
     //    判定只读端口的前后值，与元件类型无关：Clock、Input 或组合逻辑的输出都一样。
     for (auto& previous : previousClockValues_) {
-        const auto current = signal(previous.port).value_or(unknownPortValue(circuit_.components_, previous.port));
+        const auto current = valueAt(previous.port);
         // 这是「整值从全 0 变成全 1」的比较，在 1 位端口上是「该位 0 → 1」的特例：
         // 每一位独立判定（哪一位出现上升沿就采哪一位的 d）要等位宽进来、端口能声明位宽之后
         // 才有意义，那时这里的整值比较会因 `"0"` 与 `"00"` 这类长度差异静默失效。
         if (previous.value == SignalValue::zero() && current == SignalValue::one()) {
             // 采样的是第 ③ 步求值稳定之后的 d：时钟可以经组合逻辑到达 clock 端口，
             // 数据同样可能经组合逻辑到达 d，两者都必须在采样那一刻处在稳定值上。
-            const auto data = signal({previous.port.component, "d"}).value_or(unknownPortValue(circuit_.components_, {previous.port.component, "d"}));
+            const auto data = valueAt({previous.port.component, "d"});
             setOutputSignal({previous.port.component, "q"}, data);
         }
 
@@ -509,7 +516,7 @@ std::vector<Simulation::PortSignal> Simulation::signalSnapshot() const {
     std::vector<PortSignal> snapshot = outputSignals();
     forEachComponentOfKind(circuit_.components_, ComponentKind::Output, [this, &snapshot](const Component& component) {
         const PortId receivePort{component.id, "in"};
-        snapshot.push_back({receivePort, signal(receivePort).value_or(unknownPortValue(circuit_.components_, receivePort))});
+        snapshot.push_back({receivePort, valueAt(receivePort)});
     });
     return snapshot;
 }
@@ -543,6 +550,12 @@ std::optional<SignalValue> Simulation::signal(PortId portId) const {
     }
 
     return outputSignal(connection->source);
+}
+
+// 读不到端口时按端口自己声明的位宽给全 X。求值路径上的每一次读端口都走这里，因此
+// 「端口没有值」只有这一种表达：端口不存在、来源连接悬空、来源位宽不匹配全都落到同一个结果上。
+SignalValue Simulation::valueAt(PortId portId) const {
+    return signal(portId).value_or(unknownPortValue(circuit_.components_, portId));
 }
 
 // 只更新已知的输出端，并用返回值告诉稳定化循环是否发生了变化。

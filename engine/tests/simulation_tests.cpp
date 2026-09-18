@@ -394,6 +394,65 @@ void rejects_a_combinational_feedback_loop() {
     assert(result.error == circuit::SimulationError::CombinationalLoop);
 }
 
+// 改宽之后两条边都悬空了，求值不再沿它们传播，环路判定因此也不能再报环路。
+// 一处说「悬空不参与仿真」，另一处却按边报环路，是同一件事的两种说法——这里钉住它们一致。
+void does_not_report_a_loop_that_only_runs_through_dangling_connections() {
+    circuit::Circuit circuit;
+    const auto firstNotId = circuit.addComponent(circuit::ComponentKind::NotGate);
+    const auto secondNotId = circuit.addComponent(circuit::ComponentKind::NotGate);
+
+    const auto forward = circuit.addConnection({firstNotId, "out"}, {secondNotId, "in"});
+    const auto backward = circuit.addConnection({secondNotId, "out"}, {firstNotId, "in"});
+    assert(forward.succeeded() && backward.succeeded());
+
+    // 两端位宽还匹配时这是一条真实的组合环路，报它是对的。
+    circuit::Simulation simulation(circuit);
+    assert(!simulation.settle().succeeded());
+
+    // 把第二个 NOT 加宽成 2 位：两条边的两端都不再同宽，一起转为悬空。
+    assert(circuit.setComponentPorts(
+        secondNotId,
+        {{"in", circuit::PortDirection::Input, 2, std::nullopt},
+         {"out", circuit::PortDirection::Output, 2, std::nullopt}}));
+    simulation.reconcile();
+    assert(circuit.isDangling(*forward.id));
+    assert(circuit.isDangling(*backward.id));
+
+    // 求值永不沿悬空边传播：两个 NOT 的输入都读不到来源，各自输出全 X 并就此停住。
+    // 环路判定跳过同一条边，因此这里不再报环路——与求值说的是同一句话。
+    assert(simulation.settle().succeeded());
+    assert(simulation.signal({firstNotId, "out"}) == circuit::SignalValue::unknown(1));
+    assert(simulation.signal({secondNotId, "out"}) == circuit::SignalValue::unknown(2));
+
+    // 改回原宽，两条边重新匹配，环路也随之回来：判定读的是当下的悬空状态，不是一次性的标志。
+    assert(circuit.setComponentPorts(
+        secondNotId,
+        {{"in", circuit::PortDirection::Input, 1, std::nullopt},
+         {"out", circuit::PortDirection::Output, 1, std::nullopt}}));
+    simulation.reconcile();
+    assert(!simulation.settle().succeeded());
+}
+
+// 一端端口消失（被整份清单替换掉）造成的悬空同样让环路判定跳过那条边，不只是位宽不匹配。
+void does_not_report_a_loop_that_runs_through_a_removed_port() {
+    circuit::Circuit circuit;
+    const auto firstNotId = circuit.addComponent(circuit::ComponentKind::NotGate);
+    const auto secondNotId = circuit.addComponent(circuit::ComponentKind::NotGate);
+    const auto forward = circuit.addConnection({firstNotId, "out"}, {secondNotId, "in"});
+    const auto backward = circuit.addConnection({secondNotId, "out"}, {firstNotId, "in"});
+    assert(forward.succeeded() && backward.succeeded());
+
+    circuit::Simulation simulation(circuit);
+    assert(!simulation.settle().succeeded());
+
+    // 「in」这个端口名不再出现在第二个 NOT 的清单里，两条边的目标端因此都解析不到。
+    assert(circuit.setComponentPorts(secondNotId, {}));
+    simulation.reconcile();
+    assert(circuit.isDangling(*forward.id));
+    assert(circuit.isDangling(*backward.id));
+    assert(simulation.settle().succeeded());
+}
+
 // 在输出快照里按端口查找信号；快照只覆盖输出端口，找不到时返回空值。
 std::optional<circuit::SignalValue> snapshotValue(
     const circuit::Simulation& simulation, circuit::PortId portId) {
@@ -1179,6 +1238,8 @@ int main() {
     inverts_a_multi_bit_value_bit_by_bit();
     settles_a_multi_bit_not_chain();
     rejects_a_combinational_feedback_loop();
+    does_not_report_a_loop_that_only_runs_through_dangling_connections();
+    does_not_report_a_loop_that_runs_through_a_removed_port();
     carries_a_multi_bit_value_through_a_wide_connection();
     splits_a_host_bus_into_bit_ranges();
     merges_branch_inputs_back_onto_the_host_bus();
