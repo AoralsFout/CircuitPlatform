@@ -120,9 +120,14 @@ export interface CircuitLoadResult {
 
 export interface WaveformPoint {
   step: number;
-  a: BinarySignal;
-  b: BinarySignal;
-  output: Signal;
+  /**
+   * 这一拍读到的信号，键为 `${editorComponentId}:${portId}`，与画布、检查器共用同一套键空间。
+   *
+   * 波形因此按编辑器 ID 索引，不再写死「输入 A / 输入 B / 输出」三个字段：一条记录里有哪些
+   * 信号由电路决定，不由波形的形状决定。哪一行属于哪个信号由场景投影决定，增删元件后行跟着
+   * 变，已经消失的信号不会被画出来，记录里残留的旧键也不会指向不存在的元件。
+   */
+  signals: Readonly<Record<string, Signal>>;
 }
 
 export interface WorkspaceSnapshot {
@@ -399,7 +404,7 @@ function createWorkspaceSnapshot(state: MutableState): WorkspaceSnapshot {
     signals: { ...state.signals },
     hasCircuit: state.hasCircuit,
     simulationStep: state.simulationStep,
-    waveform: state.waveform.map((point) => ({ ...point })),
+    waveform: state.waveform.map((point) => ({ step: point.step, signals: { ...point.signals } })),
     canStart: runnable && state.simulationState === "stopped",
     canPause: state.simulationState === "running",
     canResume: runnable && state.simulationState === "paused",
@@ -670,12 +675,9 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
       };
       if (options.countAsAdvance) {
         state.simulationStep += 1;
-        state.waveform.push({
-          step: state.simulationStep,
-          a: state.inputA,
-          b: state.inputB,
-          output: state.outputValue,
-        });
+        // 记录的是这一拍全部端口读数的快照（Input 的驱动值、其余元件的输出、每个 Output 的
+        // 接收端），而不是写死的三行；键与画布、检查器共用同一套 `${componentId}:${port}`。
+        state.waveform.push({ step: state.simulationStep, signals: { ...state.signals } });
       }
       state.message = "仿真已稳定，信号已更新。";
       return true;
@@ -850,12 +852,9 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
       }
       state.simulationStep += 1;
       if (options.record) {
-        state.waveform.push({
-          step: state.simulationStep,
-          a: state.inputA,
-          b: state.inputB,
-          output: state.outputValue,
-        });
+        // 与输入切换路径同一条记录：这一拍的全部端口读数，键为 `${componentId}:${port}`。
+        // 记录的形状变了，但记录的时机没变——`record` 只在用户发起的推进上为真。
+        state.waveform.push({ step: state.simulationStep, signals: { ...state.signals } });
       }
       // 引用工作区自己的步数：引擎的 `ticked.step` 属于当前那份引擎仿真状态，结构变更后会归零。
       state.message = `已推进到第 ${state.simulationStep} 步。`;

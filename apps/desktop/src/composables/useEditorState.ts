@@ -26,6 +26,7 @@ import {
   type ViewportState,
 } from "../canvas";
 import { createInspectorModel, type InspectorModel } from "../editor/inspector.ts";
+import { createWaveformRows, type WaveformRow } from "../editor/waveform.ts";
 import {
   readRecentComponentKinds,
   writeRecentComponentKind,
@@ -42,18 +43,7 @@ import { createSimulationSnapshot } from "../editor/simulation.ts";
 
 export type RailPage = "components" | "inputs" | "layers" | "settings";
 export type BottomTab = "inspector" | "outputs" | "waveform";
-export type WaveformKey = "a" | "b" | "output";
-
-export interface WaveformRow {
-  label: string;
-  key: WaveformKey;
-}
-
-const waveformRows: readonly WaveformRow[] = [
-  { label: "输入 A", key: "a" },
-  { label: "输入 B", key: "b" },
-  { label: "输出", key: "output" },
-];
+export type { WaveformRow };
 
 /**
  * 管理只属于编辑器界面的选择、布局与缩放状态，并从工作区快照派生展示数据。
@@ -293,6 +283,8 @@ export function useEditorState(
     value: workspaceState.value.inputValues[node.id] ?? (index === 0 ? workspaceState.value.inputA : index === 1 ? workspaceState.value.inputB : "0"),
     componentId: node.id,
   })));
+  // 波形行由场景投影生成，因此与画布指的是同一批元件：增删元件后行跟着变。
+  const waveformRows = computed<readonly WaveformRow[]>(() => createWaveformRows(canvasScene.value.nodes));
   // 输出面板读取文档中全部 Output 元件，每个元件显示自己求值后的信号。
   const outputs = computed(() => canvasScene.value.nodes.filter((node) => node.kind === "output").map((node) => ({
     key: node.id,
