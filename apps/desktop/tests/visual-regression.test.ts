@@ -11,7 +11,7 @@ test("visual fixture covers the required state matrix and reduced motion mode", 
   const fixture = await readFile(join(desktopRoot, "visual-regression.html"), "utf8");
   const script = await readFile(join(desktopRoot, "scripts", "visual-regression.mjs"), "utf8");
   const styles = await readFile(join(desktopRoot, "src", "styles.css"), "utf8");
-  for (const state of ["default", "empty", "selected-component", "selected-wire", "draft", "dangling", "pending", "error"]) {
+  for (const state of ["default", "empty", "selected-component", "selected-wire", "draft", "dangling", "pending", "error", "running", "paused"]) {
     assert.match(script, new RegExp(state.replace("-", "\\-")));
   }
   assert.match(script, /regular: \{ width: 1440, height: 900 \}/);
@@ -22,6 +22,22 @@ test("visual fixture covers the required state matrix and reduced motion mode", 
   assert.match(styles, /transition: none !important/);
   assert.match(fixture, /import\("\/src\/main\.ts"\)/);
   assert.doesNotMatch(fixture, /fixture-node|style="left:|<path[^>]+ d="/);
+});
+
+/**
+ * 内存 adapter 取代的是引擎边界，因此必须覆盖 `EngineAdapter` 的全部方法。
+ * 每加一条运行控制就漏一次的代价是截图页整片挂掉，所以这里按接口本身而不是手抄一份清单来断言。
+ */
+test("the visual fixture implements every engine adapter method", async () => {
+  const workspace = await readFile(join(desktopRoot, "src", "workspace", "index.ts"), "utf8");
+  const fixture = await readFile(join(desktopRoot, "visual-regression.html"), "utf8");
+  const adapterBody = workspace.match(/export interface EngineAdapter \{([\s\S]*?)\n\}/)?.[1];
+  assert.ok(adapterBody, "没有找到 EngineAdapter 接口");
+  const methods = [...adapterBody.matchAll(/^  (\w+)\(/gm)].map((match) => match[1]);
+  assert.ok(methods.length >= 8, `没有从 EngineAdapter 解析出方法：${methods.join(", ")}`);
+  for (const method of methods) {
+    assert.match(fixture, new RegExp(`\\b${method}:`), `视觉回归的内存 adapter 缺少 ${method}`);
+  }
 });
 
 /** 语义 class 是截图和实际画布共用的视觉契约，不能只在夹具中伪造。 */
@@ -113,4 +129,38 @@ test("keyboard equivalents for nudging and zooming are wired end to end", async 
 
   // Electron 默认菜单会抢走这几个加速键，并让裸 Alt 聚焦菜单栏。
   assert.match(main, /Menu\.setApplicationMenu\(null\)/);
+});
+
+/** 运行控制的键盘等价路径同样要从解析器一路接到工具栏与工作区。 */
+test("keyboard equivalents for run control are wired end to end", async () => {
+  const app = await readFile(join(desktopRoot, "src", "App.vue"), "utf8");
+  const toolbar = await readFile(join(desktopRoot, "src", "components", "EditorToolbar.vue"), "utf8");
+  const workspace = await readFile(join(desktopRoot, "src", "workspace", "index.ts"), "utf8");
+
+  // 四个动作都在 App 的快捷键分发里处理，而不是只存在于解析器里。
+  assert.match(app, /case "start-or-resume-simulation": void runSimulationFromKeyboard\(\)/);
+  assert.match(app, /case "pause-simulation": void pause\(\)/);
+  assert.match(app, /case "step-simulation": void step\(\)/);
+  assert.match(app, /case "reset-simulation": void reset\(\)/);
+  // F5 是一个意图：已停止时开始，已暂停时继续。
+  assert.match(app, /if \(state\.value\.simulationState === "stopped"\) await start\(\)/);
+  assert.match(app, /else if \(state\.value\.simulationState === "paused"\) await resume\(\)/);
+
+  // 工具栏如实暴露三态控制与步数，并接到工作区的运行循环。
+  assert.match(toolbar, /emit\('startSimulation'\)/);
+  assert.match(toolbar, /emit\('pauseSimulation'\)/);
+  assert.match(toolbar, /emit\('resumeSimulation'\)/);
+  assert.match(toolbar, /emit\('stepSimulation'\)/);
+  assert.match(toolbar, /emit\('resetSimulation'\)/);
+  assert.match(toolbar, /runStateLabel/);
+  assert.match(app, /@start-simulation="start"/);
+  assert.match(app, /@pause-simulation="pause"/);
+  assert.match(app, /@resume-simulation="resume"/);
+  assert.match(app, /@reset-simulation="reset"/);
+
+  // 运行循环排定下一次推进之前必须等上一次响应，且下一次推进只能由调度器排定。
+  assert.match(workspace, /const advanced = await queue\.enqueue\(\(\) => stepInternal\(bindings, \{ record: false \}\)\)/);
+  assert.match(workspace, /scheduleTick\(\);\n    notifyAdvanced\(\);/);
+  // 暂停要取消已经排定的下一次推进。
+  assert.match(workspace, /cancelTick\(\);\n      state\.simulationState = "paused"/);
 });

@@ -38,15 +38,15 @@ pnpm --filter @circuit-platform/desktop performance:benchmark --mode=route
 
 2026-09-18 在本工作区执行（Windows，Node 24，500 Component / 1,000 Wire，5 秒）：
 
-| 交互 | P95 | 帧间隔 P50 | DOM 元素 | SMIL 动画 | 结果 |
-| --- | ---: | ---: | ---: | ---: | --- |
-| 连续视口平移 | 0.2ms | 8.9ms | 9,026 | 0 | 达标 |
-| Component 拖动预览 | 0.2ms | 71.3ms | 9,026 | 0 | 达标 |
-| 放置 ghost 跟随 | 3.2ms | 4.2ms | 9,031 | 0 | 达标 |
-| ConnectionDraft 布线 | 7.2ms | 4.9ms | 9,027 | 0 | 达标 |
-| Route 折点拖动 | 0.2ms | 59.6ms | 9,032 | 0 | 达标 |
+| 交互 | P95 | 帧间隔 P50 | 帧间隔 P95 | DOM 元素 | SMIL 动画 | 结果 |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| 连续视口平移 | 0.2ms | 7.6ms | 10.9ms | 9,026 | 0 | 达标 |
+| Component 拖动预览 | 0.2ms | 63.6ms | 88.3ms | 9,026 | 0 | 达标 |
+| 放置 ghost 跟随 | 2.5ms | 4.1ms | 5.3ms | 9,031 | 0 | 达标 |
+| ConnectionDraft 布线 | 1.8ms | 5.0ms | 11.5ms | 9,027 | 0 | 达标 |
+| Route 折点拖动 | 0.2ms | 55.8ms | 78.7ms | 9,032 | 0 | 达标 |
 
-五种模式的 P95 全部满足 20ms 预算。帧间隔 P50/P95 是本次新增的诊断字段，含义与局限见下。
+五种模式的 P95 全部满足 20ms 预算，`interacted` 全部为 `true`。这是 Phase 4 完整落地之后的复测（issue #24）：本阶段改了工具栏、新增了运行控制按钮、改了工作区绑定，但基准直接挂 `CircuitCanvas`、不经过 Workspace，实测 P95 与 DOM 元素数都没有变化。帧间隔 P50/P95 是诊断字段，含义与局限见下。
 
 ### 采样口径的一个已知不对称
 

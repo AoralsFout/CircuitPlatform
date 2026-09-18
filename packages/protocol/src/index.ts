@@ -1,5 +1,12 @@
 export type Signal = 0 | 1 | "X";
 
+/** 电路中一个输出端口的当前信号；`ticked` 用它一次带回全部读数。 */
+export interface SignalSnapshot {
+  componentId: number;
+  port: string;
+  value: Signal;
+}
+
 export type ComponentKindName =
   | "input"
   | "output"
@@ -60,6 +67,15 @@ export interface SettledResponse {
   status: "ok";
 }
 
+export interface TickedResponse {
+  type: "ticked";
+  requestId: string;
+  /** 本次推进之后的累计步数。 */
+  step: number;
+  /** 电路中每一个输出端口的当前值；接收端由前端沿 Connection 推导。 */
+  signals: readonly SignalSnapshot[];
+}
+
 export interface AddComponentRequest {
   type: "add_component";
   requestId: string;
@@ -99,6 +115,22 @@ export interface SettleRequest {
   requestId: string;
 }
 
+export interface TickRequest {
+  type: "tick";
+  requestId: string;
+}
+
+export interface ResetRequest {
+  type: "reset";
+  requestId: string;
+}
+
+export interface ResetDoneResponse {
+  type: "reset_done";
+  requestId: string;
+  status: "ok";
+}
+
 export interface GetSignalRequest {
   type: "get_signal";
   requestId: string;
@@ -114,6 +146,8 @@ export type EngineRequest =
   | RemoveConnectionRequest
   | SetInputRequest
   | SettleRequest
+  | TickRequest
+  | ResetRequest
   | GetSignalRequest;
 
 export interface ErrorResponse {
@@ -137,6 +171,8 @@ export type EngineResponse =
   | ConnectionRemovedResponse
   | InputSetResponse
   | SettledResponse
+  | TickedResponse
+  | ResetDoneResponse
   | SignalResponse
   | ErrorResponse;
 
@@ -183,6 +219,30 @@ export function createRemoveConnection(
     type: "remove_connection",
     requestId,
     connectionId,
+  };
+}
+
+/**
+ * 创建推进仿真一个 tick 的请求。
+ * @param requestId 用于匹配请求和响应的调用方身份。
+ * @returns 一个可发送给 C++ 引擎的推进请求。
+ */
+export function createTick(requestId: string): TickRequest {
+  return {
+    type: "tick",
+    requestId,
+  };
+}
+
+/**
+ * 创建把仿真恢复到初始状态的重置请求。
+ * @param requestId 用于匹配请求和响应的调用方身份。
+ * @returns 一个可发送给 C++ 引擎的重置请求。
+ */
+export function createReset(requestId: string): ResetRequest {
+  return {
+    type: "reset",
+    requestId,
   };
 }
 
@@ -241,4 +301,38 @@ export function isConnectionRemovedResponse(value: unknown): value is Connection
  */
 export function isSignal(value: unknown): value is Signal {
   return value === 0 || value === 1 || value === "X";
+}
+
+function isSignalSnapshot(value: unknown): value is SignalSnapshot {
+  return (
+    isRecord(value) &&
+    isValidId(value.componentId) &&
+    typeof value.port === "string" &&
+    isSignal(value.value)
+  );
+}
+
+/**
+ * 判断未知值是否为一次推进的响应。
+ * @param value 待检查的未知值。
+ * @returns 当 value 带有非负步数和全部合法的输出端口快照时返回 true。
+ */
+export function isTickedResponse(value: unknown): value is TickedResponse {
+  return (
+    isRequestWithType(value, "ticked") &&
+    typeof value.step === "number" &&
+    Number.isSafeInteger(value.step) &&
+    value.step >= 0 &&
+    Array.isArray(value.signals) &&
+    value.signals.every(isSignalSnapshot)
+  );
+}
+
+/**
+ * 判断未知值是否为一次重置的成功响应。
+ * @param value 待检查的未知值。
+ * @returns 当 value 是带有成功状态的重置响应时返回 true。
+ */
+export function isResetDoneResponse(value: unknown): value is ResetDoneResponse {
+  return isRequestWithType(value, "reset_done") && value.status === "ok";
 }

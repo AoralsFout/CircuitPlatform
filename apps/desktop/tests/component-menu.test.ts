@@ -23,10 +23,19 @@ test("component menu groups recent items before categories and caps them at five
   assert.equal(groups.map((group) => group.id).join(","), "recent,input-output,logic,sequential");
 });
 
-test("disabled sequential definitions remain visible with an explanation", () => {
+test("sequential definitions expose a usable clock and d flip-flop", () => {
   const sequential = createComponentMenuGroups(definitions).find((group) => group.id === "sequential");
-  assert.equal(sequential?.definitions.find((item) => item.kind === "clock")?.available, false);
-  assert.match(sequential?.definitions.find((item) => item.kind === "d_flip_flop")?.disabledReason ?? "", /时序/);
+  // 两个时序元件都已解除禁用：没有禁用原因，描述说明真实行为。
+  const clock = sequential?.definitions.find((item) => item.kind === "clock");
+  assert.equal(clock?.available, true);
+  assert.equal(clock?.disabledReason, null);
+
+  const flipFlop = sequential?.definitions.find((item) => item.kind === "d_flip_flop");
+  assert.equal(flipFlop?.available, true);
+  assert.equal(flipFlop?.disabledReason, null);
+  assert.match(flipFlop?.description ?? "", /上升沿/);
+  // 菜单按搜索别名找到它，且不再被键盘导航跳过。
+  assert.equal(createComponentMenuGroups(definitions, [], "触发器")[0]?.definitions[0]?.kind, "d_flip_flop");
 });
 
 test("menu flips away from viewport edges", () => {

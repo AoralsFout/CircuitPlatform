@@ -70,16 +70,23 @@ Subcircuit 是 Project 与编辑器层的概念，在进入引擎之前就已经
 
 组合逻辑仿真通过独立的 `Simulation` 模块进行：
 
-- `Simulation(Circuit)`：从 Circuit 创建独立仿真快照；
+- `Simulation(const Circuit&)`：在一份 Circuit 上建立仿真状态。它持有引用而不复制结构，因此外部的结构变更不需要重建仿真，只需通知它重新推导状态；
+- `reconcile`：结构变更后按元件身份重新推导仿真状态——仍然存在的 `PortId` 保留当前值，消失的端口连同它的值一起丢弃，新出现的端口按初始值建立，仍然存在的 `DFlipFlop` 保留它的 `q` 与 `clock` 端口上的前值，已删除的 `DFlipFlop` 不再留下残留。已推进的步数不归零；
 - `setInput`：设置 Input 元件的输出值；
 - `settle`：重复求值直到输出稳定，并返回 `SimulationResult`；
+- `tick`：推进一个 tick——取每个 `DFlipFlop` 的 `clock` 端口前值、翻转全部 Clock、求值到稳定、让 DFlipFlop 在上升沿采样、再求值一次——并返回 `SimulationResult`。前值是「上一 tick 求值稳定之后观测到的值」：只在首次遇到该 DFlipFlop 时现读一次，其后跨 tick 保留并在每次推进末尾写回；
+- `step`：返回从创建以来推进的 tick 次数；`reset` 之后归零；
+- `reset`：把仿真恢复成刚创建时的状态——全部输出端口回到初值、tick 计数归零、上升沿判定的前值快照清空——但不触碰 Circuit 结构与其中的引擎身份；
+- `outputSignals`：返回电路中全部输出端口的当前信号，供一次响应带回整份读数；
 - `signal`：读取端口当前的 SignalValue。
 
-当前切片实现 `Input`、`NotGate`、`AndGate`、`OrGate`、`NandGate`、`NorGate`、`XorGate`、`XnorGate` 和 `Output` 的组合行为，并能报告组合逻辑环路。未连接输入的值为 `Unknown`；不存在的端口返回空值。更丰富的通用仿真错误将在后续切片中加入。
+当前切片实现 `Input`、`NotGate`、`AndGate`、`OrGate`、`NandGate`、`NorGate`、`XorGate`、`XnorGate`、`Output`、`Clock` 和 `DFlipFlop` 的行为，并能报告组合逻辑环路。`Clock` 的输出初值是 `0`（`0 → 1` 才算上升沿，从 `X` 起步会永远判不出第一次上升沿），每推进一次翻转一次；`DFlipFlop` 的 `q` 初值是 `Unknown`，只在 `clock` 端口出现 `0 → 1` 时把 `d` 采样进 `q`，下降沿与任何一端是 `X` 的跳变都不采样；其余元件的输出初值仍是 `Unknown`。判上升沿所比较的前值跨 tick 保留，因此时钟来自 Input 元件或组合逻辑时同样成立；`reset` 会把它连同其余运行时状态一起清空，重置后的第一次推进因此与刚创建时完全一致。未连接输入的值为 `Unknown`；不存在的端口返回空值。更丰富的通用仿真错误将在后续切片中加入。
+
+结构变更与清空状态是两件独立的事：结构变更按元件身份保留已积累的运行时状态（见 `reconcile`），而把整个仿真恢复成刚创建时的样子——全部输出回到初始值、`Clock` 回到 `0`、每个 `DFlipFlop` 的 `q` 回到 `X`、步数归零——是一条独立的 `reset` 请求。取舍与已知限制见 [ADR 0019](decisions/0019-tick-driven-by-protocol-and-state-kept-by-identity.md)；[ADR 0004](decisions/0004-json-lines-engine-session.md) 中「结构变化后重建 `Simulation` 快照」的第一版规则已由它修订。
 
 ## 当前外部接口
 
-Electron 主进程通过 JSON Lines 长连接调用引擎。当前协议提供 `health_check`、`add_component`、`add_connection`、`remove_component`、`remove_connection`、`set_input`、`settle` 和 `get_signal` 八类请求，详细字段和错误格式见 [引擎 JSON Lines 协议](protocol.md)。
+Electron 主进程通过 JSON Lines 长连接调用引擎。当前协议提供 `health_check`、`add_component`、`add_connection`、`remove_component`、`remove_connection`、`set_input`、`settle`、`tick`、`reset` 和 `get_signal` 十类请求，详细字段和错误格式见 [引擎 JSON Lines 协议](protocol.md)。
 
 这是一个刻意偏小的垂直切片：先让“创建结构 → 设置输入 → 稳定求值 → 读取输出”跑通，目前已扩展删除协议，后续继续实现时钟、时序状态和持久化。当前桌面 UI 已通过业务 IPC 创建并运行 AND 示例、切换输入、稳定求值和读取输出；画布位置与视觉连线仍只属于编辑器模型，不会进入仿真引擎。后续图形编辑器切片和验收顺序见[项目路线图](roadmap.md)。
 

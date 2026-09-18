@@ -50,9 +50,22 @@ std::string missingField(const protocol::Request& request, std::string_view fiel
         request.requestId, "bad_request", "缺少字段: " + std::string(field));
 }
 
-// 结构变化后丢弃旧快照，保证 Simulation 不会继续使用过期 Circuit。
+// 从零建立一份仿真状态，等价于「刚创建时」的样子：全部输出回到初始值、Clock 回到 0、
+// 每个 DFlipFlop 的 q 回到 X、步数归零。首次需要仿真时走这里；重置同样以它为基底。
 void resetSimulation(const Circuit& circuit, std::optional<Simulation>& simulation) {
     simulation.emplace(circuit);
+}
+
+// 结构变化后按元件身份重新推导仿真状态，而不是重建整个快照。
+// Simulation 持有对 Circuit 的引用，所以这里只需要重建状态表：仍然存在的 PortId 保留当前值，
+// 消失的连同值一起丢弃，新出现的按初始值建立，已经积累的时序状态不受影响。
+void reconcileSimulation(const Circuit& circuit, std::optional<Simulation>& simulation) {
+    if (!simulation.has_value()) {
+        resetSimulation(circuit, simulation);
+        return;
+    }
+
+    simulation->reconcile();
 }
 
 }  // namespace
@@ -76,7 +89,7 @@ std::string handleRequest(
         }
 
         const auto id = circuit.addComponent(*kind);
-        resetSimulation(circuit, simulation);
+        reconcileSimulation(circuit, simulation);
         return responseWithId("component_added", request.requestId) +
                ",\"componentId\":" + std::to_string(id) + "}";
     }
@@ -91,7 +104,7 @@ std::string handleRequest(
             return protocol::errorResponse(request.requestId, "component_not_found", "找不到元件");
         }
 
-        resetSimulation(circuit, simulation);
+        reconcileSimulation(circuit, simulation);
         return responseWithId("component_removed", request.requestId) +
                ",\"componentId\":" + std::to_string(*request.componentId) + "}";
     }
@@ -110,7 +123,7 @@ std::string handleRequest(
                 request.requestId, "invalid_connection", "连接端点不符合 Circuit 规则");
         }
 
-        resetSimulation(circuit, simulation);
+        reconcileSimulation(circuit, simulation);
         return responseWithId("connection_added", request.requestId) +
                ",\"connectionId\":" + std::to_string(*result.id) + "}";
     }
@@ -125,7 +138,7 @@ std::string handleRequest(
             return protocol::errorResponse(request.requestId, "connection_not_found", "找不到连接");
         }
 
-        resetSimulation(circuit, simulation);
+        reconcileSimulation(circuit, simulation);
         return responseWithId("connection_removed", request.requestId) +
                ",\"connectionId\":" + std::to_string(*request.connectionId) + "}";
     }
@@ -153,6 +166,38 @@ std::string handleRequest(
             return protocol::errorResponse(request.requestId, "combinational_loop", "检测到组合逻辑环路");
         }
         return responseWithId("settled", request.requestId) + ",\"status\":\"ok\"}";
+    }
+
+    if (request.type == "tick") {
+        if (!simulation.has_value()) resetSimulation(circuit, simulation);
+        const auto result = simulation->tick();
+        if (!result.succeeded()) {
+            return protocol::errorResponse(request.requestId, "combinational_loop", "检测到组合逻辑环路");
+        }
+
+        // 一次推进就把全部输出端口与每个 Output 接收端的当前值带回，运行循环每步只有一次跨进程往返。
+        std::string signals = ",\"signals\":[";
+        bool first = true;
+        for (const auto& signal : simulation->signalSnapshot()) {
+            if (!first) signals += ",";
+            first = false;
+            signals += "{\"componentId\":" + std::to_string(signal.port.component) +
+                       ",\"port\":\"" + protocol::escapeJson(signal.port.name) + "\",\"value\":" +
+                       signalValueToJson(signal.value) + "}";
+        }
+        signals += "]}";
+
+        return responseWithId("ticked", request.requestId) +
+               ",\"step\":" + std::to_string(simulation->step()) + signals;
+    }
+
+    if (request.type == "reset") {
+        // 重置是一条独立请求，不是推进的一个参数：用户要能在任何时候单独表达「从头来过」，
+        // 而不必借道某个带副作用的操作。它只清空运行时状态，Circuit 结构原样保留。
+        // 没有仿真时先按当前 Circuit 建立再重置，结果与「重建一份仿真」完全一致。
+        if (!simulation.has_value()) resetSimulation(circuit, simulation);
+        simulation->reset();
+        return responseWithId("reset_done", request.requestId) + ",\"status\":\"ok\"}";
     }
 
     if (request.type == "get_signal") {

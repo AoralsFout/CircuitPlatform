@@ -80,7 +80,16 @@ test("maps editor keyboard shortcuts while preserving editable targets", () => {
   assert.equal(key({ key: "_", metaKey: true, shiftKey: true }), "zoom-out");
   assert.equal(key({ key: "0", ctrlKey: true }), "zoom-fit");
   assert.equal(key({ key: "0", metaKey: true }), "zoom-fit");
+  // 运行控制占用连续的功能键簇，不依赖修饰键。
+  assert.equal(key({ key: "F5" }), "start-or-resume-simulation");
+  assert.equal(key({ key: "F6" }), "pause-simulation");
+  assert.equal(key({ key: "F7" }), "step-simulation");
+  assert.equal(key({ key: "F8" }), "reset-simulation");
+  assert.equal(key({ key: "F5", ctrlKey: true }), "start-or-resume-simulation");
+  // 功能键簇之外仍然不绑定：F9 没有对应意图。
+  assert.equal(key({ key: "F9" }), null);
   assert.equal(key({ key: "Delete", editableTarget: true }), null);
+  assert.equal(key({ key: "F5", editableTarget: true }), null);
   assert.equal(key({ key: "a" }), null);
   assert.equal(key({ key: "=" }), null);
   assert.equal(key({ key: "0" }), null);

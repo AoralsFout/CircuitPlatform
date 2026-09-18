@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ComponentKindName } from "@circuit-platform/protocol";
+import { createComponentDefinitionRegistry } from "../src/canvas/index.ts";
 import { createEditorSession, type CircuitEnginePort, type EngineResult } from "../src/editor/index.ts";
 
 class Engine implements CircuitEnginePort {
@@ -48,6 +49,37 @@ test("connection submission normalizes input-first order and supports output fan
   const second = await session.dispatch({ type: "create-connection", left: port("source", "output", { x: 148, y: 42 }), right: port("target-2", "input", { x: 160, y: 202 }) });
   assert.equal(second.ok, true);
   assert.equal(second.snapshot.document.connections.length, 2);
+});
+
+/** 展示定义的端口 id 原样发给引擎，所以时钟端口必须叫 `clock`，否则连线会被引擎拒绝。 */
+test("connects the d flip-flop clock port with the engine port name", async () => {
+  const registry = createComponentDefinitionRegistry();
+  const clockOut = registry.get("clock")?.ports.find((candidate) => candidate.direction === "output");
+  const clockInput = registry.get("d_flip_flop")?.ports.find((candidate) => candidate.id === "clock");
+  assert.equal(clockOut?.id, "out");
+  assert.equal(clockInput?.direction, "input");
+
+  const engine = new Engine();
+  const session = createEditorSession({
+    document: {
+      components: [
+        { id: "clock-1", kind: "clock", displayName: "Clock", position: { x: 0, y: 0 }, lifecycle: "active" },
+        { id: "dff-1", kind: "d_flip_flop", displayName: "D Flip-Flop", position: { x: 160, y: 0 }, lifecycle: "active" },
+      ],
+      connections: [],
+    },
+    bindings: { components: { "clock-1": 1, "dff-1": 2 }, connections: {} },
+  }, engine);
+
+  const created = await session.dispatch({
+    type: "create-connection",
+    left: { componentId: "clock-1", port: clockOut?.id ?? "", direction: "output", point: { x: 148, y: 42 } },
+    right: { componentId: "dff-1", port: clockInput?.id ?? "", direction: "input", point: { x: 160, y: 54 } },
+  });
+
+  assert.equal(created.ok, true);
+  assert.equal(engine.calls.includes("addConnection:out->clock"), true);
+  assert.deepEqual(created.snapshot.document.connections[0].target, { componentId: "dff-1", port: "clock", point: { x: 160, y: 54 } });
 });
 
 test("occupied input is rejected while fan-out to another input remains independent", async () => {

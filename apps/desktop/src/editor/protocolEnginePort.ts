@@ -1,5 +1,6 @@
 import type { EngineResponse } from "@circuit-platform/protocol";
 import type { EngineAdapter } from "../workspace";
+import type { EngineCallQueue } from "../workspace/engineQueue.ts";
 import type { CircuitEnginePort, EngineError, EngineResult } from ".";
 
 function protocolError(response: Extract<EngineResponse, { type: "error" }>): EngineError {
@@ -14,9 +15,13 @@ function unexpectedResponse(response: EngineResponse): EngineError {
   };
 }
 
-async function call<T>(action: () => Promise<EngineResponse>, read: (response: EngineResponse) => T | null): Promise<EngineResult<T>> {
+async function serializedCall<T>(
+  queue: EngineCallQueue,
+  action: () => Promise<EngineResponse>,
+  read: (response: EngineResponse) => T | null,
+): Promise<EngineResult<T>> {
   try {
-    const response = await action();
+    const response = await queue.enqueue(action);
     if (response.type === "error") return { ok: false, error: protocolError(response) };
     const value = read(response);
     return value === null
@@ -38,10 +43,19 @@ async function call<T>(action: () => Promise<EngineResponse>, read: (response: E
 
 /**
  * 把 Electron 协议 adapter 收窄为 EditorSession 所需的结构编辑端口。
+ *
+ * 每一次调用都排进传入的队列：编辑器的结构提交与工作区的推进、输入提交因此排在同一个队里，
+ * 任意两条请求不交错。队列是必填参数而不是可选项——编辑器是另一条独立的引擎调用路径，
+ * 少了这个参数，结构提交就又跑到队列外面去与在飞的 tick 并发了。
  * @param adapter 生产 Electron adapter 或测试 fake。
+ * @param queue 与工作区共用的同一条引擎调用队列。
  * @returns 统一错误形态且不向编辑器泄露协议响应的端口。
  */
-export function createProtocolEnginePort(adapter: EngineAdapter): CircuitEnginePort {
+export function createProtocolEnginePort(adapter: EngineAdapter, queue: EngineCallQueue): CircuitEnginePort {
+  const call = <T>(
+    action: () => Promise<EngineResponse>,
+    read: (response: EngineResponse) => T | null,
+  ): Promise<EngineResult<T>> => serializedCall(queue, action, read);
   return {
     addComponent: (kind) => call(
       () => adapter.addComponent(kind),

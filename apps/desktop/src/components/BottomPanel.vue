@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from "vue";
 import type { Signal } from "@circuit-platform/protocol";
 import type { BottomTab, WaveformKey, WaveformRow } from "../composables/useEditorState";
 import type { EditorConnectionId } from "../editor";
@@ -12,12 +13,11 @@ interface OutputItem {
   description: string;
 }
 
-defineProps<{
+const props = defineProps<{
   isExpanded: boolean;
   bottomTab: BottomTab;
   waveformRows: readonly WaveformRow[];
   waveform: readonly WaveformPoint[];
-  simulationStep: number;
   outputs: readonly OutputItem[];
   selectedComponentName: string;
   selectedConnection: EditorConnectionId | null;
@@ -47,6 +47,19 @@ function signalClass(value: Signal): string {
 function waveformValue(point: WaveformPoint, key: WaveformKey): Signal {
   return point[key];
 }
+
+/**
+ * 表头显示的步区间，直接从已记录的点推出来。
+ * 不写成「01–当前步数」：波形只记录用户发起的推进，连续运行中的自动 tick 会让当前步数
+ * 一路涨上去，而网格里的列并不会跟着增加，那种表头会宣称一段并不存在的历史。
+ */
+const waveformRange = computed(() => {
+  const first = props.waveform[0];
+  const last = props.waveform.at(-1);
+  if (!first || !last) return "STEP —";
+  const pad = (step: number): string => step.toString().padStart(2, "0");
+  return `STEP ${pad(first.step)}–${pad(last.step)}`;
+});
 </script>
 
 <template>
@@ -63,6 +76,7 @@ function waveformValue(point: WaveformPoint, key: WaveformKey): Signal {
       <template v-if="inspector?.kind === 'component'">
         <div class="bottom-inspector-heading"><div><span class="eyebrow">COMPONENT</span><strong>{{ inspector.displayName }}</strong></div><span class="inspector-kind">{{ inspector.type }}</span></div>
         <div class="inspector-copy"><p>{{ inspector.behavior }}</p><span>类型：{{ inspector.type }}</span></div>
+        <p v-if="inspector.hint" class="inspector-hint">{{ inspector.hint }}</p>
         <div class="inspector-value"><span>当前信号</span><strong :class="signalClass(inspector.signal)">{{ inspector.signal }}</strong></div>
         <div class="inspector-port-list" aria-label="端口信号">
           <span v-for="port in inspector.ports" :key="port.id" class="inspector-port-row"><span>{{ port.direction === 'input' ? '输入' : '输出' }} · {{ port.name }}</span><strong :class="signalClass(port.signal)">{{ port.signal }}</strong><small>{{ port.connectionState === 'connected' ? '已连接' : port.connectionState === 'dangling' ? '悬空' : '未连接' }}</small></span>
@@ -82,7 +96,7 @@ function waveformValue(point: WaveformPoint, key: WaveformKey): Signal {
       <div class="bottom-engine"><span class="engine-indicator" :class="`engine-indicator--${engineState}`"></span><span>{{ engineName }}</span></div>
     </div>
     <div v-else-if="isExpanded" class="bottom-content bottom-content--waveform">
-      <div class="waveform-meta"><span class="eyebrow">WAVEFORM / HISTORY</span><span>STEP 01–{{ simulationStep.toString().padStart(2, "0") }}</span></div>
+      <div class="waveform-meta"><span class="eyebrow">WAVEFORM / HISTORY</span><span>{{ waveformRange }}</span></div>
       <div class="waveform-grid" :style="{ '--waveform-steps': waveform.length }"><div class="waveform-axis"><span>信号</span><span v-for="point in waveform" :key="`axis-${point.step}`">{{ point.step }}</span></div><div v-for="row in waveformRows" :key="row.key" class="waveform-row"><span class="waveform-label">{{ row.label }}</span><span v-for="point in waveform" :key="`${row.key}-${point.step}`" class="waveform-cell" :class="signalClass(waveformValue(point, row.key))">{{ waveformValue(point, row.key) }}</span></div></div>
     </div>
   </section>
