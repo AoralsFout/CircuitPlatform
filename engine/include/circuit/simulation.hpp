@@ -92,7 +92,11 @@ private:
     Circuit circuit_;
     std::vector<PortSignal> signals_;
     std::uint64_t step_{0};
-    /** 本次 tick 开始时每个 DFlipFlop 在 clock 端口观测到的值，即边沿判定的前值。 */
+    /**
+     * 每个 DFlipFlop 在 clock 端口上最近一次观测到的值，即边沿判定的前值。
+     * 快照跨 tick 保留，只在上一 tick 结束时更新；驱动 clock 端口的可能是 Input 元件，
+     * 它的电平变化发生在两次 tick 之间，重新读取当前值会漏掉这类边沿。
+     */
     std::vector<PortSignal> previousClockValues_;
 };
 

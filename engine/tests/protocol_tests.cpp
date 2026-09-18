@@ -208,6 +208,51 @@ int main() {
                clockCircuit, clockSimulation)
                .find("\"value\":1") != std::string::npos);
 
+    // 一整条时序链路走 JSON：Clock 驱动 clock 端口，Input 驱动 d，q 接到 Output。
+    circuit::Circuit flipFlopCircuit;
+    const auto flipFlopClock = flipFlopCircuit.addComponent(circuit::ComponentKind::Clock);
+    const auto flipFlopData = flipFlopCircuit.addComponent(circuit::ComponentKind::Input);
+    const auto flipFlop = flipFlopCircuit.addComponent(circuit::ComponentKind::DFlipFlop);
+    const auto flipFlopOutput = flipFlopCircuit.addComponent(circuit::ComponentKind::Output);
+    assert(flipFlopCircuit.addConnection({flipFlopClock, "out"}, {flipFlop, "clock"}).succeeded());
+    assert(flipFlopCircuit.addConnection({flipFlopData, "out"}, {flipFlop, "d"}).succeeded());
+    assert(flipFlopCircuit.addConnection({flipFlop, "q"}, {flipFlopOutput, "in"}).succeeded());
+    std::optional<circuit::Simulation> flipFlopSimulation;
+
+    assert(dispatch(
+               R"({"type":"set_input","requestId":"d-one","componentId":2,"value":"1"})",
+               flipFlopCircuit, flipFlopSimulation)
+               .find("\"type\":\"input_set\"") != std::string::npos);
+
+    // 第一次推进是 clock 端口的 0 → 1：q 从 X 变成采到的 1，并沿 Connection 传到 Output。
+    const auto risingEdge = dispatch(
+        R"({"type":"tick","requestId":"tick-rising"})", flipFlopCircuit, flipFlopSimulation);
+    assert(risingEdge.find("\"step\":1") != std::string::npos);
+    assert(risingEdge.find(
+               "{\"componentId\":3,\"port\":\"q\",\"value\":1}") != std::string::npos);
+    assert(dispatch(
+               R"({"type":"get_signal","requestId":"read-q","componentId":4,"port":"in"})",
+               flipFlopCircuit, flipFlopSimulation)
+               .find("\"value\":1") != std::string::npos);
+
+    // 第二次推进是下降沿：d 已经变成 0，q 仍然按住 1。
+    assert(dispatch(
+               R"({"type":"set_input","requestId":"d-zero","componentId":2,"value":"0"})",
+               flipFlopCircuit, flipFlopSimulation)
+               .find("\"type\":\"input_set\"") != std::string::npos);
+    const auto fallingEdge = dispatch(
+        R"({"type":"tick","requestId":"tick-falling"})", flipFlopCircuit, flipFlopSimulation);
+    assert(fallingEdge.find("\"step\":2") != std::string::npos);
+    assert(fallingEdge.find(
+               "{\"componentId\":3,\"port\":\"q\",\"value\":1}") != std::string::npos);
+
+    // 第三次推进又是上升沿：这次把 d = 0 采样进 q。
+    const auto secondRisingEdge = dispatch(
+        R"({"type":"tick","requestId":"tick-rising-again"})", flipFlopCircuit, flipFlopSimulation);
+    assert(secondRisingEdge.find("\"step\":3") != std::string::npos);
+    assert(secondRisingEdge.find(
+               "{\"componentId\":3,\"port\":\"q\",\"value\":0}") != std::string::npos);
+
     circuit::Circuit loopCircuit;
     const auto loopFirst = loopCircuit.addComponent(circuit::ComponentKind::NotGate);
     const auto loopSecond = loopCircuit.addComponent(circuit::ComponentKind::NotGate);

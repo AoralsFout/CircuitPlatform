@@ -214,14 +214,21 @@ SimulationResult Simulation::settle() {
 
 // 六步顺序本身就是语义：先记前值，再推进时钟，求值到稳定后才判边沿，判完再求值一次。
 SimulationResult Simulation::tick() {
-    // ① 记录每个 DFlipFlop 在它 clock 端口上当前观测到的值，作为本次 tick 的前值。
-    previousClockValues_.clear();
+    // ① 为还没有前值的 DFlipFlop 建立快照，作为本次 tick 的前值。
+    //    已经跟踪过的 DFlipFlop 保留上一 tick 记录的值而不重新读取：驱动 clock 端口的
+    //    可能是 Input 元件，它的电平变化发生在两次 tick 之间，只有跨 tick 保留前值才能
+    //    认出这类边沿。Phase 5.5 展平 Subcircuit 后外部时钟正是接到内部 Input 元件上。
     for (const auto& component : circuit_.components_) {
         if (component.kind != ComponentKind::DFlipFlop) {
             continue;
         }
         const PortId clockPort{component.id, "clock"};
-        previousClockValues_.push_back({clockPort, signal(clockPort).value_or(SignalValue::Unknown)});
+        const auto tracked = std::any_of(
+            previousClockValues_.begin(), previousClockValues_.end(),
+            [&clockPort](const PortSignal& signal) { return samePort(signal.port, clockPort); });
+        if (!tracked) {
+            previousClockValues_.push_back({clockPort, signal(clockPort).value_or(SignalValue::Unknown)});
+        }
     }
 
     // ② 推进每个 Clock 元件：out 在 0 与 1 之间翻转。初值是 0，因此第一次推进必然是 0 → 1。
@@ -239,10 +246,22 @@ SimulationResult Simulation::tick() {
         return advance;
     }
 
-    // ④ DFlipFlop 的边沿采样：比较 previousClockValues_ 与 clock 端口当前值，
-    //    只在 0 → 1 时把 d 采样进 q，其余情况保持 q。本票不实现，由 #20 在此接入。
-    //    判边沿所需的前值已经由第 ① 步记录，采样后的新 q 需要在第 ④ 步之后传播，
-    //    因此 #20 的代码应当放在这里、第 ⑤ 步之前。
+    // ④ DFlipFlop 的边沿采样：比较前值与 clock 端口的当前值。
+    //    只有 0 → 1 算上升沿；1 → 0 不采样，任何一端是 X 的跳变也不采样——
+    //    X → 1 无法构成可靠的上升沿，因为上一拍可能本来就是 1。
+    //    判定只读端口的前后值，与元件类型无关：Clock、Input 或组合逻辑的输出都一样。
+    for (auto& previous : previousClockValues_) {
+        const auto current = signal(previous.port).value_or(SignalValue::Unknown);
+        if (previous.value == SignalValue::Zero && current == SignalValue::One) {
+            // 采样的是第 ③ 步求值稳定之后的 d：时钟可以经组合逻辑到达 clock 端口，
+            // 数据同样可能经组合逻辑到达 d，两者都必须在采样那一刻处在稳定值上。
+            const auto data = signal({previous.port.component, "d"}).value_or(SignalValue::Unknown);
+            setOutputSignal({previous.port.component, "q"}, data);
+        }
+
+        // 记下本次 tick 观测到的值，作为下一 tick 的前值。
+        previous.value = current;
+    }
 
     // ⑤ 再次组合求值到稳定，让采样后的 q 变化传播到下游。
     if (const auto propagated = settle(); !propagated.succeeded()) {
