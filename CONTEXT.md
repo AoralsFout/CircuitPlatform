@@ -10,7 +10,7 @@
 _Avoid_: Node（在本项目中容易与 UI 节点或图算法节点混淆）
 _Avoid_: Instance（Subcircuit 放入电路后仍称为 Component，不另造"实例"一词）
 
-**Project**：用户保存和打开的工作单元，包含一份 Circuit、它的编辑器布局和元数据。一个 Project 恰好包含一份 Circuit；只有保存过的 Project 才拥有身份，也才能被其他 Circuit 作为 Subcircuit 引用。
+**Project**：用户保存和打开的工作单元，包含一份 Circuit、它的编辑器布局和元数据。一个 Project 恰好包含一份 Circuit；只有保存过的 Project 才拥有身份，也才能被其他 Circuit 作为 Subcircuit 引用。身份是文件路径经词法规范化后的绝对路径——统一分隔符、消除相对段、Windows 上比较不分大小写、不解析符号链接——同一文件的不同写法是同一份 Project。
 
 **Subcircuit**：被另一份 Circuit 当作 Component 使用的 Project。它的 Input 和 Output 元件构成对外的 Port；内部其他 Component 对外不可见。Subcircuit 通过引用被使用，不是拷贝；一份 Project 可以在多份 Circuit 中被多次使用，也可以自身使用其他 Subcircuit，但引用关系不允许成环。Subcircuit 在加载时被展平，引擎不需要感知层次。
 _Avoid_: Module、Block、CompoundComponent
