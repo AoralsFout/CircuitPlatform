@@ -484,7 +484,8 @@ button:disabled { cursor: not-allowed; }
 .bottom-content--waveform { padding-top: 10px; overflow: auto; }
 .waveform-meta { display: flex; justify-content: space-between; margin-bottom: 9px; color: var(--color-text-faint); font-family: var(--font-data); font-size: 8px; }
 .waveform-grid { overflow-x: auto; font-family: var(--font-data); font-size: 9px; }
-.waveform-axis, .waveform-row { display: grid; grid-template-columns: 80px repeat(var(--waveform-steps, 1), minmax(38px, 1fr)); min-width: 340px; }
+/* 列宽下限取内容宽度：多条位的二进制读数（`1010`）逐位可读，不会被挤到相邻单元里；位宽为 1 时下限仍由 1fr 与行宽决定，与改造前一致。 */
+.waveform-axis, .waveform-row { display: grid; grid-template-columns: 80px repeat(var(--waveform-steps, 1), minmax(min-content, 1fr)); min-width: 340px; }
 .waveform-axis { color: var(--color-text-faint); }
 .waveform-axis span:not(:first-child) { text-align: center; }
 .waveform-row { min-height: 25px; border-top: 1px solid var(--color-border); }

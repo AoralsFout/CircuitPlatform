@@ -36,6 +36,8 @@
 
 输入取值随之从整值 `0` / `1` 变为**逐位文本**（长度等于端口声明的位宽，最左是最高位），提交经 `set_input` 走与改造前同一条路径。Phase 4 的运行中语义不变：停止或暂停时切换立即求值，连续运行中只提交 `set_input`，由下一次推进带上新值。
 
+2026-09-18 在 Phase 4.5 切片 6 落地（issue #31）：**波形不再是旧字段的拷贝。** `WaveformPoint` 从 `{step, a, b, output}` 改为 `{step, signals}`，一次推进记录的是这一拍全部端口读数的快照，键为 `${editorComponentId}:${portId}`，行由场景投影生成。`inputA`、`inputB` 与 `outputValue` 仍作为示例电路与画布的兼容投影保留，但波形已经不再依赖它们，本文档开头所说的「旧波形字段作为兼容投影保留」到此结束。
+
 ## 键位表
 
 编辑器级快捷键集中登记在这里，新增绑定前先查表避免冲突。解析器在 `src/editor/keyboard.ts`，全局分发在 `App.vue`，画布内的按键由 `CircuitCanvas.vue` 处理，输入设置内的按键由 `WorkspaceSidebar.vue` 处理；被 Electron 默认加速键占用的组合在 `electron/main.cjs` 的 `before-input-event` 里处置。同一按键在不同作用域下含义不同时，按焦点所在的作用域分派。

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import type { BitRange, Signal } from "@circuit-platform/protocol";
-import type { BottomTab, WaveformKey, WaveformRow } from "../composables/useEditorState";
+import type { BottomTab, WaveformRow } from "../composables/useEditorState";
 import type { EditorConnectionId } from "../editor";
 import type { BitRangeAttribute, InspectorModel, WidthAttribute } from "../editor/inspector";
 import { parseBitRangeList } from "../editor/bus-ports.ts";
@@ -72,15 +72,19 @@ function onBitRangesChange(attribute: BitRangeAttribute, event: Event): void {
   emit("setBitRanges", props.inspector.id, ranges);
 }
 
-// 信号值是逐位文本，因此这里比的是字符串；多位值落到未知一档，位宽为 1 时与改造前相同。
+// 信号值是逐位文本，因此这里比的是字符串：全 0 是低、全 1 是高，其余（含未知位、也含
+// 高低混合的总线）落到未知一档——一条既不是全 0 也不是全 1 的总线没有单一的「电平」。
+// 位宽为 1 时这三条分支与改造前完全相同，文字里逐位的 0 / 1 / X 才是权威读数。
 function signalClass(value: Signal): string {
   if (value === "1") return "signal-state--high";
   if (value === "0") return "signal-state--low";
   return "signal-state--unknown";
 }
 
-function waveformValue(point: WaveformPoint, key: WaveformKey): Signal {
-  return point[key];
+// 记录按信号键索引，行的键直接用来取值；某个信号在记录这一点时还不存在就是未知。
+// 多位信号以逐位文本原样显示（`1010`、`X1X0`），因此每一位都读得出来。
+function waveformValue(point: WaveformPoint, key: string): Signal {
+  return point.signals[key] ?? "X";
 }
 
 /**
