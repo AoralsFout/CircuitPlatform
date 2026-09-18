@@ -5,9 +5,15 @@ import {
   createRemoveComponent,
   createRemoveConnection,
   createReset,
+  createSetPortWidth,
   createTick,
+  isBitRange,
+  isComponentAddedResponse,
   isComponentRemovedResponse,
   isConnectionRemovedResponse,
+  isPortList,
+  isPortSpec,
+  isPortWidthSetResponse,
   isRemoveComponentRequest,
   isRemoveConnectionRequest,
   isResetDoneResponse,
@@ -22,11 +28,21 @@ test("creates a health check request", () => {
   });
 });
 
-test("recognizes the initial digital signal values", () => {
-  assert.equal(isSignal(0), true);
-  assert.equal(isSignal(1), true);
+test("recognizes a signal value as a non-empty run of 0, 1 and X", () => {
+  assert.equal(isSignal("0"), true);
+  assert.equal(isSignal("1"), true);
   assert.equal(isSignal("X"), true);
-  assert.equal(isSignal(2), false);
+  // 多位值同样是合法信号值：长度由端口位宽决定，协议层判不了，因此不在这里限制。
+  assert.equal(isSignal("10X0"), true);
+  // 数字形式已经不再是信号值。
+  assert.equal(isSignal(0), false);
+  assert.equal(isSignal(1), false);
+  // 空串、其它字符与小写 x 都不是。
+  assert.equal(isSignal(""), false);
+  assert.equal(isSignal("2"), false);
+  assert.equal(isSignal("x"), false);
+  // 只含 0/1/X 的子串不算：整串必须都是这三个字符。
+  assert.equal(isSignal("1 0"), false);
 });
 
 test("serializes component and connection removal requests", () => {
@@ -70,7 +86,7 @@ test("recognizes a ticked response carrying the step and every output port", () 
       requestId: "request-13",
       step: 7,
       signals: [
-        { componentId: 3, port: "out", value: 1 },
+        { componentId: 3, port: "out", value: "1" },
         { componentId: 5, port: "q", value: "X" },
       ],
     }),
@@ -98,7 +114,7 @@ test("rejects malformed ticked responses", () => {
       type: "ticked",
       requestId: "request-18",
       step: 1,
-      signals: [{ componentId: 0, port: "out", value: 1 }],
+      signals: [{ componentId: 0, port: "out", value: "1" }],
     }),
     false,
   );
@@ -107,7 +123,7 @@ test("rejects malformed ticked responses", () => {
       type: "ticked",
       requestId: "request-19",
       step: 1,
-      signals: [{ componentId: 3, port: "out", value: 2 }],
+      signals: [{ componentId: 3, port: "out", value: "2" }],
     }),
     false,
   );
@@ -116,7 +132,7 @@ test("rejects malformed ticked responses", () => {
       type: "ticked",
       requestId: "request-20",
       step: 1,
-      signals: [{ componentId: 3, value: 1 }],
+      signals: [{ componentId: 3, value: "1" }],
     }),
     false,
   );
@@ -158,6 +174,113 @@ test("rejects malformed removal messages", () => {
   );
   assert.equal(
     isConnectionRemovedResponse({ type: "connection_added", requestId: "request-11", connectionId: 11 }),
+    false,
+  );
+});
+
+test("serializes a set_port_width request carrying the whole port list", () => {
+  assert.equal(
+    JSON.stringify(createSetPortWidth("request-20", 4, [{ name: "out", direction: "output", width: 8 }])),
+    '{"type":"set_port_width","requestId":"request-20","componentId":4,"ports":[{"name":"out","direction":"output","width":8}]}',
+  );
+});
+
+test("recognizes a port declaration by name, direction, width and optional bit range", () => {
+  assert.equal(isPortSpec({ name: "out", direction: "output", width: 1 }), true);
+  assert.equal(isPortSpec({ name: "out", direction: "output", width: 8, bitRange: { msb: 7, lsb: 0 } }), true);
+  // 位宽至少为 1：0 位不是一个端口。
+  assert.equal(isPortSpec({ name: "out", direction: "output", width: 0 }), false);
+  assert.equal(isPortSpec({ name: "out", direction: "output", width: 1.5 }), false);
+  // 方向只有两种。
+  assert.equal(isPortSpec({ name: "out", direction: "sideways", width: 1 }), false);
+  assert.equal(isPortSpec({ name: "out", width: 1 }), false);
+  assert.equal(isPortSpec({ direction: "output", width: 1 }), false);
+  // 位区间必须自洽：下界不能高于上界。
+  assert.equal(isPortSpec({ name: "out", direction: "output", width: 1, bitRange: { msb: 0, lsb: 3 } }), false);
+  assert.equal(isPortSpec({ name: "out", direction: "output", width: 1, bitRange: { msb: 0, lsb: -1 } }), false);
+});
+
+test("recognizes a bit range only when msb is not below lsb", () => {
+  assert.equal(isBitRange({ msb: 7, lsb: 4 }), true);
+  assert.equal(isBitRange({ msb: 3, lsb: 3 }), true);
+  assert.equal(isBitRange({ msb: 4, lsb: 7 }), false);
+  assert.equal(isBitRange({ msb: 4 }), false);
+  assert.equal(isBitRange({ msb: "4", lsb: 0 }), false);
+  assert.equal(isBitRange({ msb: 4.5, lsb: 0 }), false);
+});
+
+test("recognizes a port list only when every item is a port declaration", () => {
+  assert.equal(isPortList([]), true);
+  assert.equal(isPortList([{ name: "in1", direction: "input", width: 1 }]), true);
+  assert.equal(isPortList([{ name: "in1", direction: "input", width: 0 }]), false);
+  assert.equal(isPortList("out"), false);
+});
+
+test("recognizes a component_added response carrying the actual port list", () => {
+  assert.equal(
+    isComponentAddedResponse({
+      type: "component_added",
+      requestId: "request-21",
+      componentId: 3,
+      ports: [{ name: "in1", direction: "input", width: 1 }],
+    }),
+    true,
+  );
+  // 端口清单是必填的：带上它之后前端才有位宽的唯一权威来源。
+  assert.equal(
+    isComponentAddedResponse({ type: "component_added", requestId: "request-22", componentId: 3 }),
+    false,
+  );
+  assert.equal(
+    isComponentAddedResponse({
+      type: "component_added",
+      requestId: "request-23",
+      componentId: 3,
+      ports: [{ name: "in1", direction: "input", width: 1.5 }],
+    }),
+    false,
+  );
+});
+
+test("recognizes a port_width_set response with its dangling connection ids", () => {
+  assert.equal(
+    isPortWidthSetResponse({
+      type: "port_width_set",
+      requestId: "request-24",
+      componentId: 4,
+      ports: [{ name: "out", direction: "output", width: 8 }],
+      danglingConnectionIds: [2, 7],
+    }),
+    true,
+  );
+  // 没有因本次改宽而转为悬空的连接时是一个空数组，而不是缺字段。
+  assert.equal(
+    isPortWidthSetResponse({
+      type: "port_width_set",
+      requestId: "request-25",
+      componentId: 4,
+      ports: [{ name: "out", direction: "output", width: 8 }],
+      danglingConnectionIds: [],
+    }),
+    true,
+  );
+  assert.equal(
+    isPortWidthSetResponse({
+      type: "port_width_set",
+      requestId: "request-26",
+      componentId: 4,
+      ports: [{ name: "out", direction: "output", width: 8 }],
+    }),
+    false,
+  );
+  assert.equal(
+    isPortWidthSetResponse({
+      type: "port_width_set",
+      requestId: "request-27",
+      componentId: 4,
+      ports: [{ name: "out", direction: "output", width: 8 }],
+      danglingConnectionIds: [0],
+    }),
     false,
   );
 });

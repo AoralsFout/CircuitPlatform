@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ComponentKindName } from "@circuit-platform/protocol";
+import type { ComponentKindName, PortSpec } from "@circuit-platform/protocol";
 import {
   createAndDemoDocument,
   createEditorSession,
@@ -9,6 +9,8 @@ import {
   type EngineResult,
 } from "../src/editor/index.ts";
 import { resolveCanvasKeyboardAction, resolveEditorShortcut } from "../src/editor/keyboard.ts";
+import { defaultPortsFor } from "../src/editor/bus-ports.ts";
+import { BUILT_IN_PORTS, builtInPortsById, portsForAddComponent } from "./fake-ports.ts";
 
 class FakeEngine implements CircuitEnginePort {
   nextComponentId = 100;
@@ -33,8 +35,22 @@ class FakeEngine implements CircuitEnginePort {
     this.failures.set(operation, count);
   }
 
-  async addComponent(kind: ComponentKindName): Promise<EngineResult<{ componentId: number }>> {
-    return this.result(`addComponent:${kind}`, { componentId: this.nextComponentId++ });
+  async addComponent(
+    kind: ComponentKindName,
+    ports?: readonly PortSpec[],
+  ): Promise<EngineResult<{ componentId: number; ports: readonly PortSpec[] }>> {
+    // 与真实引擎同一条回退规则：省略端口清单时用内置定义，并把实际清单回传。
+    return this.result(`addComponent:${kind}`, {
+      componentId: this.nextComponentId++,
+      ports: portsForAddComponent(kind, ports),
+    });
+  }
+
+  async setPortWidth(
+    componentId: number,
+    ports: readonly PortSpec[],
+  ): Promise<EngineResult<{ ports: readonly PortSpec[]; danglingConnectionIds: readonly EngineConnectionId[] }>> {
+    return this.result(`setPortWidth:${componentId}`, { ports, danglingConnectionIds: [] });
   }
 
   async addConnection(input: {
@@ -438,6 +454,60 @@ test("clear requires confirmation and does not reopen confirmation for an empty 
   assert.equal(empty.snapshot.confirmation, null);
 });
 
+/** 会话的端口清单来自 `component_added`，因此这里的绑定要先带上它。 */
+function createSessionWithPorts(engine: FakeEngine) {
+  return createEditorSession({
+    document: createAndDemoDocument(),
+    bindings: {
+      components: { "input-a": 1, "input-b": 2, "and-gate": 3, output: 4 },
+      connections: { "wire-a": 10, "wire-b": 11, "wire-output": 12 },
+      ports: builtInPortsById({ "input-a": "input", "input-b": "input", "and-gate": "and", output: "output" }),
+    },
+  }, engine);
+}
+
+const WIDE_INPUT_PORTS = [{ name: "out", direction: "output" as const, width: 4 }];
+
+test("a port width change is one undoable structure frame", async () => {
+  const engine = new FakeEngine();
+  const session = createSessionWithPorts(engine);
+  const portsOf = (id: string) => session.snapshot().document.components.find((component) => component.id === id)?.ports;
+
+  assert.deepEqual(portsOf("input-a"), BUILT_IN_PORTS.input);
+
+  const widened = await session.dispatch({ type: "set-port-width", componentId: "input-a", ports: WIDE_INPUT_PORTS });
+
+  assert.equal(widened.ok, true);
+  assert.deepEqual(portsOf("input-a"), WIDE_INPUT_PORTS);
+  assert.deepEqual(engine.calls, ["setPortWidth:1"]);
+
+  const undone = await session.dispatch({ type: "undo" });
+  assert.equal(undone.ok, true);
+  assert.deepEqual(portsOf("input-a"), BUILT_IN_PORTS.input);
+  assert.deepEqual(engine.calls, ["setPortWidth:1", "setPortWidth:1"]);
+
+  const redone = await session.dispatch({ type: "redo" });
+  assert.equal(redone.ok, true);
+  assert.deepEqual(portsOf("input-a"), WIDE_INPUT_PORTS);
+});
+
+test("a rejected port width change keeps the original port list and creates no history", async () => {
+  const engine = new FakeEngine();
+  engine.failOn = "setPortWidth:1";
+  const session = createSessionWithPorts(engine);
+
+  const rejected = await session.dispatch({ type: "set-port-width", componentId: "input-a", ports: WIDE_INPUT_PORTS });
+
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.error.code, "setPortWidth:1_failed");
+  // 提交失败时保留原端口清单：模型从文档投影，而文档没有被改动。
+  assert.deepEqual(
+    rejected.snapshot.document.components.find((component) => component.id === "input-a")?.ports,
+    BUILT_IN_PORTS.input,
+  );
+  assert.equal(rejected.snapshot.canUndo, false);
+});
+
 test("undo and redo treat clear as one recoverable command with refreshed engine IDs", async () => {
   const engine = new FakeEngine();
   const session = createSession(engine);
@@ -685,6 +755,28 @@ test("places every combinational kind at a snapped world center and selects it",
   ]);
 });
 
+/**
+ * 拆线器与合线器放下即可用：端口清单由前端按默认配置生成并随 `add_component` 发出，引擎没有
+ * 它们的形状可回退。夹具在省略清单时抛错，因此这条断言同时证明了清单确实被发了出去。
+ */
+test("places a splitter and a merger with their default port lists", async () => {
+  const engine = new FakeEngine();
+  const session = createSession(engine);
+
+  const splitter = await session.dispatch({ type: "add-component", kind: "splitter", position: { x: 320, y: 240 } });
+  assert.equal(splitter.ok, true);
+  const splitterComponent = splitter.snapshot.document.components.at(-1);
+  assert.deepEqual(splitterComponent?.ports, defaultPortsFor("splitter"));
+  // 盒子高度按端口数长到 284，因此点击中心落在盒子的中心而不是一个 84 高的盒子上。
+  assert.deepEqual(splitterComponent?.position, { x: 320 - 74, y: 240 - 142 });
+
+  const merger = await session.dispatch({ type: "add-component", kind: "merger", position: { x: 320, y: 240 } });
+  assert.equal(merger.ok, true);
+  const mergerComponent = merger.snapshot.document.components.at(-1);
+  assert.deepEqual(mergerComponent?.ports, defaultPortsFor("merger"));
+  assert.equal(mergerComponent?.displayName, "合线器 1");
+});
+
 test("Alt preserves the exact placement center and failed placement remains pending", async () => {
   const engine = new FakeEngine();
   const session = createSession(engine);
@@ -720,6 +812,7 @@ test("failed placement can be retried with the same editor identity and position
     displayName: "AND 门 1",
     position: { x: 22, y: 22 },
     lifecycle: "active",
+    ports: BUILT_IN_PORTS.and,
   }]);
   assert.deepEqual(retried.snapshot.selection, { kind: "component", id: "component-1" });
   assert.equal(retried.snapshot.pendingPlacement, null);
@@ -929,6 +1022,7 @@ test("duplicating a Component copies only kind and selects a new offset Componen
     displayName: "AND 门 2",
     position: { x: 472, y: 252 },
     lifecycle: "active",
+    ports: BUILT_IN_PORTS.and,
   });
   assert.equal(result.snapshot.document.connections.length, 3);
   assert.deepEqual(engine.calls, ["addComponent:and"]);

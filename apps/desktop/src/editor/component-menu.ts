@@ -6,6 +6,7 @@ export const COMPONENT_MENU_CATEGORIES = [
   { id: "input-output", label: "输入与输出" },
   { id: "logic", label: "逻辑门" },
   { id: "sequential", label: "时序逻辑" },
+  { id: "bus", label: "总线" },
 ] as const;
 
 export type ComponentMenuCategory = (typeof COMPONENT_MENU_CATEGORIES)[number]["id"];

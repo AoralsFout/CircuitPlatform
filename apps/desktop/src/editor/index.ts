@@ -1,4 +1,6 @@
-import type { ComponentKindName } from "@circuit-platform/protocol";
+import type { ComponentKindName, PortSpec } from "@circuit-platform/protocol";
+import { componentGeometryFor, defaultComponentDefinitionRegistry } from "../canvas/registry.ts";
+import { defaultPortsFor } from "./bus-ports.ts";
 import { positionFromPlacementCenter } from "./placement.ts";
 import {
   createDefaultOrthogonalRoute,
@@ -79,6 +81,24 @@ export interface EditorComponent {
   displayName: string;
   position: Point;
   lifecycle: "active" | "deleted";
+  /**
+   * 该元件由引擎回传的端口清单，是端口名与位宽的唯一权威来源。
+   *
+   * 来源是 `component_added` / `port_width_set` 的响应（或推送电路时一并带回来的那一份），
+   * 而不是展示定义——展示定义只描述几何与标签。省略表示引擎还没有告诉过我们这份清单：
+   * 文档刚建立、尚未推送时就是这种情况，此时宁可画不出端口，也不内置一份无人校验的副本。
+   */
+  ports?: readonly PortSpec[];
+}
+
+/** 复制一份端口清单，避免调用方与文档共享同一个数组。 */
+function clonePorts(ports: readonly PortSpec[] | undefined): readonly PortSpec[] {
+  return (ports ?? []).map((port) => ({
+    name: port.name,
+    direction: port.direction,
+    width: port.width,
+    ...(port.bitRange ? { bitRange: { ...port.bitRange } } : {}),
+  }));
 }
 
 export type EditorEndpointSide = "source" | "target";
@@ -120,6 +140,8 @@ export interface EditorBindings {
   connections: Readonly<Partial<Record<EditorConnectionId, EngineConnectionId>>>;
   /** 用于通用仿真投影的类型元数据；不包含任何固定示例身份。 */
   componentKinds?: Readonly<Partial<Record<EditorComponentId, ComponentKindName>>>;
+  /** 每个元件的端口清单；运行时要读哪些端口由它推导，前端不再内置一份 kind → 端口名的副本。 */
+  ports?: Readonly<Partial<Record<EditorComponentId, readonly PortSpec[]>>>;
 }
 
 export interface EngineError {
@@ -136,9 +158,21 @@ export type EngineResult<T> =
 
 /** 编辑器只依赖这组窄操作，协议字段和 Electron 通道由 adapter 隐藏。 */
 export interface CircuitEnginePort {
+  /** `ports` 省略时引擎回退到内置定义；响应带回该元件实际的端口清单。 */
   addComponent(
     kind: ComponentKindName,
-  ): Promise<EngineResult<{ componentId: EngineComponentId }>>;
+    ports?: readonly PortSpec[],
+  ): Promise<EngineResult<{ componentId: EngineComponentId; ports: readonly PortSpec[] }>>;
+  /** 整体替换端口清单，并带回替换后的清单与因本次改宽而转为悬空的 Connection 身份。 */
+  setPortWidth(
+    componentId: EngineComponentId,
+    ports: readonly PortSpec[],
+  ): Promise<
+    EngineResult<{
+      ports: readonly PortSpec[];
+      danglingConnectionIds: readonly EngineConnectionId[];
+    }>
+  >;
   addConnection(input: {
     sourceComponentId: EngineComponentId;
     sourcePort: string;
@@ -176,6 +210,8 @@ export type EditorCommand =
   | { type: "update-placement"; center: Point; altKey?: boolean }
   | { type: "place-component"; kind?: ComponentKindName; center: Point; altKey?: boolean; continuous?: boolean }
   | { type: "add-component"; kind: ComponentKindName; position: Point; altKey?: boolean; continuous?: boolean }
+  /** 整份替换一个元件的端口清单；这是检查器里改位宽那条路径。 */
+  | { type: "set-port-width"; componentId: EditorComponentId; ports: readonly PortSpec[] }
   | { type: "duplicate-component"; componentId: EditorComponentId }
   | { type: "delete-selected" }
   | { type: "delete-component"; componentId: EditorComponentId }
@@ -257,6 +293,8 @@ interface DeleteComponentFrame {
     route?: readonly Point[];
     waypoints?: readonly Point[];
   }>;
+  /** 重建这个元件时原样送回引擎的端口清单。 */
+  ports?: readonly PortSpec[];
 }
 
 interface DeleteConnectionFrame {
@@ -273,6 +311,7 @@ interface ClearDocumentFrame {
   components: Array<{
     id: EditorComponentId;
     kind: ComponentKindName;
+    ports?: readonly PortSpec[];
   }>;
   connections: Array<{
     id: EditorConnectionId;
@@ -309,6 +348,16 @@ interface AddComponentFrame {
   kind: ComponentKindName;
   displayName: string;
   position: Point;
+  /** 重建时原样送回引擎的端口清单：撤销再重做后端口必须与当初一模一样。 */
+  ports?: readonly PortSpec[];
+}
+
+interface SetPortWidthFrame {
+  type: "set-port-width";
+  componentId: EditorComponentId;
+  portsBefore: readonly PortSpec[];
+  portsAfter: readonly PortSpec[];
+  selectionBefore: EditorSelection;
 }
 
 interface CreateConnectionFrame {
@@ -355,7 +404,7 @@ interface SetWireColorFrame {
   selectionBefore: EditorSelection;
 }
 
-type HistoryFrame = DeleteComponentFrame | DeleteConnectionFrame | ClearDocumentFrame | MoveComponentFrame | AddComponentFrame | CreateConnectionFrame | ReconnectConnectionFrame | EditRouteFrame | SetWireColorFrame;
+type HistoryFrame = DeleteComponentFrame | DeleteConnectionFrame | ClearDocumentFrame | MoveComponentFrame | AddComponentFrame | SetPortWidthFrame | CreateConnectionFrame | ReconnectConnectionFrame | EditRouteFrame | SetWireColorFrame;
 
 const busyError: EngineError = {
   code: "editor_busy",
@@ -451,11 +500,13 @@ function cloneBindings(bindings: EditorBindings): {
   components: Partial<Record<EditorComponentId, EngineComponentId>>;
   connections: Partial<Record<EditorConnectionId, EngineConnectionId>>;
   componentKinds?: Partial<Record<EditorComponentId, ComponentKindName>>;
+  ports?: Partial<Record<EditorComponentId, readonly PortSpec[]>>;
 } {
   return {
     components: { ...bindings.components },
     connections: { ...bindings.connections },
     componentKinds: bindings.componentKinds ? { ...bindings.componentKinds } : undefined,
+    ports: bindings.ports ? { ...bindings.ports } : undefined,
   };
 }
 
@@ -621,6 +672,15 @@ export function createEditorSession(
 ): EditorSession {
   const document = toMutableDocument(initial.document);
   const bindings = cloneBindings(initial.bindings);
+  // 文档自己带了端口清单就用它；否则用推送电路时 `component_added` 回传的那一份。
+  // 两条路径合起来，编辑器文档里的每个元件在开始投影之前都有一份来自引擎的清单。
+  for (const component of document.components.values()) {
+    if (component.ports !== undefined) continue;
+    const known = bindings.ports?.[component.id];
+    // 只在确实拿到清单时才写下这个字段：写一个 undefined 会在文档里留下一处「有这个键但不知道值」
+    // 的痕迹，而「还没有清单」与「清单是空的」本来就是两件事。
+    if (known !== undefined) component.ports = known;
+  }
   const listeners = new Set<(snapshot: EditorSnapshot) => void>();
   const undoStack: HistoryFrame[] = [];
   const redoStack: HistoryFrame[] = [];
@@ -673,6 +733,14 @@ export function createEditorSession(
           }),
       ),
     };
+    // 只在确实有元件带着端口清单时才发布这个字段：一个空的映射与「还不知道」在运行时
+    // 是同一种情况，而留一个空对象会让绑定的形状多出一个没有信息量的键。
+    const knownPorts = Object.fromEntries(
+      [...document.components.values()]
+        .filter((component) => component.lifecycle === "active" && component.ports !== undefined)
+        .map((component) => [component.id, component.ports!]),
+    );
+    if (Object.keys(knownPorts).length > 0) nextBindings.ports = knownPorts;
     Object.defineProperty(nextBindings, "componentKinds", {
       value: Object.fromEntries([...document.components.values()].map((component) => [component.id, component.kind])),
       enumerable: false,
@@ -749,7 +817,7 @@ export function createEditorSession(
 
   /** 仅阻止会改变 C++ Circuit 的命令，离线时仍可编辑本地几何和视口。 */
   function changesCircuit(command: EditorCommand): boolean {
-    if (["add-component", "place-component", "duplicate-component", "delete-component", "delete-connection", "create-connection", "reconnect-connection", "confirm-clear", "retry-placement", "retry-current-operation"].includes(command.type)) return true;
+    if (["add-component", "place-component", "duplicate-component", "delete-component", "delete-connection", "create-connection", "reconnect-connection", "set-port-width", "confirm-clear", "retry-placement", "retry-current-operation"].includes(command.type)) return true;
     if (command.type === "delete-selected") return selection !== null;
     if (command.type === "undo" || command.type === "redo") {
       return operation === "recovery-required" || isCircuitHistoryFrame(command.type === "undo" ? undoStack.at(-1) : redoStack.at(-1));
@@ -775,6 +843,8 @@ export function createEditorSession(
       not: "NOT 门",
       clock: "Clock",
       d_flip_flop: "D Flip-Flop",
+      splitter: "拆线器",
+      merger: "合线器",
     };
     return labels[kind] ?? kind;
   }
@@ -788,8 +858,26 @@ export function createEditorSession(
     };
   }
 
-  function componentPosition(center: Point, altKey: boolean): Point {
-    return positionFromPlacementCenter(center, { width: 148, height: 84 }, altKey);
+  /**
+   * 放置位置由展示定义里的尺寸推出，而不是一个写死的 148 × 84。
+   *
+   * 端口数量由数据决定的元件（拆线器、合线器）高度按端口数增长，写死的尺寸会让「点在哪、
+   * 元件落在哪」差出半个高度，而且与放置预览画出的那个盒子对不上。
+   *
+   * 正常路径上尺寸一律来自 `componentGeometryFor`；兜底的那个 148 × 84 只在展示定义查不到时
+   * 生效——那意味着调用方绕过了注册表，画布本来也画不出这个元件，这里只是让位置仍然算得出来。
+   */
+  function componentPosition(
+    kind: ComponentKindName,
+    center: Point,
+    ports: readonly PortSpec[],
+    altKey: boolean,
+  ): Point {
+    const definition = defaultComponentDefinitionRegistry.get(kind);
+    const size = definition
+      ? componentGeometryFor(definition, ports).size
+      : { width: 148, height: 84 };
+    return positionFromPlacementCenter(center, size, altKey);
   }
 
   async function settleAfterStructure(): Promise<void> {
@@ -827,6 +915,7 @@ export function createEditorSession(
       componentId,
       selectionBefore: selection ? { ...selection } : null,
       kind: component.kind,
+      ports: clonePorts(component.ports),
       danglingConnectionIds: connectionPlans
         .map((connection) => bindings.connections[connection.id])
         .filter((id): id is EngineConnectionId => id !== undefined),
@@ -837,7 +926,7 @@ export function createEditorSession(
   function makeClearDocumentFrame(): ClearDocumentFrame | null {
     const components = [...document.components.values()]
       .filter((component) => component.lifecycle === "active")
-      .map((component) => ({ id: component.id, kind: component.kind }));
+      .map((component) => ({ id: component.id, kind: component.kind, ports: clonePorts(component.ports) }));
     const connections = [...document.connections.values()]
       .filter((connection) => connection.lifecycle === "visible")
       .map((connection) => ({
@@ -911,7 +1000,7 @@ export function createEditorSession(
     removedConnections: readonly ClearDocumentFrame["connections"][number][],
   ): Promise<EngineError | null> {
     for (const component of removedComponents) {
-      const added = await call(() => engine.addComponent(component.kind));
+      const added = await call(() => engine.addComponent(component.kind, component.ports));
       if (!added.ok) return added.error;
       bindings.components[component.id] = added.value.componentId;
     }
@@ -976,7 +1065,10 @@ export function createEditorSession(
     if (!Number.isFinite(center.x) || !Number.isFinite(center.y)) {
       return fail({ code: "invalid_placement", message: "元件放置位置无效。", retryable: false });
     }
-    const position = componentPosition(center, altKey);
+    // 拆线器与合线器的端口清单由前端生成并随请求发出——引擎没有它们的形状可回退。默认是
+    // 8 位宿主总线拆成八条 1 位分支，因此放下即可用；内置类型仍然省略清单，由引擎回退。
+    const ports = defaultPortsFor(kind);
+    const position = componentPosition(kind, center, ports ?? [], altKey);
     const component: EditorComponent = {
       id: identity.id,
       kind,
@@ -996,22 +1088,104 @@ export function createEditorSession(
     };
     publish();
 
-    const added = await call(() => engine.addComponent(kind));
+    const added = await call(() =>
+      ports === null ? engine.addComponent(kind) : engine.addComponent(kind, ports),
+    );
     if (!added.ok) {
       return fail(added.error);
     }
 
     // 只有引擎确认成功后才把正式节点写入 EditorDocument；等待期间仅显示 pending ghost。
+    // 端口清单来自响应，前端因此不需要为内置元件预先写一份。
+    component.ports = clonePorts(added.value.ports);
     document.components.set(component.id, component);
     bindings.components[component.id] = added.value.componentId;
     await settleAfterStructure();
-    undoStack.push({ type: "add-component", componentId: component.id, kind, displayName: component.displayName, position: { ...position } });
+    undoStack.push({ type: "add-component", componentId: component.id, kind, displayName: component.displayName, position: { ...position }, ports: clonePorts(component.ports) });
     redoStack.length = 0;
     selection = { kind: "component", id: component.id };
     pendingIdentity = null;
     pendingPlacement = continuePlacement
       ? { kind, center: null, altKey, continuous: true }
       : null;
+    publishBindings();
+    return { ok: true, snapshot: finishOperation() };
+  }
+
+  /**
+   * 用一份新清单整体替换元件的端口清单；检查器里改位宽走的就是这条路径。
+   *
+   * 这是一次可撤销的结构提交，`engine.setPortWidth` 排在共享的引擎调用队列里，因此不会与
+   * 推进交错。提交失败时保留原端口清单并给出可展示的原因；成功时代入引擎回传的清单——
+   * 引擎可能对清单做了规范化，调用方不必自己猜结果。
+   * @param componentId 要改端口清单的稳定编辑器元件 ID。
+   * @param ports 替换后的整份端口清单。
+   * @returns 成功后自动选中该元件的命令结果。
+   */
+  async function setPortWidth(
+    componentId: EditorComponentId,
+    ports: readonly PortSpec[],
+  ): Promise<CommandResult> {
+    const component = requireComponent(componentId);
+    if (!component) return fail(noSelectionError);
+    const engineId = bindings.components[componentId];
+    if (engineId === undefined) return fail(recoveryError("改位宽所需的元件没有有效引擎绑定。"));
+
+    const portsBefore = clonePorts(component.ports);
+    const updated = await call(() => engine.setPortWidth(engineId, ports));
+    if (!updated.ok) return fail(updated.error);
+
+    component.ports = clonePorts(updated.value.ports);
+    await settleAfterStructure();
+    undoStack.push({
+      type: "set-port-width",
+      componentId,
+      portsBefore,
+      portsAfter: clonePorts(component.ports),
+      selectionBefore: selection ? { ...selection } : null,
+    });
+    redoStack.length = 0;
+    selection = { kind: "component", id: componentId };
+    publishBindings();
+    return { ok: true, snapshot: finishOperation() };
+  }
+
+  /** 把端口清单写回文档并同步引擎；撤销与重做共用这一段，两边因此不会各自实现一遍。 */
+  async function applyPortWidthFrame(frame: SetPortWidthFrame, useAfter: boolean): Promise<CommandResult> {
+    const component = document.components.get(frame.componentId);
+    if (!component) return fail(recoveryError("改位宽所需的元件不存在。"));
+    const engineId = bindings.components[frame.componentId];
+    if (engineId === undefined) return fail(recoveryError("改位宽所需的元件没有有效引擎绑定。"));
+
+    const target = useAfter ? frame.portsAfter : frame.portsBefore;
+    const updated = await call(() => engine.setPortWidth(engineId, target));
+    if (!updated.ok) return fail(updated.error);
+    component.ports = clonePorts(updated.value.ports);
+    return { ok: true, snapshot: currentSnapshot() };
+  }
+
+  async function undoSetPortWidth(frame: SetPortWidthFrame): Promise<CommandResult> {
+    const applied = await applyPortWidthFrame(frame, false);
+    if (!applied.ok) return applied;
+    selection = frame.selectionBefore;
+    undoStack.pop();
+    redoStack.push(frame);
+    await settleAfterStructure();
+    publishBindings();
+    return { ok: true, snapshot: finishOperation() };
+  }
+
+  async function redoSetPortWidth(
+    frame: SetPortWidthFrame,
+    remainingRedo: readonly HistoryFrame[],
+  ): Promise<CommandResult> {
+    const applied = await applyPortWidthFrame(frame, true);
+    if (!applied.ok) return applied;
+    selection = { kind: "component", id: frame.componentId };
+    redoStack.length = 0;
+    redoStack.push(...remainingRedo);
+    undoStack.push(frame);
+    await settleAfterStructure();
     publishBindings();
     return { ok: true, snapshot: finishOperation() };
   }
@@ -1026,7 +1200,7 @@ export function createEditorSession(
     if (!source) return fail(noSelectionError);
     const identity = nextComponentIdentity(source.kind);
     const position = { x: source.position.x + 32, y: source.position.y + 32 };
-    const added = await call(() => engine.addComponent(source.kind));
+    const added = await call(() => engine.addComponent(source.kind, source.ports));
     if (!added.ok) return fail(added.error);
 
     const component: EditorComponent = {
@@ -1035,6 +1209,7 @@ export function createEditorSession(
       displayName: identity.displayName,
       position,
       lifecycle: "active",
+      ports: clonePorts(added.value.ports),
     };
     document.components.set(component.id, component);
     bindings.components[component.id] = added.value.componentId;
@@ -1045,6 +1220,7 @@ export function createEditorSession(
       kind: component.kind,
       displayName: component.displayName,
       position: { ...position },
+      ports: clonePorts(component.ports),
     });
     redoStack.length = 0;
     selection = { kind: "component", id: component.id };
@@ -1076,7 +1252,7 @@ export function createEditorSession(
   async function redoAddComponent(frame: AddComponentFrame): Promise<CommandResult> {
     const component = document.components.get(frame.componentId);
     if (!component) return fail(recoveryError("重做所需的元件不存在。"));
-    const added = await call(() => engine.addComponent(frame.kind));
+    const added = await call(() => engine.addComponent(frame.kind, frame.ports));
     if (!added.ok) return fail(added.error);
     component.lifecycle = "active";
     component.position = { ...frame.position };
@@ -1505,7 +1681,7 @@ export function createEditorSession(
   }
 
   async function undoDeleteComponent(frame: DeleteComponentFrame): Promise<CommandResult> {
-    const addedComponent = await call(() => engine.addComponent(frame.kind));
+    const addedComponent = await call(() => engine.addComponent(frame.kind, frame.ports));
     if (!addedComponent.ok) return fail(addedComponent.error);
     const newComponentId = addedComponent.value.componentId;
     const newConnectionIds: EngineConnectionId[] = [];
@@ -1813,7 +1989,7 @@ export function createEditorSession(
     };
 
     for (const component of frame.components) {
-      const added = await call(() => engine.addComponent(component.kind));
+      const added = await call(() => engine.addComponent(component.kind, component.ports));
       if (!added.ok) {
         const compensationError = await rollback();
         return compensationError
@@ -1864,6 +2040,7 @@ export function createEditorSession(
     const frame = undoStack[undoStack.length - 1];
     if (!frame) return fail({ code: "nothing_to_undo", message: "没有可撤销的操作。", retryable: false });
     if (frame.type === "add-component") return undoAddComponent(frame);
+    if (frame.type === "set-port-width") return undoSetPortWidth(frame);
     if (frame.type === "delete-component") return undoDeleteComponent(frame);
     if (frame.type === "clear-document") return undoClearDocument(frame);
     if (frame.type === "move-component") return undoMoveComponent(frame);
@@ -1886,6 +2063,7 @@ export function createEditorSession(
       return result;
     }
     if (frame.type === "add-component") return redoAddComponent(frame);
+    if (frame.type === "set-port-width") return redoSetPortWidth(frame, remainingRedo);
     if (frame.type === "clear-document") {
       const refreshed = makeClearDocumentFrame();
       if (!refreshed) return fail(recoveryError("重做清空所需的文档不存在。"));
@@ -1980,6 +2158,7 @@ export function createEditorSession(
       if (!frame) return fail(noSelectionError);
       return moveComponent(frame);
     }
+    if (command.type === "set-port-width") return setPortWidth(command.componentId, command.ports);
     if (command.type === "set-wire-color") {
       const connection = document.connections.get(command.connectionId);
       if (!connection || connection.lifecycle !== "visible") return fail(noSelectionError);

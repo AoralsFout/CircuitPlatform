@@ -18,7 +18,7 @@ _Avoid_: Module、Block、CompoundComponent
 **展平 Flatten**：加载父 Project 时，把每个 Subcircuit 使用的内部 Component 和 Connection 复制为普通 Component，并把外部 Port 上的 Connection 改接到内部 Input 元件的 `out` 或 Output 元件的 `in`。展平发生在进入引擎之前，因此引擎和协议都不出现层次概念。同一份 Project 在父 Circuit 中被放入多份时，每份各自展平出独立的 Component 和 SimulationState。
 _Avoid_: 内联、实例化
 
-**Port**：Component 用来接收或输出数字信号的连接点，具有输入或输出方向和一个位宽。
+**Port**：Component 用来接收或输出数字信号的连接点，具有输入或输出方向和一个位宽。端口清单由引擎声明并在创建与改宽时回传，是位宽的唯一权威来源。
 
 **位宽 Width**：Port 一次接收或输出的位数。位宽为 1 的是单比特 Port，大于 1 的是多位 Port。
 _Avoid_: Bus、向量长度（「总线」只在口语中指代位宽大于 1 的 Port 或 Connection，不是独立的领域对象）
@@ -32,7 +32,7 @@ _Avoid_: Bus、向量长度（「总线」只在口语中指代位宽大于 1 �
 **Connection**：一个输出 Port 到一个输入 Port 的连接记录，两端 Port 的位宽必须相同。Connection 独立于 Component 生命周期存在，端点被删除后可以成为悬空连接。
 _Avoid_: Wire（Wire 专指编辑器中的视觉线段时才使用）
 
-**DanglingConnection**：缺少一个或两个有效端点的 Connection。它可以被查看、删除或重新连接，但不参与信号传播。
+**DanglingConnection**：缺少一个或两个有效端点的 Connection，或者两端 Port 的位宽不再相同的 Connection。它可以被查看、删除或重新连接，但不参与信号传播。位宽不匹配走的是同一个表达，因此没有「失效连接」这个近义词。
 
 ## 信号与状态
 

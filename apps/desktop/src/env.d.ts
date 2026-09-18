@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 
-import type { ComponentKindName, EngineResponse, Signal } from "@circuit-platform/protocol";
+import type { ComponentKindName, EngineResponse, PortSpec, Signal } from "@circuit-platform/protocol";
 
 declare global {
   interface Window {
@@ -10,7 +10,7 @@ declare global {
         message?: string;
         engine?: string;
       }>;
-      addComponent: (kind: ComponentKindName) => Promise<EngineResponse>;
+      addComponent: (kind: ComponentKindName, ports?: readonly PortSpec[]) => Promise<EngineResponse>;
       addConnection: (
         source: { componentId: number; port: string },
         target: { componentId: number; port: string },
@@ -22,6 +22,7 @@ declare global {
       tick: () => Promise<EngineResponse>;
       reset: () => Promise<EngineResponse>;
       getSignal: (componentId: number, port: string) => Promise<EngineResponse>;
+      setPortWidth: (componentId: number, ports: readonly PortSpec[]) => Promise<EngineResponse>;
     };
   }
 }

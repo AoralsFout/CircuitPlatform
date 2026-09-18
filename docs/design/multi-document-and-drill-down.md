@@ -112,7 +112,7 @@ Electron 主进程的 `EngineClient` 从模块级单例改为**按文档键索�
 
 - **`EditorSession`**：`createEditorSession` 已经是纯闭包工厂、没有模块级单例，多实例能力已经具备。要改的是组合层——`useWorkspace.ts` 的 `attachEditor` 把它固化为一份（`App.vue` 只消费快照，不持有会话），需要改为按文档实例化。
 - **视图状态**：视口、选中、侧栏页、底栏 tab 每文档一份，活在标签页的生命周期内。**不写入项目文件**——这一条不是本设计新定的，[ADR 0008](../decisions/0008-layered-canvas-scene-rendering.md) 与 [ADR 0009](../decisions/0009-manual-orthogonal-wire-routes.md) 已经确认「视口不随项目持久化」。顺带澄清一处容易误读的地方：`CONTEXT.md` 说 Project 包含"编辑器布局"，指的是**元件位置与走线**（roadmap 明确"Component 位置、选中状态和视觉 Wire 只保存在编辑器模型中"）；视口是**观看位置**，不是布局，因此这里与 `useEditorState.ts` 中"视口不进入项目持久化"的注释不矛盾。
-- **信号与波形**：`WorkspaceSnapshot` 的 `inputValues` 以 editor component ID 为键，`signals` 以 `${editorComponentId}:${portId}` 为键，`waveform` 则是固定形状 `{step, a, b, output}` 的单个扁平序列。**每个 `EditorSession` 的 ID 序列各从 1 开始，两份文档都会出现 `input-a`**，直接共用一个工作区会键冲突；`waveform` 即使不冲突，也会把两份文档的采样混在一条时间轴上。因此这些键必须加上文档维度限定作用域。Phase 4.5 会把 `waveform` 改成按编辑器 ID 索引的动态信号集合（[roadmap](../roadmap.md) 切片 6），文档维度要在那一个键空间里一次设计到位。
+- **信号与波形**：`WorkspaceSnapshot` 的 `inputValues` 以 editor component ID 为键，`signals` 以 `${editorComponentId}:${portId}` 为键，`waveform` 也已经从固定形状改成按编辑器 ID 索引的动态信号集合（Phase 4.5 切片 6，[roadmap](../roadmap.md)），但它仍是单个扁平序列。**每个 `EditorSession` 的 ID 序列各从 1 开始，两份文档都会出现 `input-a`**，直接共用一个工作区会键冲突；`waveform` 即使不冲突，也会把两份文档的采样混在一条时间轴上。因此这些键必须加上文档维度限定作用域——波形的形状已经换掉，文档维度要在那一个键空间里一次设计到位。
 
 ### 保持全局
 

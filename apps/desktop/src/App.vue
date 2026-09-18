@@ -23,7 +23,7 @@ const {
   resume,
   step,
   reset,
-  toggleInput,
+  setInputBit,
   select,
   moveComponent,
   deleteSelection,
@@ -45,6 +45,7 @@ const {
   setWireColor,
   deleteWaypoint,
   createConnection,
+  setPortWidthCommand,
 } = useWorkspace();
 const {
   selectedConnection,
@@ -98,7 +99,9 @@ const {
   removeConnectionWaypointOrCancel,
   cancelConnection,
   focusCanvasObject,
-} = useEditorState(state, editorState, select, moveComponent, updatePlacement, editRoute, createConnection);
+  setPortWidth,
+  setBitRanges,
+} = useEditorState(state, editorState, select, moveComponent, updatePlacement, editRoute, createConnection, setPortWidthCommand);
 const {
   preference: themePreference,
   label: themeLabel,
@@ -219,7 +222,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
         :default-wire-color="defaultWireColor"
         @close="showSidebar = false"
         @select-component="selectComponent"
-        @toggle-input="toggleInput"
+        @set-input-bit="setInputBit"
         @place-component="beginPlacementFromSidebar"
         @default-wire-color-change="setDefaultWireColor"
       />
@@ -299,6 +302,8 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           :engine-name="state.engineName"
           :operation-error="editorState?.error?.message ?? editorState?.simulationError?.message ?? state.operationError"
           :inspector="inspector"
+          @set-port-width="setPortWidth"
+          @set-bit-ranges="setBitRanges"
           :waveform="state.waveform"
           :waveform-rows="waveformRows"
           @select-tab="bottomTab = $event"

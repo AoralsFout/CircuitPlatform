@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ComponentKindName, EngineResponse, Signal } from "@circuit-platform/protocol";
+import type { ComponentKindName, EngineResponse, PortSpec, Signal } from "@circuit-platform/protocol";
 import { createComponentDefinitionRegistry, projectCanvasScene } from "../src/canvas/index.ts";
 import {
   createAndDemoDocument,
@@ -11,6 +11,7 @@ import {
 } from "../src/editor/index.ts";
 import { createProtocolEnginePort } from "../src/editor/protocolEnginePort.ts";
 import { createSimulationSnapshot } from "../src/editor/simulation.ts";
+import { useEditorState } from "../src/composables/useEditorState.ts";
 import { useWorkspace } from "../src/composables/useWorkspace.ts";
 import { createEngineCallQueue } from "../src/workspace/engineQueue.ts";
 import {
@@ -19,10 +20,12 @@ import {
   type SimulationBindings,
 } from "../src/workspace/index.ts";
 import { drain, FakeScheduler } from "./fake-scheduler.ts";
+import { builtInPortsById, portsForAddComponent } from "./fake-ports.ts";
 
 type Call =
   | { type: "checkEngine" }
   | { type: "addComponent"; kind: ComponentKindName }
+  | { type: "setPortWidth"; componentId: number; ports: readonly PortSpec[] }
   | { type: "addConnection"; sourceComponentId: number; sourcePort: string; targetComponentId: number; targetPort: string }
   | { type: "removeComponent"; componentId: number }
   | { type: "removeConnection"; connectionId: number }
@@ -47,6 +50,7 @@ class FakeEngine implements EngineAdapter {
   /** Clock 的输出初值为 0，每推进一次翻转一次。 */
   private readonly clocks = new Map<number, Signal>();
   private readonly kinds = new Map<number, ComponentKindName>();
+  private readonly ports = new Map<number, readonly PortSpec[]>();
   private readonly inputs = new Map<number, Signal>();
   private readonly connections: { source: { componentId: number; port: string }; target: { componentId: number; port: string } }[] = [];
 
@@ -55,12 +59,22 @@ class FakeEngine implements EngineAdapter {
     return { status: "ok" as const, engine: "fake-engine" };
   }
 
-  async addComponent(kind: ComponentKindName): Promise<EngineResponse> {
+  async addComponent(kind: ComponentKindName, ports?: readonly PortSpec[]): Promise<EngineResponse> {
     this.calls.push({ type: "addComponent", kind });
     if (this.errorOn === "addComponent") return this.error("创建元件失败");
     const componentId = this.nextComponentId++;
     this.kinds.set(componentId, kind);
-    return { type: "component_added", requestId: "fake", componentId };
+    // 与真实引擎同一条回退规则：省略端口清单时用内置定义，并把实际清单回传。
+    const resolved = portsForAddComponent(kind, ports);
+    this.ports.set(componentId, resolved);
+    return { type: "component_added", requestId: "fake", componentId, ports: resolved };
+  }
+
+  async setPortWidth(componentId: number, ports: readonly PortSpec[]): Promise<EngineResponse> {
+    this.calls.push({ type: "setPortWidth", componentId, ports });
+    if (this.errorOn === "setPortWidth") return this.error("改位宽失败");
+    this.ports.set(componentId, ports);
+    return { type: "port_width_set", requestId: "fake", componentId, ports, danglingConnectionIds: [] };
   }
 
   async addConnection(source: { componentId: number; port: string }, target: { componentId: number; port: string }): Promise<EngineResponse> {
@@ -101,7 +115,7 @@ class FakeEngine implements EngineAdapter {
     if (this.errorOn === "tick") return this.error("推进一步失败");
     this.step += 1;
     for (const [componentId, kind] of this.kinds) {
-      if (kind === "clock") this.clocks.set(componentId, this.clocks.get(componentId) === 1 ? 0 : 1);
+      if (kind === "clock") this.clocks.set(componentId, this.clocks.get(componentId) === "1" ? "0" : "1");
     }
     // 快照覆盖每一个输出端口，外加每个 Output 元件的接收端，因此工作区不必再逐端口 get_signal。
     const signals = [...this.kinds].flatMap(([componentId, kind]) => {
@@ -139,14 +153,14 @@ class FakeEngine implements EngineAdapter {
     if (depth > 16) return "X";
     const kind = this.kinds.get(componentId);
     if (kind === undefined) return "X";
-    if (kind === "clock") return this.clocks.get(componentId) ?? 0;
-    if (kind === "input") return this.inputs.get(componentId) ?? 0;
+    if (kind === "clock") return this.clocks.get(componentId) ?? "0";
+    if (kind === "input") return this.inputs.get(componentId) ?? "0";
     if (kind === "output") return this.resolveInto(componentId, port, depth);
     if (kind === "not") return invert(this.resolveInto(componentId, "in", depth));
     if (kind === "and") {
       const values = ["in1", "in2"].map((name) => this.resolveInto(componentId, name, depth));
       if (values.some((value) => value === "X")) return "X";
-      return values.every((value) => value === 1) ? 1 : 0;
+      return values.every((value) => value === "1") ? "1" : "0";
     }
     return "X";
   }
@@ -166,7 +180,7 @@ class FakeEngine implements EngineAdapter {
 
 function invert(value: Signal): Signal {
   if (value === "X") return "X";
-  return value === 1 ? 0 : 1;
+  return value === "1" ? "0" : "1";
 }
 
 /** FakeEngine 认识的、带可观察输出端口的元件类型；真正的时序语义仍由 C++ 测试负责。 */
@@ -184,6 +198,23 @@ function bindingsFrom(loaded: SimulationBindings): EditorBindings {
     components: loaded.components,
     connections: loaded.connections ?? {},
     componentKinds: loaded.componentKinds,
+    ports: loaded.ports,
+  };
+}
+
+/**
+ * 给手工造的测试文档补上内置端口清单。
+ *
+ * 真实路径里这份清单由 `component_added` 回传；用例直接投影文档时没有引擎可问，因此在这里
+ * 用同一份夹具内置定义填好。
+ */
+function withBuiltInPorts(document: EditorDocument): EditorDocument {
+  return {
+    ...document,
+    components: document.components.map((component) => ({
+      ...component,
+      ports: component.ports ?? portsForAddComponent(component.kind),
+    })),
   };
 }
 
@@ -213,8 +244,10 @@ test("creates and runs the example circuit through the generic document path", a
     components: { "input-a": 1, "input-b": 2, "and-gate": 3, output: 4 },
     connections: { "wire-a": 1, "wire-b": 2, "wire-output": 3 },
     componentKinds: { "input-a": "input", "input-b": "input", "and-gate": "and", output: "output" },
+    // 端口清单由 component_added 回传，编辑器文档靠它拿到端口几何。
+    ports: builtInPortsById({ "input-a": "input", "input-b": "input", "and-gate": "and", output: "output" }),
   });
-  assert.equal(state.outputValue, 1);
+  assert.equal(state.outputValue, "1");
   // 加载后的首次稳定求值不是一次推进：步数停在 0，波形历史也还是空的。
   assert.equal(state.simulationStep, 0);
   assert.deepEqual(state.waveform, []);
@@ -265,13 +298,23 @@ test("toggles an input, runs the circuit, and appends a waveform point", async (
   await workspace.checkEngine();
   await workspace.loadCircuit(createAndDemoDocument());
 
-  const state = await workspace.toggleInput("input-a");
+  const state = await workspace.setInputBit("input-a", 0, "0");
 
-  assert.equal(state.inputA, 0);
-  assert.equal(state.inputB, 1);
-  assert.equal(state.outputValue, 0);
+  assert.equal(state.inputA, "0");
+  assert.equal(state.inputB, "1");
+  assert.equal(state.outputValue, "0");
   // 切换输入是用户发起的一次推进：它是波形历史里的第一个点，也是第 1 步。
-  assert.deepEqual(state.waveform, [{ step: 1, a: 0, b: 1, output: 0 }]);
+  // 记录按 `${editorComponentId}:${portId}` 索引，因此一条点里是电路里**全部**可读信号——
+  // 两个 Input 的驱动值、逻辑门的输出、Output 的接收端，而不是写死的三行。
+  assert.deepEqual(state.waveform, [{
+    step: 1,
+    signals: {
+      "input-a:out": "0",
+      "input-b:out": "1",
+      "and-gate:out": "0",
+      "output:in": "0",
+    },
+  }]);
   assert.equal(state.simulationStep, 1);
 });
 
@@ -281,10 +324,10 @@ test("projects the settled AND result onto the gate output wire", async () => {
   await workspace.checkEngine();
   await workspace.loadCircuit(createAndDemoDocument());
 
-  const state = await workspace.toggleInput("input-b");
+  const state = await workspace.setInputBit("input-b", 0, "0");
   const registry = createComponentDefinitionRegistry();
-  const editorSnapshot = editorSnapshotOf(createAndDemoDocument());
-  const simulation = createSimulationSnapshot(editorSnapshot, registry, {
+  const editorSnapshot = editorSnapshotOf(withBuiltInPorts(createAndDemoDocument()));
+  const simulation = createSimulationSnapshot(editorSnapshot, {
     inputA: state.inputA,
     inputB: state.inputB,
     inputValues: state.inputValues,
@@ -292,12 +335,12 @@ test("projects the settled AND result onto the gate output wire", async () => {
   });
   const scene = projectCanvasScene(editorSnapshot, simulation, registry);
 
-  assert.equal(state.outputValue, 0);
+  assert.equal(state.outputValue, "0");
   const andGate = scene.nodes.find((node) => node.id === "and-gate");
-  assert.equal(andGate?.ports.find((port) => port.id === "in1")?.signal, 1);
-  assert.equal(andGate?.ports.find((port) => port.id === "in2")?.signal, 0);
-  assert.equal(andGate?.ports.find((port) => port.id === "out")?.signal, 0);
-  assert.equal(scene.wires.find((wire) => wire.id === "wire-output")?.signal, 0);
+  assert.equal(andGate?.ports.find((port) => port.id === "in1")?.signal, "1");
+  assert.equal(andGate?.ports.find((port) => port.id === "in2")?.signal, "0");
+  assert.equal(andGate?.ports.find((port) => port.id === "out")?.signal, "0");
+  assert.equal(scene.wires.find((wire) => wire.id === "wire-output")?.signal, "0");
 });
 
 test("pushes a document that is not the AND example", async () => {
@@ -322,9 +365,151 @@ test("pushes a document that is not the AND example", async () => {
 
   assert.equal(state.hasCircuit, true);
   assert.equal(state.canStep, true);
-  assert.equal(state.inputValues["input"], 1);
-  assert.equal(state.signals["result:in"], 0);
-  assert.equal(state.outputValue, 0);
+  assert.equal(state.inputValues["input"], "1");
+  assert.equal(state.signals["result:in"], "0");
+  assert.equal(state.outputValue, "0");
+});
+
+/**
+ * 位宽大于 1 的 Input 不能在提交时送出长度对不上的值：引擎会以 `invalid_width` 拒绝，
+ * 整条求值路径都会失败。按位设置输入属于后续切片，这里只要求长度按端口位宽展开。
+ */
+/** 一条多位 Input 直连等宽 Output 的最小电路；用来观察逐位设置提交出去的完整值。 */
+function wideInputDocument(width = 4): EditorDocument {
+  return {
+    components: [
+      { id: "input", kind: "input", displayName: "输入", position: { x: 0, y: 0 }, lifecycle: "active", ports: [{ name: "out", direction: "output", width }] },
+      { id: "result", kind: "output", displayName: "结果", position: { x: 400, y: 0 }, lifecycle: "active", ports: [{ name: "in", direction: "input", width }] },
+    ],
+    connections: [
+      { id: "wire", source: { componentId: "input", port: "out", point: { x: 100, y: 50 } }, target: { componentId: "result", port: "in", point: { x: 400, y: 50 } }, lifecycle: "visible", danglingEndpoints: [] },
+    ],
+  };
+}
+
+test("drives a widened Input with a value matching its declared width", async () => {
+  const engine = new FakeEngine();
+  const workspace = createWorkspace(engine);
+  await workspace.checkEngine();
+
+  const state = (await workspace.loadCircuit(wideInputDocument())).snapshot;
+
+  assert.equal(state.operationError, null);
+  // 位宽大于 1 的 Input 默认是一串 0：新增输入的默认取值是 0，按位宽展开就是这个长度，
+  // 而不是把兼容投影的 `inputA` 整值重复到位宽那么多位。
+  assert.deepEqual(engine.calls.filter((call) => call.type === "setInput").at(-1), { type: "setInput", componentId: 1, value: "0000" });
+  assert.equal(state.inputValues["input"], "0000");
+  // 画布读数同样是逐位文本，长度等于端口位宽。
+  assert.equal(state.signals["input:out"], "0000");
+  assert.equal(state.signals["result:in"], "0000");
+});
+
+test("sets a single bit of a multi-bit Input and submits the whole value", async () => {
+  const engine = new FakeEngine();
+  const workspace = createWorkspace(engine);
+  await workspace.checkEngine();
+  await workspace.loadCircuit(wideInputDocument());
+
+  // 值是 MSB 在前，因此下标 1 是 `[3:0]` 里的第 2 位。
+  const state = await workspace.setInputBit("input", 1, "1");
+
+  // 提交的是**整个**多位值：这一位变了，其余三位保持 0，长度仍然等于端口位宽。
+  assert.deepEqual(engine.calls.filter((call) => call.type === "setInput").at(-1), { type: "setInput", componentId: 1, value: "0100" });
+  assert.equal(state.inputValues.input, "0100");
+  assert.equal(state.signals["input:out"], "0100");
+  // 读数沿 Connection 传到 Output，画布与波形读的是同一个值。
+  assert.equal(state.signals["result:in"], "0100");
+  assert.equal(state.outputValue, "0100");
+  // 停止态下切换立即求值，并且是一次推进。
+  assert.equal(state.simulationStep, 1);
+  // 波形点按 `${editorComponentId}:${portId}` 索引，因此记的是这一拍端口自己的读数，
+  // 而不是「输入 A / 输入 B / 输出」三个写死的字段。
+  assert.deepEqual(state.waveform, [{ step: 1, signals: { "input:out": "0100", "result:in": "0100" } }]);
+});
+
+test("sets one bit to X without disturbing the other bits of the same value", async () => {
+  const engine = new FakeEngine();
+  const workspace = createWorkspace(engine);
+  await workspace.checkEngine();
+  await workspace.loadCircuit(wideInputDocument());
+
+  // 下标 0 是最高位，下标 3 是最低位；两处各设一次，中间隔着两位没被动过。
+  await workspace.setInputBit("input", 0, "1");
+  const state = await workspace.setInputBit("input", 3, "X");
+
+  // `X` 只落在被设置的那一位上，其余位照旧——这正是「逐位三值」与「整条未知」的区别。
+  assert.equal(state.inputValues.input, "100X");
+  assert.equal(state.signals["input:out"], "100X");
+  assert.equal(state.signals["result:in"], "100X");
+});
+
+test("does not advance when a bit already holds the requested value", async () => {
+  const engine = new FakeEngine();
+  const workspace = createWorkspace(engine);
+  await workspace.checkEngine();
+  await workspace.loadCircuit(wideInputDocument());
+  engine.calls.length = 0;
+
+  // 全 0 的输入上把某一位再设成 0：没有变化，因此既不发请求，也不追加一个什么都没变的波形点。
+  const state = await workspace.setInputBit("input", 2, "0");
+
+  assert.deepEqual(engine.calls, []);
+  assert.equal(state.inputValues.input, "0000");
+  assert.equal(state.simulationStep, 0);
+  assert.deepEqual(state.waveform, []);
+});
+
+test("commits a whole multi-bit value while running without settling", async () => {
+  const engine = new FakeEngine();
+  const scheduler = new FakeScheduler();
+  const workspace = createWorkspace(engine, { scheduler });
+  await workspace.checkEngine();
+  await workspace.loadCircuit(wideInputDocument());
+  await workspace.start();
+  engine.calls.length = 0;
+
+  const state = await workspace.setInputBit("input", 2, "1");
+
+  // 连续运行中只提交 set_input，不额外 settle；新值由下一次推进带上。
+  assert.deepEqual(engine.calls, [{ type: "setInput", componentId: 1, value: "0010" }]);
+  assert.equal(state.inputValues.input, "0010");
+  assert.equal(state.simulationState, "running");
+});
+
+/**
+ * 波形记录的是这一拍**全部**可读信号，而不是写死的三行；多位值原样保留逐位文本，
+ * 因此每一位都读得出来（长度等于端口位宽的 `0000`，而不是整条未知或单个数字）。
+ *
+ * 这里读到的是一串 0：位宽大于 1 的 Input 默认取值就是全 0，而不是把兼容投影的
+ * `inputA` 整值重复到位宽那么多位——后者是切片 5 之前的旧语义。断言的是「记了哪些
+ * 端口、值是不是完整的逐位文本」，与默认值取哪一串无关。
+ */
+test("records every Input and every Output, with a widened signal kept as binary text", async () => {
+  const engine = new FakeEngine();
+  const workspace = createWorkspace(engine);
+  await workspace.checkEngine();
+
+  const widePorts = [{ name: "out", direction: "output" as const, width: 4 }];
+  const wideSink = [{ name: "in", direction: "input" as const, width: 4 }];
+  const document: EditorDocument = {
+    components: [
+      { id: "operand", kind: "input", displayName: "操作数", position: { x: 0, y: 0 }, lifecycle: "active", ports: widePorts },
+      { id: "direct", kind: "output", displayName: "直连输出", position: { x: 400, y: 0 }, lifecycle: "active", ports: wideSink },
+      { id: "second", kind: "output", displayName: "第二个输出", position: { x: 400, y: 200 }, lifecycle: "active", ports: wideSink },
+    ],
+    connections: [
+      { id: "wire-direct", source: { componentId: "operand", port: "out", point: { x: 100, y: 50 } }, target: { componentId: "direct", port: "in", point: { x: 400, y: 50 } }, lifecycle: "visible", danglingEndpoints: [] },
+      { id: "wire-second", source: { componentId: "operand", port: "out", point: { x: 100, y: 50 } }, target: { componentId: "second", port: "in", point: { x: 400, y: 250 } }, lifecycle: "visible", danglingEndpoints: [] },
+    ],
+  };
+
+  await workspace.loadCircuit(document);
+  const point = (await workspace.step()).waveform.at(-1);
+
+  assert.deepEqual(point, {
+    step: 1,
+    signals: { "operand:out": "0000", "direct:in": "0000", "second:in": "0000" },
+  });
 });
 
 test("reads every Output component's own signal instead of reusing the first one", async () => {
@@ -349,8 +534,8 @@ test("reads every Output component's own signal instead of reusing the first one
 
   const state = (await workspace.loadCircuit(document)).snapshot;
 
-  assert.equal(state.signals["inverted:in"], 0);
-  assert.equal(state.signals["direct:in"], 1);
+  assert.equal(state.signals["inverted:in"], "0");
+  assert.equal(state.signals["direct:in"], "1");
   // 两个 Output 都被单独读取，而不是共用一个读数。
   assert.deepEqual(
     engine.calls.filter((call) => call.type === "getSignal"),
@@ -362,18 +547,18 @@ test("reads every Output component's own signal instead of reusing the first one
   );
 
   const registry = createComponentDefinitionRegistry();
-  const simulation = createSimulationSnapshot(editorSnapshotOf(document), registry, {
+  const simulation = createSimulationSnapshot(editorSnapshotOf(withBuiltInPorts(document)), {
     inputA: state.inputA,
     inputB: state.inputB,
     inputValues: state.inputValues,
     signals: state.signals,
   });
-  const scene = projectCanvasScene(editorSnapshotOf(document), simulation, registry);
+  const scene = projectCanvasScene(editorSnapshotOf(withBuiltInPorts(document)), simulation, registry);
   const signalAt = (id: string): Signal | undefined =>
     scene.nodes.find((node) => node.id === id)?.ports.find((port) => port.direction === "input")?.signal;
 
-  assert.equal(signalAt("inverted"), 0);
-  assert.equal(signalAt("direct"), 1);
+  assert.equal(signalAt("inverted"), "0");
+  assert.equal(signalAt("direct"), "1");
 });
 
 /** Clock 驱动一个 Output 的最小文档；它没有 Input，因此只由推进改变。 */
@@ -393,23 +578,23 @@ test("advances the clock one tick per single step with a single round trip", asy
   const engine = new FakeEngine();
   const workspace = createWorkspace(engine);
   await workspace.checkEngine();
-  const document = clockDocument();
+  const document = withBuiltInPorts(clockDocument());
   const loaded = await workspace.loadCircuit(document);
   const registry = createComponentDefinitionRegistry();
 
   // Clock 的输出初值是 0 而不是 X，否则永远判不出第一次上升沿。
-  assert.equal(loaded.snapshot.signals["clock:out"], 0);
+  assert.equal(loaded.snapshot.signals["clock:out"], "0");
 
   engine.calls.length = 0;
   const first = await workspace.step();
 
   // 一次推进只有一次跨进程往返：不再逐端口 get_signal。
   assert.deepEqual(engine.calls.map((call) => call.type), ["tick"]);
-  assert.equal(first.signals["clock:out"], 1);
+  assert.equal(first.signals["clock:out"], "1");
 
   const scene = projectCanvasScene(
     editorSnapshotOf(document),
-    createSimulationSnapshot(editorSnapshotOf(document), registry, {
+    createSimulationSnapshot(editorSnapshotOf(document), {
       inputA: first.inputA,
       inputB: first.inputB,
       inputValues: first.inputValues,
@@ -418,12 +603,12 @@ test("advances the clock one tick per single step with a single round trip", asy
     registry,
   );
   // 接收端的值由场景投影沿 Connection 推导，因此画布、检查器与输出面板读的是同一次推进。
-  assert.equal(scene.nodes.find((node) => node.id === "monitor")?.ports.find((port) => port.id === "in")?.signal, 1);
-  assert.equal(scene.wires.find((wire) => wire.id === "wire")?.signal, 1);
+  assert.equal(scene.nodes.find((node) => node.id === "monitor")?.ports.find((port) => port.id === "in")?.signal, "1");
+  assert.equal(scene.wires.find((wire) => wire.id === "wire")?.signal, "1");
 
   const second = await workspace.step();
   assert.deepEqual(engine.calls.map((call) => call.type), ["tick", "tick"]);
-  assert.equal(second.signals["clock:out"], 0);
+  assert.equal(second.signals["clock:out"], "0");
   assert.equal(second.canStep, true);
 });
 
@@ -434,15 +619,16 @@ test("records the advanced reading in the waveform instead of the previous settl
   const loaded = await workspace.loadCircuit(clockDocument());
 
   // 加载时 Clock 的输出是 0，Output 的接收端也是 0；这次稳定求值不计步，也不进波形历史。
-  assert.equal(loaded.snapshot.outputValue, 0);
+  assert.equal(loaded.snapshot.outputValue, "0");
   assert.deepEqual(loaded.snapshot.waveform, []);
 
   const advanced = await workspace.step();
 
   // Output 元件的接收端由同一次推进的快照带回，因此兼容标量与波形记录的都是这一拍的读数。
-  assert.equal(advanced.outputValue, 1);
-  assert.equal(advanced.signals["monitor:in"], 1);
-  assert.equal(advanced.waveform.at(-1)?.output, 1);
+  assert.equal(advanced.outputValue, "1");
+  assert.equal(advanced.signals["monitor:in"], "1");
+  assert.equal(advanced.waveform.at(-1)?.signals["monitor:in"], "1");
+  assert.equal(advanced.waveform.at(-1)?.signals["clock:out"], "1");
 });
 
 test("starts, pauses, and resumes continuous running without losing accumulated steps", async () => {
@@ -469,12 +655,12 @@ test("starts, pauses, and resumes continuous running without losing accumulated 
   await drain();
   assert.deepEqual(engine.calls.map((call) => call.type), ["tick"]);
   assert.equal(workspace.snapshot().simulationStep, baseStep + 1);
-  assert.equal(workspace.snapshot().signals["clock:out"], 1);
+  assert.equal(workspace.snapshot().signals["clock:out"], "1");
 
   scheduler.fire();
   await drain();
   assert.equal(workspace.snapshot().simulationStep, baseStep + 2);
-  assert.equal(workspace.snapshot().signals["clock:out"], 0);
+  assert.equal(workspace.snapshot().signals["clock:out"], "0");
 
   const paused = await workspace.pause();
   assert.equal(paused.simulationState, "paused");
@@ -494,7 +680,7 @@ test("starts, pauses, and resumes continuous running without losing accumulated 
   await drain();
   // 继续从暂停处接着跑：步数与时钟相位都接上，不从头开始。
   assert.equal(workspace.snapshot().simulationStep, baseStep + 3);
-  assert.equal(workspace.snapshot().signals["clock:out"], 1);
+  assert.equal(workspace.snapshot().signals["clock:out"], "1");
 
   // 自动推进不追加波形记录：波形历史只记录用户发起的推进。
   assert.equal(workspace.snapshot().waveform.length, waveformPoints);
@@ -539,7 +725,7 @@ test("queues an input commit behind an in-flight advance while running", async (
 
   scheduler.fire();
   await drain();
-  const toggling = workspace.toggleInput("input-a");
+  const toggling = workspace.setInputBit("input-a", 0, "0");
   await drain();
   // 推进还在飞，输入提交因此排在它之后，两条请求不交错。
   assert.deepEqual(engine.calls.map((call) => call.type), ["tick"]);
@@ -549,7 +735,7 @@ test("queues an input commit behind an in-flight advance while running", async (
   await toggling;
   assert.deepEqual(engine.calls.map((call) => call.type), ["tick", "setInput"]);
   // 运行中切换只提交 set_input，不额外 settle；新值由下一次推进带上。
-  assert.equal(workspace.snapshot().inputValues["input-a"], 0);
+  assert.equal(workspace.snapshot().inputValues["input-a"], "0");
   assert.equal(workspace.snapshot().canToggleInput, true);
 });
 
@@ -596,7 +782,59 @@ test("queues a structural commit behind an in-flight advance while running", asy
   assert.equal(types[1], "removeComponent", "结构提交紧随其后，不与之交错");
   // 结构提交完成后照常收尾：工作区按身份保留读数，并把连续运行切到暂停。
   assert.equal(workspace.snapshot().simulationState, "paused");
-  assert.equal(workspace.snapshot().signals["clock:out"], 1);
+  assert.equal(workspace.snapshot().signals["clock:out"], "1");
+});
+
+/** 改位宽与其它结构提交走同一条队列，因此不会插进一次正在飞的推进中间。 */
+test("queues a port width change behind an in-flight advance while running", async () => {
+  const engine = new FakeEngine();
+  const scheduler = new FakeScheduler();
+  const queue = createEngineCallQueue();
+  const workspace = createWorkspace(engine, { scheduler, queue });
+  await workspace.checkEngine();
+  const document = withBuiltInPorts(clockDocument());
+  const loaded = await workspace.loadCircuit(document);
+  assert.ok(loaded.bindings);
+  const session = createEditorSession(
+    { document, bindings: bindingsFrom(loaded.bindings) },
+    createProtocolEnginePort(engine, queue),
+    {
+      onBindingsChanged(bindings) {
+        workspace.rebindSimulation(bindings);
+      },
+    },
+  );
+
+  await workspace.start();
+  let release: () => void = () => {};
+  engine.holdTick = () => new Promise<void>((resolve) => { release = resolve; });
+  engine.calls.length = 0;
+
+  scheduler.fire();
+  await drain();
+  const widening = session.dispatch({
+    type: "set-port-width",
+    componentId: "clock",
+    ports: [{ name: "out", direction: "output", width: 4 }],
+  });
+  await drain();
+
+  // 推进还在飞，改宽因此排在它之后。
+  assert.deepEqual(engine.calls.map((call) => call.type), ["tick"]);
+
+  release();
+  await drain();
+  const result = await widening;
+
+  assert.equal(result.ok, true);
+  const types = engine.calls.map((call) => call.type);
+  assert.equal(types[0], "tick", "那一拍先完成");
+  assert.equal(types[1], "setPortWidth", "改宽紧随其后，不与之交错");
+  // 端口清单换成了新的那一份，元件身份不变。
+  assert.deepEqual(
+    result.snapshot.document.components.find((component) => component.id === "clock")?.ports,
+    [{ name: "out", direction: "output", width: 4 }],
+  );
 });
 
 test("pauses continuous running when the circuit structure changes", async () => {
@@ -611,6 +849,7 @@ test("pauses continuous running when the circuit structure changes", async () =>
   const rebound = workspace.rebindSimulation({
     components: { clock: 1, monitor: 2 },
     componentKinds: { clock: "clock", monitor: "output" },
+    ports: builtInPortsById({ clock: "clock", monitor: "output" }),
   });
 
   // 结构修改把运行切到暂停，并要求用户显式继续；已排定的推进被取消。
@@ -629,20 +868,21 @@ test("keeps the accumulated readings when the circuit structure changes", async 
   await workspace.start();
   scheduler.fire();
   await drain();
-  assert.equal(workspace.snapshot().signals["clock:out"], 1);
+  assert.equal(workspace.snapshot().signals["clock:out"], "1");
 
   // 删掉一个与 Clock 无关的元件：拓扑变了，但 Clock 与那条 Wire 都还在。
   const rebound = workspace.rebindSimulation({
     components: { clock: 1 },
     connections: { wire: 1 },
     componentKinds: { clock: "clock" },
+    ports: builtInPortsById({ clock: "clock" }),
   });
 
   assert.equal(rebound.simulationState, "paused");
   assert.equal(rebound.canResume, true);
   // 旧实现把 signals 整体清空、outputValue 置 X，这两条会分别读到 undefined 与 "X"。
-  assert.equal(rebound.signals["clock:out"], 1);
-  assert.equal(rebound.outputValue, 1);
+  assert.equal(rebound.signals["clock:out"], "1");
+  assert.equal(rebound.outputValue, "1");
   // 消失的元件连同它的读数一起被丢弃，不留下已经无从展示的键。
   assert.equal(rebound.signals["monitor:in"], undefined);
 });
@@ -663,12 +903,13 @@ test("distinguishes a real topology change from a geometry-only update", async (
   const unchanged = workspace.rebindSimulation({ ...loaded.bindings });
   assert.equal(unchanged.simulationState, "running");
   assert.equal(scheduler.cancelled, 0);
-  assert.equal(unchanged.signals["clock:out"], 1);
+  assert.equal(unchanged.signals["clock:out"], "1");
 
   // 连接不参与运行时身份，却是实打实的拓扑：把它从绑定里去掉必须停下来。
   const rebound = workspace.rebindSimulation({
     components: { clock: 1, monitor: 2 },
     componentKinds: { clock: "clock", monitor: "output" },
+    ports: builtInPortsById({ clock: "clock", monitor: "output" }),
   });
   assert.equal(rebound.simulationState, "paused");
   assert.equal(scheduler.cancelled, 1);
@@ -739,7 +980,7 @@ test("resets the simulation back to its initial state", async () => {
   assert.equal(loaded.snapshot.canReset, true);
 
   const advanced = await workspace.step();
-  assert.equal(advanced.signals["clock:out"], 1);
+  assert.equal(advanced.signals["clock:out"], "1");
   assert.equal(advanced.simulationStep, loaded.snapshot.simulationStep + 1);
   assert.equal(advanced.waveform.length > loaded.snapshot.waveform.length, true);
 
@@ -754,9 +995,9 @@ test("resets the simulation back to its initial state", async () => {
   assert.equal(state.simulationState, "stopped");
   assert.equal(state.simulationStep, 0);
   assert.deepEqual(state.waveform, []);
-  assert.equal(state.signals["clock:out"], 0);
-  assert.equal(state.signals["monitor:in"], 0);
-  assert.equal(state.outputValue, 0);
+  assert.equal(state.signals["clock:out"], "0");
+  assert.equal(state.signals["monitor:in"], "0");
+  assert.equal(state.outputValue, "0");
   assert.equal(state.message, "已重置到初始状态。");
   assert.equal(state.canReset, true);
   assert.equal(state.canStart, true);
@@ -772,14 +1013,14 @@ test("resets from the running state and cancels the scheduled advance", async ()
   scheduler.fire();
   await drain();
   assert.equal(workspace.snapshot().simulationState, "running");
-  assert.equal(workspace.snapshot().signals["clock:out"], 1);
+  assert.equal(workspace.snapshot().signals["clock:out"], "1");
   engine.calls.length = 0;
 
   const state = await workspace.reset();
 
   assert.equal(state.simulationState, "stopped");
   assert.equal(state.simulationStep, 0);
-  assert.equal(state.signals["clock:out"], 0);
+  assert.equal(state.signals["clock:out"], "0");
   // 重置取消了已经排定的下一次推进：重置之后不会再有推进自行落地。
   assert.equal(scheduler.fire(), false);
   await drain();
@@ -791,8 +1032,8 @@ test("re-submits the current input values after a reset", async () => {
   const workspace = createWorkspace(engine);
   await workspace.checkEngine();
   await workspace.loadCircuit(createAndDemoDocument());
-  await workspace.toggleInput("input-a");
-  assert.equal(workspace.snapshot().inputValues["input-a"], 0);
+  await workspace.setInputBit("input-a", 0, "0");
+  assert.equal(workspace.snapshot().inputValues["input-a"], "0");
   engine.calls.length = 0;
 
   const state = await workspace.reset();
@@ -803,12 +1044,12 @@ test("re-submits the current input values after a reset", async () => {
     ["reset", "setInput", "setInput", "settle", "getSignal", "getSignal"],
   );
   assert.deepEqual(engine.calls.slice(1, 3), [
-    { type: "setInput", componentId: 1, value: 0 },
-    { type: "setInput", componentId: 2, value: 1 },
+    { type: "setInput", componentId: 1, value: "0" },
+    { type: "setInput", componentId: 2, value: "1" },
   ]);
-  assert.equal(state.inputValues["input-a"], 0);
-  assert.equal(state.inputValues["input-b"], 1);
-  assert.equal(state.outputValue, 0);
+  assert.equal(state.inputValues["input-a"], "0");
+  assert.equal(state.inputValues["input-b"], "1");
+  assert.equal(state.outputValue, "0");
   assert.equal(state.simulationStep, 0);
   assert.deepEqual(state.waveform, []);
 });
@@ -819,7 +1060,7 @@ test("surfaces a failed reset without half-clearing the readings", async () => {
   await workspace.checkEngine();
   await workspace.loadCircuit(clockDocument());
   await workspace.step();
-  assert.equal(workspace.snapshot().signals["clock:out"], 1);
+  assert.equal(workspace.snapshot().signals["clock:out"], "1");
   engine.errorOn = "reset";
 
   const state = await workspace.reset();
@@ -827,7 +1068,7 @@ test("surfaces a failed reset without half-clearing the readings", async () => {
   assert.equal(state.operationError, "重置失败");
   assert.equal(state.engineState, "ready");
   // 引擎没有重置，因此已读到的读数与步数都不该被清掉：加载不计步，那次单步是第 1 步。
-  assert.equal(state.signals["clock:out"], 1);
+  assert.equal(state.signals["clock:out"], "1");
   assert.equal(state.simulationStep, 1);
 });
 
@@ -855,7 +1096,7 @@ test("refreshes the AND output signal immediately after creating its output wire
     const editorSnapshot = binding.editorState.value as EditorSnapshot;
     const state = binding.state.value;
     const registry = createComponentDefinitionRegistry();
-    const simulation = createSimulationSnapshot(editorSnapshot, registry, {
+    const simulation = createSimulationSnapshot(editorSnapshot, {
       inputA: state.inputA,
       inputB: state.inputB,
       inputValues: state.inputValues,
@@ -864,7 +1105,7 @@ test("refreshes the AND output signal immediately after creating its output wire
     const scene = projectCanvasScene(editorSnapshot, simulation, registry);
     const outputWire = scene.wires.find((wire) => wire.source.componentId === "and-gate" && wire.target.componentId === newOutput.id);
 
-    assert.equal(outputWire?.signal, 1);
+    assert.equal(outputWire?.signal, "1");
   } finally {
     if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
     else Reflect.deleteProperty(globalThis, "window");
@@ -938,10 +1179,10 @@ test("keeps the committed input when the next simulation is rejected", async () 
   await workspace.loadCircuit(createAndDemoDocument());
   engine.errorOn = "setInput";
 
-  const state = await workspace.toggleInput("input-a");
+  const state = await workspace.setInputBit("input-a", 0, "0");
 
-  assert.equal(state.inputA, 1);
-  assert.equal(state.outputValue, 1);
+  assert.equal(state.inputA, "1");
+  assert.equal(state.outputValue, "1");
   assert.equal(state.operationError, "输入设置失败");
   assert.equal(state.engineState, "ready");
   assert.equal(state.canStep, true);
@@ -955,17 +1196,18 @@ test("recognizes every input component in generic editor bindings", async () => 
   workspace.rebindSimulation({
     components: { "input-a": 1, "input-b": 2, "input-c": 3, "and-gate": 4, output: 5 },
     componentKinds: { "input-a": "input", "input-b": "input", "input-c": "input", "and-gate": "and", output: "output" },
+    ports: builtInPortsById({ "input-a": "input", "input-b": "input", "input-c": "input", "and-gate": "and", output: "output" }),
   });
 
   assert.equal(workspace.snapshot().canStep, true);
-  assert.equal(workspace.snapshot().inputValues["input-c"], 0);
-  const state = await workspace.toggleInput("input-c");
+  assert.equal(workspace.snapshot().inputValues["input-c"], "0");
+  const state = await workspace.setInputBit("input-c", 0, "1");
 
-  assert.equal(state.inputValues["input-c"], 1);
+  assert.equal(state.inputValues["input-c"], "1");
   assert.deepEqual(engine.calls.filter((call) => call.type === "setInput").slice(-3), [
-    { type: "setInput", componentId: 1, value: 1 },
-    { type: "setInput", componentId: 2, value: 1 },
-    { type: "setInput", componentId: 3, value: 1 },
+    { type: "setInput", componentId: 1, value: "1" },
+    { type: "setInput", componentId: 2, value: "1" },
+    { type: "setInput", componentId: 3, value: "1" },
   ]);
 });
 
@@ -996,7 +1238,7 @@ test("rebinds simulation to the new engine ID after undo", async () => {
 
   engine.calls.length = 0;
   await workspace.refreshReadings();
-  assert.deepEqual(engine.calls[0], { type: "setInput", componentId: 45, value: 1 });
+  assert.deepEqual(engine.calls[0], { type: "setInput", componentId: 45, value: "1" });
   assert.equal(JSON.stringify(session.snapshot()).includes("41"), false);
 });
 
@@ -1023,4 +1265,48 @@ test("disables simulation after clear and rebinds it after one undo", async () =
 
   await session.dispatch({ type: "undo" });
   assert.equal(workspace.snapshot().canStep, true);
+});
+
+test("expands every Input into one button per bit of its declared width", async () => {
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const engine = new FakeEngine();
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { circuitPlatform: engine },
+  });
+
+  try {
+    const binding = useWorkspace();
+    await binding.bootstrap();
+    const editor = useEditorState(binding.state, binding.editorState, binding.select);
+
+    // 1 位 Input 与多位 Input 走同一个模型：一位就是一个方形按钮，没有为 1 位单开一种样子。
+    const [first] = editor.inputControls.value;
+    assert.ok(first, "示例电路至少有一个 Input");
+    assert.equal(first.width, 1);
+    assert.deepEqual(first.bits.map((bit) => [bit.place, bit.index, bit.value]), [[0, 0, "1"]]);
+
+    // 位按钮组跟着端口清单长出来：改宽之后不需要第二份定义。
+    const inputId = first.key;
+    await binding.setPortWidthCommand(inputId, [{ name: "out", direction: "output", width: 4 }]);
+
+    const widened = editor.inputControls.value.find((control) => control.key === inputId);
+    assert.ok(widened);
+    assert.equal(widened.width, 4);
+    assert.equal(widened.value, "0000");
+    // 从最高位到最低位排列：位号与取值文本的下标一一对应，最左的按钮是最高位。
+    assert.deepEqual(
+      widened.bits.map((bit) => [bit.place, bit.index, bit.value]),
+      [[3, 0, "0"], [2, 1, "0"], [1, 2, "0"], [0, 3, "0"]],
+    );
+
+    await binding.setInputBit(inputId, 2, "1");
+
+    const driven = editor.inputControls.value.find((control) => control.key === inputId);
+    assert.equal(driven?.value, "0010");
+    assert.deepEqual(driven?.bits.map((bit) => bit.value), ["0", "0", "1", "0"]);
+  } finally {
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
 });

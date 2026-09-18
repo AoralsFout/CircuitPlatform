@@ -4,8 +4,40 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace circuit::protocol {
+
+/** 协议里的一份位区间声明；`msb >= lsb`。 */
+struct BitRangeSpec {
+    std::uint64_t msb;
+    std::uint64_t lsb;
+};
+
+/**
+ * 协议里的一份端口声明。形状在这一层确认；位宽与位区间是否自洽由 Circuit 的领域规则判定——
+ * 协议层只负责把 JSON 翻成类型，不重复领域校验。
+ */
+struct PortSpec {
+    std::string name;
+    std::string direction;
+    std::uint64_t width;
+    std::optional<BitRangeSpec> bitRange;
+};
+
+/**
+ * `ports` 字段的三态：请求里没有这个字段、有且形状合法、有但形状不合法。
+ *
+ * 三态必须分开，因为「省略端口清单」在 `add_component` 上是「引擎回退到内置定义」的意思，
+ * 而形状不合法是一次应当被拒绝的请求，两者不能都退化成空清单。
+ */
+struct PortListField {
+    /** 请求里是否出现了 `ports` 字段。 */
+    bool present{false};
+    /** 字段形状是否合法；`present` 为假时无意义。 */
+    bool wellFormed{true};
+    std::vector<PortSpec> ports;
+};
 
 struct Request {
     std::string type;
@@ -19,6 +51,7 @@ struct Request {
     std::optional<std::uint64_t> targetComponentId;
     std::optional<std::string> targetPort;
     std::optional<std::string> value;
+    PortListField ports;
 };
 
 /**

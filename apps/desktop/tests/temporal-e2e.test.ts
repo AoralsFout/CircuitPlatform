@@ -4,7 +4,8 @@ import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import type { ComponentKindName, EngineResponse, Signal } from "@circuit-platform/protocol";
+import type { ComponentKindName, EngineResponse, PortSpec, Signal } from "@circuit-platform/protocol";
+import { defaultPortsFor } from "../src/editor/bus-ports.ts";
 import {
   createWorkspace,
   type CircuitDocument,
@@ -52,7 +53,10 @@ function createEngineAdapter(client: ProtocolEngineClient): EngineAdapter {
       }
       return { status: "ok" as const, engine: response.engine };
     },
-    addComponent: (kind: ComponentKindName) => client.request({ type: "add_component", kind }),
+    addComponent: (kind: ComponentKindName, ports?: readonly PortSpec[]) =>
+      client.request({ type: "add_component", kind, ports }),
+    setPortWidth: (componentId: number, ports: readonly PortSpec[]) =>
+      client.request({ type: "set_port_width", componentId, ports }),
     addConnection: (source, target) =>
       client.request({
         type: "add_connection",
@@ -96,6 +100,59 @@ function signalOf(snapshot: WorkspaceSnapshot, key: string): Signal {
   return value;
 }
 
+/** 协议往返的收窄：收到 `error` 时把引擎给出的原因带进断言消息，而不是只报「类型不对」。 */
+function expectResponseOf<T extends EngineResponse["type"]>(
+  response: EngineResponse,
+  type: T,
+): Extract<EngineResponse, { type: T }> {
+  assert.equal(
+    response.type,
+    type,
+    `期望 ${type}，实际是 ${response.type}${response.type === "error" ? `（${response.code}：${response.message}）` : ""}`,
+  );
+  return response as Extract<EngineResponse, { type: T }>;
+}
+
+/** 一次 `get_signal` 往返的读数。 */
+function signalValueOf(response: EngineResponse): Signal {
+  return expectResponseOf(response, "signal_result").value;
+}
+
+/**
+ * 一条 8 位数据通路：Input(8) → 拆线器 → 八个逐位 NOT 门 → 合线器 → Output(8)。
+ *
+ * 拆线器与合线器的端口清单直接取生产代码的默认配置（`defaultPortsFor`），不另抄一份：默认的
+ * 8 位宿主总线拆成八条 1 位分支、分支从最高位开始编号，这些形状本身就是被测对象的一部分。
+ * 逐位门用 NOT 而不是二输入门，是为了让「某一位为 X」的断言只有一个来源：这一位的值。
+ */
+const busWidth = 8;
+const splitterPorts = defaultPortsFor("splitter") ?? [];
+const mergerPorts = defaultPortsFor("merger") ?? [];
+
+const busDocument: CircuitDocument = {
+  components: [
+    { id: "bus-in", kind: "input", ports: [{ name: "out", direction: "output", width: busWidth }] },
+    { id: "split", kind: "splitter", ports: splitterPorts },
+    ...Array.from({ length: busWidth }, (_, index) => ({ id: `inv${index}`, kind: "not" as const })),
+    { id: "merge", kind: "merger", ports: mergerPorts },
+    { id: "bus-out", kind: "output", ports: [{ name: "in", direction: "input", width: busWidth }] },
+  ],
+  connections: [
+    { id: "wire-bus-in", source: { componentId: "bus-in", port: "out" }, target: { componentId: "split", port: "in" } },
+    ...Array.from({ length: busWidth }, (_, index) => ({
+      id: `wire-split-${index}`,
+      source: { componentId: "split", port: `out${index}` },
+      target: { componentId: `inv${index}`, port: "in" },
+    })),
+    ...Array.from({ length: busWidth }, (_, index) => ({
+      id: `wire-merge-${index}`,
+      source: { componentId: `inv${index}`, port: "out" },
+      target: { componentId: "merge", port: `in${index}` },
+    })),
+    { id: "wire-bus-out", source: { componentId: "merge", port: "out" }, target: { componentId: "bus-out", port: "in" } },
+  ],
+};
+
 test("runs, pauses, resumes, and resets a clock-driven flip-flop on the real engine", { skip: engineAvailable() }, async (t) => {
   const { EngineClient } = require_("../electron/engine-client.cjs") as {
     EngineClient: new (enginePath: string) => ProtocolEngineClient;
@@ -124,8 +181,8 @@ test("runs, pauses, resumes, and resets a clock-driven flip-flop on the real eng
   assert.equal(loaded.snapshot.simulationStep, 0);
   assert.deepEqual(loaded.snapshot.waveform, []);
   assert.equal(loaded.snapshot.simulationState, "stopped");
-  assert.equal(signalOf(loaded.snapshot, "clock:out"), 0);
-  assert.equal(signalOf(loaded.snapshot, "data:out"), 1);
+  assert.equal(signalOf(loaded.snapshot, "clock:out"), "0");
+  assert.equal(signalOf(loaded.snapshot, "data:out"), "1");
   assert.equal(signalOf(loaded.snapshot, "flop:q"), "X", "第一次上升沿之前 q 必须是 X，而不是 0");
   assert.equal(signalOf(loaded.snapshot, "probe:in"), "X");
 
@@ -150,35 +207,35 @@ test("runs, pauses, resumes, and resets a clock-driven flip-flop on the real eng
 
   // 第 1 拍：clock 0 → 1，是上升沿，把 d = 1 采进 q。
   const afterFirst = await advance();
-  assert.equal(signalOf(afterFirst, "clock:out"), 1);
-  assert.equal(signalOf(afterFirst, "flop:q"), 1);
-  assert.equal(signalOf(afterFirst, "probe:in"), 1, "q 的变化必须沿 Connection 传到 Output");
+  assert.equal(signalOf(afterFirst, "clock:out"), "1");
+  assert.equal(signalOf(afterFirst, "flop:q"), "1");
+  assert.equal(signalOf(afterFirst, "probe:in"), "1", "q 的变化必须沿 Connection 传到 Output");
 
   // 第 2 拍：clock 1 → 0，是下降沿，q 保持不变。
   const afterSecond = await advance();
-  assert.equal(signalOf(afterSecond, "clock:out"), 0);
-  assert.equal(signalOf(afterSecond, "flop:q"), 1, "下降沿不采样");
+  assert.equal(signalOf(afterSecond, "clock:out"), "0");
+  assert.equal(signalOf(afterSecond, "flop:q"), "1", "下降沿不采样");
 
   // 第 3 拍：又是上升沿，d 仍是 1，q 保持 1。
   const afterThird = await advance();
-  assert.equal(signalOf(afterThird, "clock:out"), 1);
-  assert.equal(signalOf(afterThird, "flop:q"), 1);
+  assert.equal(signalOf(afterThird, "clock:out"), "1");
+  assert.equal(signalOf(afterThird, "flop:q"), "1");
 
   // 运行中切换 Input：只提交 set_input，由下一次推进带上新值。
-  const toggled = await workspace.toggleInput("data");
-  assert.equal(toggled.inputValues.data, 0);
+  const toggled = await workspace.setInputBit("data", 0, "0");
+  assert.equal(toggled.inputValues.data, "0");
   assert.equal(toggled.simulationState, "running", "运行中切换输入不该打断连续运行");
 
   // 第 4 拍：下降沿，d 已经变成 0，但 q 必须按住不动——这正是上升沿触发的可证伪点。
   const afterFalling = await advance();
-  assert.equal(signalOf(afterFalling, "data:out"), 0);
-  assert.equal(signalOf(afterFalling, "clock:out"), 0);
-  assert.equal(signalOf(afterFalling, "flop:q"), 1, "d 已经变了，但还没有上升沿，q 不能跟着变");
+  assert.equal(signalOf(afterFalling, "data:out"), "0");
+  assert.equal(signalOf(afterFalling, "clock:out"), "0");
+  assert.equal(signalOf(afterFalling, "flop:q"), "1", "d 已经变了，但还没有上升沿，q 不能跟着变");
 
   // 第 5 拍：上升沿，这一次采到 d = 0。
   const afterRising = await advance();
-  assert.equal(signalOf(afterRising, "clock:out"), 1);
-  assert.equal(signalOf(afterRising, "flop:q"), 0);
+  assert.equal(signalOf(afterRising, "clock:out"), "1");
+  assert.equal(signalOf(afterRising, "flop:q"), "0");
 
   const stepsBeforePause = afterRising.simulationStep;
   // 推送后的首次稳定求值不计步，连续运行从第 0 步往上走了 5 拍。
@@ -194,7 +251,7 @@ test("runs, pauses, resumes, and resets a clock-driven flip-flop on the real eng
 
   const stillPaused = workspace.snapshot();
   assert.equal(stillPaused.simulationStep, stepsBeforePause);
-  assert.equal(signalOf(stillPaused, "flop:q"), 0, "暂停期间 q 不变");
+  assert.equal(signalOf(stillPaused, "flop:q"), "0", "暂停期间 q 不变");
 
   // ── 继续：从暂停处的状态接着跑，不重放也不丢步 ──────────────────────────────
   const resumed = await workspace.resume();
@@ -204,15 +261,15 @@ test("runs, pauses, resumes, and resets a clock-driven flip-flop on the real eng
   // 第 6 拍：clock 1 → 0，下降沿，q 仍然是暂停时的 0。
   const afterResume = await advance();
   assert.equal(afterResume.simulationStep, stepsBeforePause + 1);
-  assert.equal(signalOf(afterResume, "clock:out"), 0);
-  assert.equal(signalOf(afterResume, "flop:q"), 0);
+  assert.equal(signalOf(afterResume, "clock:out"), "0");
+  assert.equal(signalOf(afterResume, "flop:q"), "0");
 
   // ── 重置：运行状态回到已停止，运行时状态整份清空，Circuit 结构不动 ──────────
   const resetSnapshot = await workspace.reset();
   assert.equal(resetSnapshot.simulationState, "stopped");
   assert.equal(resetSnapshot.simulationStep, 0);
   assert.deepEqual(resetSnapshot.waveform, []);
-  assert.equal(signalOf(resetSnapshot, "clock:out"), 0, "Clock 回到 0");
+  assert.equal(signalOf(resetSnapshot, "clock:out"), "0", "Clock 回到 0");
   assert.equal(signalOf(resetSnapshot, "flop:q"), "X", "重置后 q 回到 X");
   assert.equal(signalOf(resetSnapshot, "probe:in"), "X");
   assert.equal(resetSnapshot.hasCircuit, true, "重置只清运行时状态，不改变 Circuit 结构");
@@ -225,8 +282,197 @@ test("runs, pauses, resumes, and resets a clock-driven flip-flop on the real eng
   // 重置之后的第一拍仍然是完整的上升沿：前值快照一并清空，不会凭空造出上升沿。
   const afterResetTick = await workspace.step();
   assert.equal(afterResetTick.simulationStep, 1);
-  assert.equal(signalOf(afterResetTick, "clock:out"), 1);
-  assert.equal(signalOf(afterResetTick, "flop:q"), 0, "重置后重新从 0 起跑，上升沿采到当前的 d = 0");
+  assert.equal(signalOf(afterResetTick, "clock:out"), "1");
+  assert.equal(signalOf(afterResetTick, "flop:q"), "0", "重置后重新从 0 起跑，上升沿采到当前的 d = 0");
+});
+
+/**
+ * 多位数据通路的端到端回归：真实 `circuit-engine` 二进制 + 真实 JSON Lines 协议 + 真实工作区运行循环。
+ *
+ * 这条通路覆盖 C++ 单测与前端假引擎都够不到的接缝：C++ 侧知道「拆线器按区间取位」，前端假引擎
+ * 知道「读数按 `${componentId}:${port}` 装进快照」，但只有把两者接起来才能证明一条 8 位总线真的
+ * 走完了「拆开 → 逐位求值 → 合回」。断言因此只落在端口读数上：`X1X0` 与 `XXXX` 的区别必须能从
+ * 外部看见，否则逐位化没有被测到。
+ */
+test("carries an unknown bit through a splitter, per-bit gates, and a merger on the real engine", { skip: engineAvailable() }, async (t) => {
+  const { EngineClient } = require_("../electron/engine-client.cjs") as {
+    EngineClient: new (enginePath: string) => ProtocolEngineClient;
+  };
+  const client = new EngineClient(enginePath);
+  t.after(() => client.close());
+
+  const scheduler = new FakeScheduler();
+  const workspace = createWorkspace(createEngineAdapter(client), { scheduler });
+
+  // ── 推送结构：拆线器与合线器没有内置定义，引擎必须原样接受前端给出的端口清单 ──────────
+  await workspace.checkEngine();
+  const loaded = await workspace.loadCircuit(busDocument);
+  const bindings: SimulationBindings | null = loaded.bindings;
+  assert.notEqual(bindings, null, "文档推送失败，引擎拒绝了这份多位结构");
+  assert.equal(Object.keys(bindings?.components ?? {}).length, busWidth + 4);
+  assert.equal(Object.keys(bindings?.connections ?? {}).length, busWidth * 2 + 2);
+  assert.equal(bindings?.componentKinds?.split, "splitter");
+  assert.equal(bindings?.componentKinds?.merge, "merger");
+  assert.deepEqual(loaded.ports.split, splitterPorts, "引擎回传的端口清单必须与送出的那一份一致");
+  assert.deepEqual(loaded.ports.merge, mergerPorts);
+
+  // ── 初始求值：输入全 0，逐位取反之后整条总线是全 1 ──────────────────────────────
+  assert.equal(loaded.snapshot.hasCircuit, true);
+  assert.equal(loaded.snapshot.simulationStep, 0, "推送后的首次稳定求值不是一次推进");
+  // 工作区快照只带输出端口与 Output 的接收端，因此总线在两端的读数由 `bus-in:out` 与
+  // `bus-out:in` 给出，中间每一级由它自己的输出端口给出。
+  assert.equal(signalOf(loaded.snapshot, "bus-in:out"), "00000000");
+  assert.equal(signalOf(loaded.snapshot, "split:out0"), "0");
+  assert.equal(signalOf(loaded.snapshot, "split:out7"), "0");
+  assert.equal(signalOf(loaded.snapshot, "merge:out"), "11111111");
+  assert.equal(signalOf(loaded.snapshot, "bus-out:in"), "11111111");
+
+  // ── 逐位设置：`setInputBit` 的下标从最高位起算，与画布上「MSB 在上」一致 ────────────
+  await workspace.setInputBit("bus-in", 0, "1");
+  await workspace.setInputBit("bus-in", 7, "1");
+  const withUnknown = await workspace.setInputBit("bus-in", 2, "X");
+
+  assert.equal(withUnknown.inputValues["bus-in"], "10X00001");
+  assert.equal(signalOf(withUnknown, "bus-in:out"), "10X00001");
+
+  // 只有拿到那一位的分支是 X：其余七条分支照旧是确定值。
+  assert.equal(signalOf(withUnknown, "split:out0"), "1");
+  assert.equal(signalOf(withUnknown, "split:out2"), "X", "第 5 位未知，落在 out2（[5:5]）上");
+  assert.equal(signalOf(withUnknown, "split:out7"), "1");
+
+  // 逐位门这一级：X 只污染它所在的那一位，其余七位照常取反。
+  const expectedAfterGates = ["0", "1", "X", "1", "1", "1", "1", "0"];
+  for (let index = 0; index < busWidth; index += 1) {
+    assert.equal(
+      signalOf(withUnknown, `inv${index}:out`),
+      expectedAfterGates[index],
+      `第 ${index} 位经过逐位门之后的读数`,
+    );
+  }
+
+  // 合线器把八位合回总线：结果既不是全 X，也不是被截断或被零扩展的值。
+  assert.equal(signalOf(withUnknown, "merge:out"), "01X11110");
+  assert.equal(signalOf(withUnknown, "bus-out:in"), "01X11110");
+  assert.notEqual(signalOf(withUnknown, "bus-out:in"), "XXXXXXXX", "一位未知不该让整条总线未知");
+
+  // 波形记录的是这一拍多位读数的完整逐位文本，而不是一个按信号名写死的字段。
+  const recorded = withUnknown.waveform.at(-1);
+  assert.notEqual(recorded, undefined);
+  assert.equal(recorded?.signals["bus-out:in"], "01X11110");
+
+  // ── 推进一拍：运行循环带回的多位读数必须与稳定求值一致 ─────────────────────────
+  const stepped = await workspace.step();
+  assert.equal(stepped.simulationStep, withUnknown.simulationStep + 1);
+  assert.equal(signalOf(stepped, "bus-out:in"), "01X11110", "组合电路推进一拍之后读数不变");
+  assert.equal(signalOf(stepped, "bus-in:out"), "10X00001");
+});
+
+/**
+ * 改位宽之后不匹配的 Connection 悬空并可重接。
+ *
+ * 这条只跑真实引擎与真实 JSON Lines 协议，不经过工作区：`set_port_width` 的入口在编辑器会话里，
+ * 工作区的公开接口没有改位宽这一项。断言落在只有引擎能回答的三件事上——改宽回报了哪些
+ * Connection 转为悬空、悬空连接真的不参与求值（接收端读全 X 而不是被截断的低位）、以及位宽重新
+ * 匹配之后**同一个 Connection 身份**原样复活。
+ */
+test("drops a mismatched connection when a bus width changes and brings it back when the widths match", { skip: engineAvailable() }, async (t) => {
+  const { EngineClient } = require_("../electron/engine-client.cjs") as {
+    EngineClient: new (enginePath: string) => ProtocolEngineClient;
+  };
+  const client = new EngineClient(enginePath);
+  t.after(() => client.close());
+
+  const busPorts: PortSpec[] = [{ name: "out", direction: "output", width: busWidth }];
+  const narrowedPorts: PortSpec[] = [{ name: "out", direction: "output", width: 4 }];
+
+  // 把 8 位总线接进拆线器：两端位宽相同，连接成立。
+  const inputId = expectResponseOf(
+    await client.request({ type: "add_component", kind: "input", ports: busPorts }),
+    "component_added",
+  ).componentId;
+  const splitterId = expectResponseOf(
+    await client.request({ type: "add_component", kind: "splitter", ports: splitterPorts }),
+    "component_added",
+  ).componentId;
+  const busWire = expectResponseOf(
+    await client.request({
+      type: "add_connection",
+      sourceComponentId: inputId,
+      sourcePort: "out",
+      targetComponentId: splitterId,
+      targetPort: "in",
+    }),
+    "connection_added",
+  );
+
+  await client.request({ type: "set_input", componentId: inputId, value: "10110010" });
+  await client.request({ type: "settle" });
+  assert.equal(
+    signalValueOf(await client.request({ type: "get_signal", componentId: splitterId, port: "in" })),
+    "10110010",
+  );
+
+  // ── 改宽：8 位 → 4 位。两端不再匹配，这条 Connection 转为悬空 ─────────────────────
+  const narrowed = expectResponseOf(
+    await client.request({ type: "set_port_width", componentId: inputId, ports: narrowedPorts }),
+    "port_width_set",
+  );
+  assert.deepEqual(
+    narrowed.danglingConnectionIds,
+    [busWire.connectionId],
+    "改宽必须回报本次转为悬空的 Connection 身份，调用方不必自己重算匹配规则",
+  );
+
+  // 长度校验读的是端口**当前**声明的位宽，不是一个全局常量。
+  const tooLong = await client.request({ type: "set_input", componentId: inputId, value: "10110010" });
+  assert.equal(tooLong.type, "error");
+  assert.equal(tooLong.type === "error" ? tooLong.code : null, "invalid_width");
+
+  await client.request({ type: "settle" });
+  // 悬空连接不参与仿真：接收端读到的是全 X，而不是被悄悄截断的低四位。
+  assert.equal(
+    signalValueOf(await client.request({ type: "get_signal", componentId: splitterId, port: "in" })),
+    "XXXXXXXX",
+  );
+
+  // 位宽不同连不起来，拒绝原因是 width_mismatch——不做零扩展也不做截断。
+  const secondSplitterId = expectResponseOf(
+    await client.request({ type: "add_component", kind: "splitter", ports: splitterPorts }),
+    "component_added",
+  ).componentId;
+  const rejected = await client.request({
+    type: "add_connection",
+    sourceComponentId: inputId,
+    sourcePort: "out",
+    targetComponentId: secondSplitterId,
+    targetPort: "in",
+  });
+  assert.equal(rejected.type, "error");
+  assert.equal(rejected.type === "error" ? rejected.code : null, "width_mismatch");
+
+  // ── 重接：位宽改回 8 位，同一条 Connection 身份原样复活 ──────────────────────────
+  const restored = expectResponseOf(
+    await client.request({ type: "set_port_width", componentId: inputId, ports: busPorts }),
+    "port_width_set",
+  );
+  assert.deepEqual(
+    restored.danglingConnectionIds,
+    [],
+    "重新匹配、恢复有效的连接不在差分里，因此不需要删掉重拉",
+  );
+
+  await client.request({ type: "set_input", componentId: inputId, value: "10110010" });
+  await client.request({ type: "settle" });
+  assert.equal(
+    signalValueOf(await client.request({ type: "get_signal", componentId: splitterId, port: "in" })),
+    "10110010",
+    "改宽回原样之后原来的 Connection 又参与仿真了",
+  );
+  assert.equal(
+    signalValueOf(await client.request({ type: "get_signal", componentId: splitterId, port: "out0" })),
+    "1",
+    "悬空期间不参与求值的连接恢复之后，逐位分支也照常拿到最高位",
+  );
 });
 
 function engineAvailable(): boolean | string {

@@ -16,12 +16,13 @@ import type { ConnectionDraftPort } from "../editor/connection-draft.ts";
 import {
   createWorkspace,
   type EngineAdapter,
+  type InputBit,
   type InputKey,
   type SimulationBindings,
   type WorkspaceSnapshot,
 } from "../workspace/index.ts";
 import { createEngineCallQueue } from "../workspace/engineQueue.ts";
-import type { ComponentKindName } from "@circuit-platform/protocol";
+import type { ComponentKindName, PortSpec } from "@circuit-platform/protocol";
 
 interface WorkspaceBinding {
   state: DeepReadonly<Ref<WorkspaceSnapshot>>;
@@ -38,7 +39,8 @@ interface WorkspaceBinding {
   step(): Promise<void>;
   /** 把仿真恢复到初始状态；Circuit 结构不变，运行状态回到已停止。 */
   reset(): Promise<void>;
-  toggleInput(key: InputKey): Promise<void>;
+  /** 设置某个 Input 某一位的取值；运行中只提交 `set_input`，停止或暂停时提交后立刻求值。 */
+  setInputBit(key: InputKey, index: number, bit: InputBit): Promise<void>;
   select(selection: EditorSelection): Promise<void>;
   moveComponent(componentId: EditorComponentId, position: Point): Promise<void>;
   editRoute(connectionId: string, route: readonly Point[]): Promise<void>;
@@ -52,6 +54,11 @@ interface WorkspaceBinding {
   deleteSelection(): Promise<void>;
   /** 删除指定 Component，供对象右键菜单直接复用稳定编辑器身份。 */
   deleteComponent(componentId: EditorComponentId): Promise<void>;
+  /**
+   * 整份替换一个元件的端口清单；改宽是一次可撤销的结构提交，排在共享的引擎调用队列里，
+   * 因此不会与推进交错。
+   */
+  setPortWidthCommand(componentId: EditorComponentId, ports: readonly PortSpec[]): Promise<void>;
   /** 删除指定 Connection 对应的 Wire，供对象右键菜单使用。 */
   deleteConnection(connectionId: string): Promise<void>;
   /** 请求显示清空确认；此步骤不会调用引擎。 */
@@ -74,7 +81,8 @@ interface WorkspaceBinding {
 }
 
 function toEditorBindings(bindings: SimulationBindings): EditorBindings {
-  return { components: bindings.components, connections: bindings.connections ?? {}, componentKinds: bindings.componentKinds };
+  // 端口清单一并转交：编辑器文档里的元件靠它拿到自己的端口几何，运行时要读哪些端口也由它推导。
+  return { components: bindings.components, connections: bindings.connections ?? {}, componentKinds: bindings.componentKinds, ports: bindings.ports };
 }
 
 /**
@@ -170,8 +178,8 @@ export function useWorkspace(): WorkspaceBinding {
     await reflect(() => workspace.reset());
   }
 
-  async function toggleInput(key: InputKey): Promise<void> {
-    await reflect(() => workspace.toggleInput(key));
+  async function setInputBit(key: InputKey, index: number, bit: InputBit): Promise<void> {
+    await reflect(() => workspace.setInputBit(key, index, bit));
   }
 
   async function dispatch(command: Parameters<EditorSession["dispatch"]>[0]): Promise<void> {
@@ -181,6 +189,11 @@ export function useWorkspace(): WorkspaceBinding {
     const result = await pending;
     editorState.value = result.snapshot;
     await refreshSimulationAfterBindingsChange();
+  }
+
+  /** 改宽走与其它结构提交同一条路径：先发命令，再按响应刷新编辑器与仿真。 */
+  async function setPortWidthCommand(componentId: EditorComponentId, ports: readonly PortSpec[]): Promise<void> {
+    await dispatch({ type: "set-port-width", componentId, ports });
   }
 
   /** 右键菜单直接复用 EditorSession 的 add-component 命令；成功才返回 true。 */
@@ -258,7 +271,7 @@ export function useWorkspace(): WorkspaceBinding {
     resume,
     step,
     reset,
-    toggleInput,
+    setInputBit,
     select: (selection) => dispatch({ type: "select", selection }),
     moveComponent: (componentId, position) => dispatch({ type: "move-component", componentId, position }),
     editRoute: (connectionId, route) => dispatch({ type: "edit-route", connectionId, route }),
@@ -269,6 +282,7 @@ export function useWorkspace(): WorkspaceBinding {
     deleteWaypoint: (connectionId, pointIndex) => dispatch({ type: "delete-waypoint", connectionId, pointIndex }),
     deleteSelection: () => dispatch({ type: "delete-selected" }),
     deleteComponent: (componentId) => dispatch({ type: "delete-component", componentId }),
+    setPortWidthCommand,
     deleteConnection: (connectionId) => dispatch({ type: "delete-connection", connectionId }),
     requestClear: () => dispatch({ type: "request-clear" }),
     confirmClear: () => dispatch({ type: "confirm-clear" }),

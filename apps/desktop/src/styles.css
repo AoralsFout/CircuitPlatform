@@ -213,16 +213,30 @@ button:disabled { cursor: not-allowed; }
 .wire-color--violet { --wire-color: var(--theme-wire-violet); }
 .wire-color--pink { --wire-color: var(--theme-wire-pink); }
 .input-settings-list { display: grid; gap: 7px; padding: 0 9px; }
-.input-setting { display: grid; grid-template-columns: 32px 1fr auto; gap: 10px; align-items: center; min-height: 57px; border: 1px solid var(--color-border); padding: 8px; color: var(--color-text-muted); background: color-mix(in srgb, var(--color-bg) 35%, transparent); cursor: pointer; text-align: left; }
-.input-setting:hover:not(:disabled) { border-color: var(--color-border-strong); background: var(--color-surface); }
+/* 一个 Input 元件：元件标签在位按钮组上方，两者共用同一套视觉，1 位与多位只有按钮个数不同。 */
+.input-setting { display: grid; gap: 7px; border: 1px solid var(--color-border); padding: 8px; color: var(--color-text-muted); background: color-mix(in srgb, var(--color-bg) 35%, transparent); }
+.input-setting:hover { border-color: var(--color-border-strong); background: var(--color-surface); }
 .input-setting--on { border-color: color-mix(in srgb, var(--color-signal-high) 55%, transparent); background: color-mix(in srgb, var(--color-signal-high) 9%, transparent); }
-.input-setting:disabled { cursor: not-allowed; opacity: .55; }
+.input-setting-head { display: grid; grid-template-columns: 32px 1fr auto auto; gap: 10px; align-items: center; }
 .input-setting-id { display: grid; width: 30px; height: 30px; place-items: center; border: 1px solid currentColor; color: var(--color-text-faint); font-family: var(--font-data); font-size: 10px; }
 .input-setting--on .input-setting-id { color: var(--color-signal-high); }
 .input-setting-copy strong, .input-setting-copy small { display: block; }
 .input-setting-copy strong { color: var(--color-text); font-size: 12px; }
 .input-setting-copy small { margin-top: 4px; color: var(--color-text-faint); font-family: var(--font-data); font-size: 8px; }
-.input-setting-value { color: var(--color-signal-high); font-family: var(--font-data); font-size: 17px; }
+/* 多位读数不换行会把侧栏撑开，因此允许在任意字符处折行。 */
+.input-setting-value { color: var(--color-signal-high); font-family: var(--font-data); font-size: 13px; line-height: 1.4; word-break: break-all; }
+.input-setting-disclosure { display: grid; width: 20px; height: 20px; place-items: center; border: 1px solid var(--color-border); color: var(--color-text-muted); background: transparent; cursor: pointer; font-size: 10px; line-height: 1; }
+.input-setting-disclosure:hover { border-color: var(--color-border-strong); color: var(--color-text); }
+/* 每行固定八列，方形由 aspect-ratio 保证：位宽小的 Input 只占前几列，按钮本身的尺寸与多位的一致。 */
+.input-bit-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 4px; }
+.input-bit { display: grid; aspect-ratio: 1; place-items: center; border: 1px solid var(--color-border); color: var(--color-text-muted); background: color-mix(in srgb, var(--color-bg) 35%, transparent); cursor: pointer; font-family: var(--font-data); font-size: 12px; }
+.input-bit:hover:not(:disabled) { border-color: var(--color-border-strong); color: var(--color-text); }
+.input-bit:disabled { cursor: not-allowed; opacity: .55; }
+.input-bit--high { border-color: color-mix(in srgb, var(--color-signal-high) 55%, transparent); color: var(--color-signal-high); background: color-mix(in srgb, var(--color-signal-high) 12%, transparent); }
+.input-bit--low { color: var(--color-signal-low); }
+/* 未知位用虚线边框：它既不是高也不是低，与画布上的未知信号是同一个含义。 */
+.input-bit--unknown { border-style: dashed; color: var(--color-signal-unknown); }
+.input-bit:focus-visible { outline: 1px solid var(--color-signal-high); outline-offset: 1px; }
 .layer-list { display: grid; gap: 2px; padding: 2px 9px; }
 .layer-list button { display: flex; align-items: center; gap: 9px; min-height: 35px; border: 1px solid transparent; padding: 6px; color: var(--color-text-muted); background: transparent; cursor: pointer; font-size: 11px; text-align: left; }
 .layer-list button:hover, .layer-list .layer-item--active { border-color: var(--color-border); background: var(--color-surface); color: var(--color-text); }
@@ -240,6 +254,11 @@ button:disabled { cursor: not-allowed; }
 .inspector-details { display: grid; gap: 4px; margin-top: 8px; color: var(--color-text-faint); font-family: var(--font-data); font-size: 8px; line-height: 1.45; }
 .inspector-copy { display: grid; gap: 3px; min-width: 170px; color: var(--color-text-muted); font-size: 10px; line-height: 1.45; }
 .inspector-copy p { margin: 0; }
+.inspector-attributes { display: grid; gap: 4px; margin-bottom: 8px; }
+.inspector-attribute { display: flex; align-items: center; gap: 8px; color: var(--color-text-muted); font-size: 9px; }
+.inspector-attribute input { width: 64px; padding: 2px 6px; border: 1px solid var(--color-border); border-radius: 4px; background: var(--color-surface); color: var(--color-text); font-family: var(--font-data); font-size: 11px; }
+/* 位区间列表是一整行文本，比位宽那个数字框长得多；窄框会把正在编辑的那份清单截掉大半。 */
+.inspector-attribute input[type="text"] { width: 260px; }
 .inspector-port-list { display: grid; gap: 4px; min-width: 190px; }
 .inspector-port-row { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; align-items: center; color: var(--color-text-muted); font-size: 9px; }
 .inspector-port-row strong { font-family: var(--font-data); font-size: 12px; }
@@ -465,7 +484,8 @@ button:disabled { cursor: not-allowed; }
 .bottom-content--waveform { padding-top: 10px; overflow: auto; }
 .waveform-meta { display: flex; justify-content: space-between; margin-bottom: 9px; color: var(--color-text-faint); font-family: var(--font-data); font-size: 8px; }
 .waveform-grid { overflow-x: auto; font-family: var(--font-data); font-size: 9px; }
-.waveform-axis, .waveform-row { display: grid; grid-template-columns: 80px repeat(var(--waveform-steps, 1), minmax(38px, 1fr)); min-width: 340px; }
+/* 列宽下限取内容宽度：多条位的二进制读数（`1010`）逐位可读，不会被挤到相邻单元里；位宽为 1 时下限仍由 1fr 与行宽决定，与改造前一致。 */
+.waveform-axis, .waveform-row { display: grid; grid-template-columns: 80px repeat(var(--waveform-steps, 1), minmax(min-content, 1fr)); min-width: 340px; }
 .waveform-axis { color: var(--color-text-faint); }
 .waveform-axis span:not(:first-child) { text-align: center; }
 .waveform-row { min-height: 25px; border-top: 1px solid var(--color-border); }

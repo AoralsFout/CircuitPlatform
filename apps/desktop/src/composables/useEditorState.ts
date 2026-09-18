@@ -1,5 +1,5 @@
 import { computed, ref, watch, type DeepReadonly, type Ref } from "vue";
-import type { ComponentKindName, Signal } from "@circuit-platform/protocol";
+import type { BitRange, ComponentKindName, PortSpec, Signal } from "@circuit-platform/protocol";
 import {
   readDefaultWireColor,
   writeDefaultWireColor,
@@ -9,9 +9,10 @@ import {
   type EditorSnapshot,
   type Point,
   type WireColorId,
-} from "../editor";
-import type { InputKey, WorkspaceSnapshot } from "../workspace";
+} from "../editor/index.ts";
+import { coerceInputValue, inputBitsOf, type InputBit, type InputKey, type InputValue, type WorkspaceSnapshot } from "../workspace/index.ts";
 import {
+  componentGeometryFor,
   createComponentDefinitionRegistry,
   createCanvasSceneProjector,
   createFrameCoalescer,
@@ -24,12 +25,14 @@ import {
   setViewportZoomAt,
   type InteractionState,
   type ViewportState,
-} from "../canvas";
+} from "../canvas/index.ts";
 import { createInspectorModel, type InspectorModel } from "../editor/inspector.ts";
+import { defaultPortsFor, portsWithBitRanges } from "../editor/bus-ports.ts";
+import { createWaveformRows, type WaveformRow } from "../editor/waveform.ts";
 import {
   readRecentComponentKinds,
   writeRecentComponentKind,
-} from "../editor/component-menu";
+} from "../editor/component-menu.ts";
 import { positionFromPlacementCenter } from "../editor/placement.ts";
 import {
   connectionDraftRoute,
@@ -42,18 +45,30 @@ import { createSimulationSnapshot } from "../editor/simulation.ts";
 
 export type RailPage = "components" | "inputs" | "layers" | "settings";
 export type BottomTab = "inspector" | "outputs" | "waveform";
-export type WaveformKey = "a" | "b" | "output";
-
-export interface WaveformRow {
-  label: string;
-  key: WaveformKey;
+/** 位按钮组里的一位：它属于哪个 Input、在取值文本里的位置，以及当前取值。 */
+export interface InputBitControl {
+  /** 该位在取值文本里的下标：0 是最左、也是最高位；组内按它排序与导航。 */
+  index: number;
+  /** 该位的位号（`[N-1:0]` 记法）；用于无障碍标签，用户据此知道自己在拨哪一位。 */
+  place: number;
+  value: InputBit;
 }
 
-const waveformRows: readonly WaveformRow[] = [
-  { label: "输入 A", key: "a" },
-  { label: "输入 B", key: "b" },
-  { label: "输出", key: "output" },
-];
+/** 输入设置里的一个 Input 元件：元件标签、完整多位读数，以及它按位展开的方形按钮。 */
+export interface InputControl {
+  key: InputKey;
+  index: number;
+  label: string;
+  /** 该 Input 当前的完整多位取值，长度等于 `width`；按钮组与读数共用同一个值。 */
+  value: InputValue;
+  /** 端口声明的位宽；1 位与多位共用同一套视觉，只有按钮个数不同。 */
+  width: number;
+  /** 按位展开的按钮，从最高位到最低位排列，渲染时每行八列。 */
+  bits: readonly InputBitControl[];
+  componentId: string | null;
+}
+
+export type { WaveformRow };
 
 /**
  * 管理只属于编辑器界面的选择、布局与缩放状态，并从工作区快照派生展示数据。
@@ -70,6 +85,7 @@ export function useEditorState(
   updatePlacement?: (center: Point, altKey?: boolean) => Promise<void>,
   editRoute: (connectionId: EditorConnectionId, route: readonly Point[]) => Promise<void> = async () => undefined,
   createConnection: (left: ConnectionDraftPort, right: ConnectionDraftPort, route?: readonly Point[], connectionId?: string, color?: WireColorId) => Promise<{ ok: boolean; error?: string }> = async () => ({ ok: false }),
+  setPortWidthCommand: (componentId: EditorComponentId, ports: readonly PortSpec[]) => Promise<void> = async () => undefined,
 ) {
   const showDetails = ref(false);
   const showSidebar = ref(true);
@@ -147,7 +163,7 @@ export function useEditorState(
   const canvasScene = computed(() => {
     const snapshot = editorState.value;
     if (!snapshot) return emptyCanvasScene();
-    const simulation = createSimulationSnapshot(snapshot, registry, {
+    const simulation = createSimulationSnapshot(snapshot, {
       inputA: workspaceState.value.inputA,
       inputB: workspaceState.value.inputB,
       inputValues: workspaceState.value.inputValues,
@@ -176,6 +192,10 @@ export function useEditorState(
     }
     const pending = editorState.value.pendingPlacement;
     const definition = pending ? registry.get(pending.kind) : undefined;
+    // 放置预览的盒子与放下去之后的节点必须是同一份尺寸：端口数量由数据决定的元件高度按端口数
+    // 增长，用展示定义里那个固定尺寸画出来的预览会比真节点矮一大截，点下去就像跳了一下。
+    const pendingPorts = pending ? defaultPortsFor(pending.kind) ?? [] : [];
+    const pendingSize = definition ? componentGeometryFor(definition, pendingPorts).size : undefined;
     return {
       focusedId: focusedId.value,
       draggingComponentId: draggingComponentId.value,
@@ -183,8 +203,8 @@ export function useEditorState(
       connectionDraft: connectionDraft.value.origin ? connectionDraftRoute(connectionDraft.value) : null,
       connectionDraftError: connectionDraft.value.error?.message ?? null,
       routeEditPreview: routeEditPreview.value,
-      pendingPlacement: pending && pending.center && definition
-        ? { kind: pending.kind, position: positionFromPlacementCenter(pending.center, definition.size, pending.altKey), size: definition.size, error: editorState.value.error?.message ?? null }
+      pendingPlacement: pending && pending.center && pendingSize
+        ? { kind: pending.kind, position: positionFromPlacementCenter(pending.center, pendingSize, pending.altKey), size: pendingSize, error: editorState.value.error?.message ?? null }
         : null,
     };
   });
@@ -285,13 +305,30 @@ export function useEditorState(
     const selection = editorState.value?.selection;
     return selection?.kind === "connection" ? selection.id : null;
   });
-  const inputControls = computed(() => canvasScene.value.nodes.filter((node) => node.kind === "input").map((node, index) => ({
-    key: node.id as InputKey,
-    index: index + 1,
-    label: node.displayName,
-    value: (workspaceState.value.inputValues[node.id] ?? (index === 0 ? workspaceState.value.inputA : index === 1 ? workspaceState.value.inputB : 0)) as 0 | 1,
-    componentId: node.id,
-  })));
+  /**
+   * 输入设置的展示模型：每个 Input 元件一个条目，取值按端口位宽展开成逐位按钮。
+   *
+   * 位宽来自画布节点的端口清单（也就是引擎回传的那一份），不来自任何前端内置定义。取值先按
+   * 该位宽对齐再展开，因此改宽之后、下一次求值之前，这里也不会出现长度对不上的读数或按钮数。
+   */
+  const inputControls = computed<readonly InputControl[]>(() => canvasScene.value.nodes.filter((node) => node.kind === "input").map((node, index) => {
+    const width = node.ports.find((port) => port.direction === "output")?.width ?? 1;
+    const value = coerceInputValue(
+      workspaceState.value.inputValues[node.id] ?? (index === 0 ? workspaceState.value.inputA : index === 1 ? workspaceState.value.inputB : undefined),
+      width,
+    );
+    return {
+      key: node.id as InputKey,
+      index: index + 1,
+      label: node.displayName,
+      value,
+      width,
+      bits: inputBitsOf(value).map((bit, bitIndex) => ({ index: bitIndex, place: width - 1 - bitIndex, value: bit })),
+      componentId: node.id,
+    };
+  }));
+  // 波形行由场景投影生成，因此与画布指的是同一批元件：增删元件后行跟着变。
+  const waveformRows = computed<readonly WaveformRow[]>(() => createWaveformRows(canvasScene.value.nodes));
   // 输出面板读取文档中全部 Output 元件，每个元件显示自己求值后的信号。
   const outputs = computed(() => canvasScene.value.nodes.filter((node) => node.kind === "output").map((node) => ({
     key: node.id,
@@ -305,6 +342,49 @@ export function useEditorState(
     if (workspaceState.value.engineState === "error") return "连接失败";
     return "连接中";
   });
+  /**
+   * 提交一次位宽编辑。
+   *
+   * 载荷是**整份端口清单**：协议里的改宽是整体替换，因此这里从当前场景取回该元件的端口清单，
+   * 只换掉目标端口的位宽再提交。编辑器因此不必在提交前重算匹配规则，引擎也不必接受一种
+   * 「按单端口下发」的形状。
+   * @param componentId 要改的元件。
+   * @param portName 要改位宽的端口。
+   * @param width 新的位宽。
+   */
+  function setPortWidth(componentId: EditorComponentId, portName: string, width: number): void {
+    const node = canvasScene.value.nodes.find((candidate) => candidate.id === componentId);
+    if (!node) return;
+    const ports = node.ports.map((port) => ({
+      name: port.id,
+      direction: port.direction,
+      width: port.id === portName ? width : port.width,
+      ...(port.bitRange ? { bitRange: { ...port.bitRange } } : {}),
+    }));
+    void setPortWidthCommand(componentId, ports);
+  }
+
+  /**
+   * 提交一次位区间列表编辑。
+   *
+   * 与改位宽走同一条结构提交：载荷是整份端口清单，分支数量、名字与位宽都按新列表重算，宿主
+   * 总线端口原样保留。覆盖规则由引擎判定，这里不做第二份——越界、重叠、漏位各自带着可展示的
+   * 原因回来，而模型在提交成功之前不会变，因此失败时用户看到的仍是提交前的列表。
+   * @param componentId 要改的元件。
+   * @param ranges 新的位区间列表，从最高位段到最低位段。
+   */
+  function setBitRanges(componentId: EditorComponentId, ranges: readonly BitRange[]): void {
+    const node = canvasScene.value.nodes.find((candidate) => candidate.id === componentId);
+    if (!node) return;
+    const ports = node.ports.map((port) => ({
+      name: port.id,
+      direction: port.direction,
+      width: port.width,
+      ...(port.bitRange ? { bitRange: { ...port.bitRange } } : {}),
+    }));
+    void setPortWidthCommand(componentId, portsWithBitRanges(node.kind, ports, ranges));
+  }
+
   const selectedComponent = computed(() => canvasScene.value.nodes.find((node) => node.id === selectedComponentId.value));
   const selectedComponentName = computed(() => selectedConnection.value ? `Wire ${selectedConnection.value}` : selectedComponent.value?.displayName ?? "未选择");
   const selectedComponentValue = computed<Signal>(() => selectedConnection.value ? canvasScene.value.wires.find((wire) => wire.id === selectedConnection.value)?.signal ?? "X" : selectedComponent.value?.ports.find((port) => port.direction === "output")?.signal ?? selectedComponent.value?.ports[0]?.signal ?? "X");
@@ -436,6 +516,8 @@ export function useEditorState(
     rememberComponentKind,
     selectComponent,
     selectConnection,
+    setPortWidth,
+    setBitRanges,
     selectRailPage,
     adjustZoom,
     fitViewport,

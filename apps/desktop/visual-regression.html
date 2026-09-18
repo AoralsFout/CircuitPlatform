@@ -16,34 +16,71 @@
       let tickStep = 0;
       let pendingTick = null;
       const componentKinds = new Map();
-      const visualOutputPorts = { input: "out", clock: "out", not: "out", and: "out", or: "out", nand: "out", nor: "out", xor: "out", xnor: "out", d_flip_flop: "q" };
+      const componentPorts = new Map();
+      // 夹具扮演的就是引擎：真实引擎在 add_component 省略端口清单时回退到内置定义并把实际清单回传，
+      // 这里照做。前端源码里没有第二份端口定义，位宽的唯一权威来源是引擎。
+      const bit = (name, direction) => ({ name, direction, width: 1 });
+      const visualPorts = {
+        input: [bit("out", "output")],
+        output: [bit("in", "input")],
+        not: [bit("in", "input"), bit("out", "output")],
+        and: [bit("in1", "input"), bit("in2", "input"), bit("out", "output")],
+        or: [bit("in1", "input"), bit("in2", "input"), bit("out", "output")],
+        nand: [bit("in1", "input"), bit("in2", "input"), bit("out", "output")],
+        nor: [bit("in1", "input"), bit("in2", "input"), bit("out", "output")],
+        xor: [bit("in1", "input"), bit("in2", "input"), bit("out", "output")],
+        xnor: [bit("in1", "input"), bit("in2", "input"), bit("out", "output")],
+        clock: [bit("out", "output")],
+        d_flip_flop: [bit("d", "input"), bit("clock", "input"), bit("q", "output")],
+      };
       const response = (value) => Promise.resolve(value);
       window.circuitPlatform = {
         checkEngine: () => response({ status: "ok", engine: "Visual test engine" }),
-        addComponent: (kind) => {
+        addComponent: (kind, ports) => {
           if (failAdds) return response({ type: "error", requestId: "visual", code: "visual_add_failed", message: "视觉回归模拟：元件提交失败" });
           const componentId = nextComponentId++;
+          // 记下回传的那一份清单：真实引擎的 `component_added` 回传的是它实际建立的端口，
+          // 拆线器与合线器的清单因此也在这里进入夹具，后面的读数才拿得到正确的位宽。
+          const effective = ports ?? visualPorts[kind] ?? [];
           componentKinds.set(componentId, kind);
-          return response({ type: "component_added", requestId: "visual", componentId });
+          componentPorts.set(componentId, effective);
+          return response({ type: "component_added", requestId: "visual", componentId, ports: effective });
+        },
+        // 改宽整体替换端口清单；夹具只需要协议形状正确，匹配规则由引擎测试负责。
+        setPortWidth: (componentId, ports) => {
+          componentPorts.set(componentId, ports);
+          return response({ type: "port_width_set", requestId: "visual", componentId, ports, danglingConnectionIds: [] });
         },
         addConnection: () => response({ type: "connection_added", requestId: "visual", connectionId: nextConnectionId++ }),
         removeComponent: (componentId) => {
           componentKinds.delete(componentId);
+          componentPorts.delete(componentId);
           return response({ type: "component_removed", requestId: "visual", componentId });
         },
         removeConnection: (connectionId) => response({ type: "connection_removed", requestId: "visual", connectionId }),
         setInput: () => response({ type: "input_set", requestId: "visual" }),
         settle: () => response({ type: "settled", requestId: "visual", status: "ok" }),
-        getSignal: () => response({ type: "signal_result", requestId: "visual", value: "X" }),
+        // 读数的长度必须等于端口位宽——真实引擎不会返回长度不对的值。位宽为 1 时仍然给 "X"，
+        // 既有状态的画面因此不因为多位电路进来而改变；更宽的端口给出一串二进制文本，
+        // 多位信号在画布上因此以 `1010` 出现，而不是一整条 X。
+        getSignal: (componentId, port) => {
+          const spec = (componentPorts.get(componentId) ?? []).find((candidate) => candidate.name === port);
+          const width = spec?.width ?? 1;
+          const value = width <= 1 ? "X" : "10".repeat(Math.ceil(width / 2)).slice(0, width);
+          return response({ type: "signal_result", requestId: "visual", value });
+        },
         // 连续运行会反复发 tick；这里只需让每个 tick 带回一份快照，语义仍由引擎测试负责。
         // 每一拍都先挂起、由截图脚本显式放行：运行态与暂停态的画面因此不会因为「捕获时刻差了半拍」而变，
         // 基线仍然可比。放行入口是 `window.__visualAdvanceTick()`。
         tick: () => new Promise((resolve) => {
           pendingTick = () => {
             tickStep += 1;
+            // 输出端口从元件自己的端口清单里取，与真实引擎一样不再查一张按类型写死的端口名表。
             const signals = [...componentKinds].flatMap(([componentId, kind]) => {
-              const outputPort = visualOutputPorts[kind];
-              return outputPort === undefined ? [] : [{ componentId, port: outputPort, value: 0 }];
+              const ports = componentPorts.get(componentId) ?? visualPorts[kind] ?? [];
+              return ports
+                .filter((port) => port.direction === "output")
+                .map((port) => ({ componentId, port: port.name, value: "0".repeat(port.width) }));
             });
             resolve({ type: "ticked", requestId: "visual", step: tickStep, signals });
           };
@@ -105,6 +142,72 @@
         await settle(60);
       };
       const runControl = (title) => document.querySelector(`[title="${title}"]`);
+      const railButton = (label) => document.querySelector(`[aria-label="${label}"]`);
+      const inspectorTab = () => [...document.querySelectorAll(".bottom-tabs button")]
+        .find((button) => button.textContent?.trim().startsWith("检查器"));
+      /**
+       * 在检查器里把选中元件的位宽改成新值。
+       *
+       * 与用户的操作路径完全一致：选中元件、切到「检查器」页签、在第一个可编辑属性的数字框里
+       * 改值再提交。位宽是检查器的第一个可编辑属性，改完的清单由引擎回传，前端不内置副本。
+       */
+      const setSelectedWidth = async (node, width) => {
+        click(node);
+        await settle(60);
+        click(inspectorTab());
+        await settle(60);
+        const input = await waitFor('.inspector-attributes input[type="number"]');
+        if (!input) return;
+        input.value = String(width);
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+        await settle(80);
+      };
+      /**
+       * 等位按钮可用。
+       *
+       * 位按钮由 `canToggleInput` 决定是否禁用，而它要求引擎绑定已经就绪；画布节点是本地投影，
+       * 出现得比引擎绑定早。直接点下去会落在禁用按钮上，静默什么都不做——画面于是停在默认值上，
+       * 而截图脚本不会报错。
+       */
+      const waitForEnabledBit = async (index) => {
+        for (let attempt = 0; attempt < 200; attempt += 1) {
+          const button = [...document.querySelectorAll(".input-bit")][index];
+          if (button && !button.disabled) return button;
+          await settle(25);
+        }
+        return null;
+      };
+      /** 拨动「输入设置」里第一个 Input 的第 `index` 位：左键切换 0/1，右键设为 X。 */
+      const setInputBitByClick = async (index, unknown) => {
+        const button = await waitForEnabledBit(index);
+        if (!button) return;
+        if (unknown) button.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+        else click(button);
+        await settle(60);
+      };
+      /**
+       * 从元件库搭一条多位通路：输入(8) → 拆线器 → 合线器 → 输出(8)。
+       *
+       * Input 与 Output 放下时是 1 位的（内置定义的位宽都是 1），8 位由检查器改出来；
+       * 拆线器与合线器的端口清单是数据驱动的，放下就是默认的「8 位拆成八条 1 位分支」。
+       */
+      const buildBusCircuit = async () => {
+        click(document.querySelector('[aria-label="清空画布"]'));
+        await waitFor(".confirmation-dialog");
+        click(document.querySelector(".confirmation-dialog button:last-child"));
+        await settle(80);
+        await dropFromLibrary("拆线器", 0.4, 0.34);
+        await dropFromLibrary("输入", 0.12, 0.3);
+        await dropFromLibrary("合线器", 0.66, 0.34);
+        await dropFromLibrary("输出", 0.9, 0.46);
+        if (nodeByKind("INPUT")) await setSelectedWidth(nodeByKind("INPUT"), 8);
+        if (nodeByKind("OUTPUT")) await setSelectedWidth(nodeByKind("OUTPUT"), 8);
+        const splitterNode = nodeByKind("SPLITTER");
+        const mergerNode = nodeByKind("MERGER");
+        if (nodeByKind("INPUT") && splitterNode) await connectPorts(nodeByKind("INPUT"), "out", splitterNode, "in");
+        if (splitterNode && mergerNode) await connectPorts(splitterNode, "out0", mergerNode, "in0");
+        if (mergerNode && nodeByKind("OUTPUT")) await connectPorts(mergerNode, "out", nodeByKind("OUTPUT"), "in");
+      };
       /** 放行已经挂起的那几拍；连续运行仍由工作区自己排定，这里只决定每一拍何时落地。 */
       const advanceTicks = async (count) => {
         for (let index = 0; index < count; index += 1) {
@@ -141,6 +244,70 @@
           click(document.querySelector('[aria-label="清空画布"]'));
           await waitFor(".confirmation-dialog");
           click(document.querySelector(".confirmation-dialog button:last-child"));
+        }
+        if (state === "bus-canvas") {
+          // 画布上的位区间标注（`out[7:0]`）与逐位二进制文本（`10X00000`）。
+          // 激励由「输入设置」里的位按钮真实拨出来，画布读到的就是那次编辑的结果。
+          await buildBusCircuit();
+          click(railButton("输入设置"));
+          await settle(60);
+          await setInputBitByClick(0, false);
+          await setInputBitByClick(2, true);
+          click(railButton("元件库"));
+          await settle(60);
+        }
+        if (state === "bus-inspector") {
+          // 检查器把位宽作为第一个可编辑属性：放下一个默认 1 位的 Input，再把它改成 8 位。
+          click(document.querySelector('[aria-label="清空画布"]'));
+          await waitFor(".confirmation-dialog");
+          click(document.querySelector(".confirmation-dialog button:last-child"));
+          await settle(80);
+          await dropFromLibrary("输入", 0.4, 0.45);
+          await setSelectedWidth(nodeByKind("INPUT"), 8);
+        }
+        if (state === "bus-ranges") {
+          // 拆线器的位区间列表同样在检查器里编辑；提交后两条分支变成 `out0[7:4]` 与 `out1[3:0]`。
+          click(document.querySelector('[aria-label="清空画布"]'));
+          await waitFor(".confirmation-dialog");
+          click(document.querySelector(".confirmation-dialog button:last-child"));
+          await settle(80);
+          await dropFromLibrary("拆线器", 0.45, 0.45);
+          click(nodeByKind("SPLITTER"));
+          await settle(60);
+          click(inspectorTab());
+          await settle(60);
+          const ranges = await waitFor('.inspector-attributes input[type="text"]');
+          if (ranges) {
+            ranges.value = "7:4, 3:0";
+            ranges.dispatchEvent(new Event("change", { bubbles: true }));
+            await settle(80);
+          }
+        }
+        if (state === "bus-bits-expanded" || state === "bus-bits-collapsed") {
+          // 按位按钮组：8 位 Input 每行八列，展开与收起都在这里。
+          await buildBusCircuit();
+          click(railButton("输入设置"));
+          await settle(60);
+          await setInputBitByClick(1, false);
+          await setInputBitByClick(3, true);
+          if (state === "bus-bits-collapsed") {
+            click(await waitFor(".input-setting-disclosure"));
+            await settle(60);
+          }
+        }
+        if (state === "bus-bit-single") {
+          // 1 位 Input 与 8 位用同一套视觉：同样是方形按钮，只是每组只有一个。
+          click(railButton("输入设置"));
+          await settle(60);
+          await setInputBitByClick(0, false);
+        }
+        if (state === "bus-bit-space") {
+          // 焦点落在位按钮上的 Space。这是**输入设置**作用域里的按键（ADR 0012 的键位表把它
+          // 登记为「切换聚焦位的 0 / 1」），与画布的「布线草稿中切换轴向」同名不同义，因此
+          // 必须按焦点所在的作用域分派。夹具只把状态摆好，那一击由探针用真实输入发出。
+          await buildBusCircuit();
+          click(railButton("输入设置"));
+          await settle(60);
         }
         if (state === "running" || state === "paused") {
           // 先清空画布，再从元件库搭出 Clock 驱动 D Flip-Flop，最后按「开始」。

@@ -1,15 +1,31 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createCanvasSceneProjector, createComponentDefinitionRegistry, projectCanvasScene } from "../src/canvas/index.ts";
-import type { EditorSnapshot } from "../src/editor/index.ts";
+import type { ComponentKindName, PortSpec } from "@circuit-platform/protocol";
+import {
+  circuitPortLabel,
+  componentGeometryFor,
+  createCanvasSceneProjector,
+  createComponentDefinitionRegistry,
+  portLayoutFor,
+  projectCanvasScene,
+  type ComponentDefinition,
+} from "../src/canvas/index.ts";
+import type { EditorComponent, EditorSnapshot, Point } from "../src/editor/index.ts";
+import { defaultPortsFor } from "../src/editor/bus-ports.ts";
+import { BUILT_IN_PORTS } from "./fake-ports.ts";
+
+/** 给一个元件补上内置端口清单，模拟 `component_added` 回传的那一份。 */
+function withPorts(component: EditorComponent, ports: readonly PortSpec[]): EditorComponent {
+  return { ...component, ports };
+}
 
 function snapshot(): EditorSnapshot {
   return {
     document: {
       components: [
-        { id: "source-17", kind: "input", displayName: "自定义输入", position: { x: 32, y: 48 }, lifecycle: "active" },
-        { id: "or-99", kind: "or", displayName: "OR 99", position: { x: 320, y: 80 }, lifecycle: "active" },
-        { id: "sink-4", kind: "output", displayName: "自定义输出", position: { x: 600, y: 100 }, lifecycle: "active" },
+        { id: "source-17", kind: "input", displayName: "自定义输入", position: { x: 32, y: 48 }, lifecycle: "active", ports: BUILT_IN_PORTS.input },
+        { id: "or-99", kind: "or", displayName: "OR 99", position: { x: 320, y: 80 }, lifecycle: "active", ports: BUILT_IN_PORTS.or },
+        { id: "sink-4", kind: "output", displayName: "自定义输出", position: { x: 600, y: 100 }, lifecycle: "active", ports: BUILT_IN_PORTS.output },
       ],
       connections: [{
         id: "connection-88",
@@ -29,12 +45,13 @@ function snapshot(): EditorSnapshot {
   };
 }
 
-test("registry exposes complete display definitions and searchable aliases", () => {
+test("registry exposes display metadata without carrying a port list", () => {
   const registry = createComponentDefinitionRegistry();
   const and = registry.get("and");
   assert.equal(and?.category, "logic");
-  assert.equal(and?.ports.length, 3);
   assert.equal(and?.available, true);
+  // 端口从哪来、有多宽都由引擎回传的端口清单决定；展示定义不再声明一份无人校验的副本。
+  assert.equal(Object.hasOwn(and ?? {}, "ports"), false);
   assert.equal(registry.search("与门").some((definition) => definition.kind === "and"), true);
   // Clock 已经可以添加，描述与「每推进一次翻转一次」的真实行为一致。
   assert.equal(registry.get("clock")?.available, true);
@@ -46,14 +63,119 @@ test("registry exposes complete display definitions and searchable aliases", () 
   assert.match(registry.get("d_flip_flop")?.description ?? "", /上升沿/);
 });
 
-/** 端口 id 原样发给引擎，因此展示定义的时钟端口必须与引擎一致地叫 `clock`。 */
-test("d flip-flop exposes the engine clock port name so a connection can be created", () => {
+/** 展示布局按引擎端口名索引，因此 `clock` 这个端口名在两边必须一致。 */
+test("d flip-flop looks up its layout by the engine clock port name", () => {
   const registry = createComponentDefinitionRegistry();
-  const flipFlop = registry.get("d_flip_flop");
-  assert.deepEqual(flipFlop?.ports.map((port) => port.id), ["d", "clock", "q"]);
-  assert.deepEqual(flipFlop?.ports.map((port) => port.direction), ["input", "input", "output"]);
-  // `CLK` 只是显示标签，与发给引擎的端口 id 分开。
-  assert.equal(flipFlop?.ports.find((port) => port.id === "clock")?.name, "CLK");
+  const definition = registry.get("d_flip_flop") as ComponentDefinition;
+  const ports = BUILT_IN_PORTS.d_flip_flop;
+  assert.deepEqual(ports.map((port) => port.name), ["d", "clock", "q"]);
+  assert.deepEqual(ports.map((port) => port.direction), ["input", "input", "output"]);
+  // `CLK` 只是显示标签，与发给引擎的端口名分开。
+  const geometry = componentGeometryFor(definition, ports);
+  assert.equal(portLayoutFor(definition, "clock", "input", 1, 2, geometry).label, "CLK");
+  assert.deepEqual(portLayoutFor(definition, "clock", "input", 1, 2, geometry).offset, { x: 0, y: 54 });
+});
+
+/**
+ * 通用排布规则必须复现既有元件的每一个端口坐标，否则改宽这条改造就会顺手改掉画布外观。
+ * 期望值逐项抄自本票之前展示定义里写死的那份坐标，因此这是一条回归基线而不只是自洽断言。
+ */
+test("the layout rule reproduces every built-in component's existing coordinates", () => {
+  const registry = createComponentDefinitionRegistry();
+  const expected: Record<ComponentKindName, Record<string, Point>> = {
+    input: { out: { x: 148, y: 42 } },
+    output: { in: { x: 0, y: 42 } },
+    and: { in1: { x: 0, y: 30 }, in2: { x: 0, y: 54 }, out: { x: 148, y: 42 } },
+    or: { in1: { x: 0, y: 30 }, in2: { x: 0, y: 54 }, out: { x: 148, y: 42 } },
+    nand: { in1: { x: 0, y: 30 }, in2: { x: 0, y: 54 }, out: { x: 148, y: 42 } },
+    nor: { in1: { x: 0, y: 30 }, in2: { x: 0, y: 54 }, out: { x: 148, y: 42 } },
+    xor: { in1: { x: 0, y: 30 }, in2: { x: 0, y: 54 }, out: { x: 148, y: 42 } },
+    xnor: { in1: { x: 0, y: 30 }, in2: { x: 0, y: 54 }, out: { x: 148, y: 42 } },
+    not: { in: { x: 0, y: 42 }, out: { x: 148, y: 42 } },
+    clock: { out: { x: 148, y: 42 } },
+    // D Flip-Flop 是唯一一个通用规则复现不了的形状：`q` 与 `d` 对齐而不是垂直居中。
+    d_flip_flop: { d: { x: 0, y: 30 }, clock: { x: 0, y: 54 }, q: { x: 148, y: 30 } },
+    // 拆线器与合线器没有内置清单，期望值按默认的 8 位配置算：盒子 148 × 284（84 的下限被
+    // 「留白 30 × 2 + 7 × 间距 32」顶开），零点在垂直中线上，八条分支按 32 均分。
+    splitter: {
+      in: { x: 0, y: 142 },
+      out0: { x: 148, y: 30 }, out1: { x: 148, y: 62 }, out2: { x: 148, y: 94 }, out3: { x: 148, y: 126 },
+      out4: { x: 148, y: 158 }, out5: { x: 148, y: 190 }, out6: { x: 148, y: 222 }, out7: { x: 148, y: 254 },
+    },
+    merger: {
+      in0: { x: 0, y: 30 }, in1: { x: 0, y: 62 }, in2: { x: 0, y: 94 }, in3: { x: 0, y: 126 },
+      in4: { x: 0, y: 158 }, in5: { x: 0, y: 190 }, in6: { x: 0, y: 222 }, in7: { x: 0, y: 254 },
+      out: { x: 148, y: 142 },
+    },
+  };
+
+  for (const [kind, ports] of Object.entries(expected) as [ComponentKindName, Record<string, Point>][]) {
+    const definition = registry.get(kind);
+    assert.ok(definition, kind);
+    // 数据驱动元件的端口是前端按默认配置生成的，其余元件用的是引擎的内置定义。
+    const list = defaultPortsFor(kind) ?? BUILT_IN_PORTS[kind];
+    const geometry = componentGeometryFor(definition, list);
+    const sideCounts = {
+      input: list.filter((port) => port.direction === "input").length,
+      output: list.filter((port) => port.direction === "output").length,
+    };
+    const sideIndexes = { input: 0, output: 0 };
+    for (const port of list) {
+      const layout = portLayoutFor(definition, port.name, port.direction, sideIndexes[port.direction]++, sideCounts[port.direction], geometry);
+      assert.deepEqual(layout.offset, ports[port.name], `${kind}.${port.name}`);
+    }
+  }
+});
+
+/**
+ * 数据驱动元件的盒子与端口出自同一份几何：八条分支的拆线器画成 148 × 284，端口落在盒子里面，
+ * 标注带上各自的位区间。
+ */
+test("projects a splitter with the geometry its port count asks for", () => {
+  const projector = createCanvasSceneProjector(createComponentDefinitionRegistry());
+  const scene = projector.project({
+    document: {
+      components: [{
+        id: "splitter-1",
+        kind: "splitter",
+        displayName: "拆线器 1",
+        position: { x: 100, y: 100 },
+        lifecycle: "active",
+        ports: defaultPortsFor("splitter")!,
+      }],
+      connections: [],
+    },
+    selection: null,
+    operation: "idle",
+    canUndo: false,
+    canRedo: false,
+    confirmation: null,
+    error: null,
+  }, { signals: {} });
+
+  const node = scene.nodes[0]!;
+  assert.deepEqual(node.size, { width: 148, height: 284 });
+  assert.equal(node.ports.length, 9);
+  assert.deepEqual(node.ports.map((port) => port.label), [
+    "in[7:0]",
+    "out0[7:7]", "out1[6:6]", "out2[5:5]", "out3[4:4]",
+    "out4[3:3]", "out5[2:2]", "out6[1:1]", "out7[0:0]",
+  ]);
+  // 0 号分支拿最高位，因此它排在最上面；MSB 在上、LSB 在下。
+  assert.equal(node.ports[1]?.point.y, 130);
+  assert.equal(node.ports[8]?.point.y, 354);
+  assert.ok(node.ports.every((port) => port.point.y >= 100 && port.point.y <= 100 + node.size.height));
+  assert.ok(node.ports.every((port) => port.point.x === 100 || port.point.x === 248));
+});
+
+/** 位宽为 1 且没有位区间的端口显示得与引入位宽之前一字不差；再宽或带区间才补上位区间。 */
+test("port labels stay unchanged at width one and show the bit range above it", () => {
+  assert.equal(circuitPortLabel("out", { width: 1 }), "out");
+  assert.equal(circuitPortLabel("out", { width: 8 }), "out[7:0]");
+  assert.equal(circuitPortLabel("Q", { width: 4 }), "Q[3:0]");
+  // 显式位区间优先：拆线器的分支端口落在宿主总线的哪一段由它说了算。
+  assert.equal(circuitPortLabel("out0", { width: 4, bitRange: { msb: 7, lsb: 4 } }), "out0[7:4]");
+  assert.equal(circuitPortLabel("out0", { width: 1, bitRange: { msb: 3, lsb: 3 } }), "out0[3:3]");
 });
 
 test("projects a connection onto the d flip-flop clock port", () => {
@@ -61,8 +183,8 @@ test("projects a connection onto the d flip-flop clock port", () => {
   const scene = projector.project({
     document: {
       components: [
-        { id: "clock-1", kind: "clock", displayName: "Clock", position: { x: 32, y: 48 }, lifecycle: "active" },
-        { id: "dff-1", kind: "d_flip_flop", displayName: "D Flip-Flop", position: { x: 320, y: 80 }, lifecycle: "active" },
+        { id: "clock-1", kind: "clock", displayName: "Clock", position: { x: 32, y: 48 }, lifecycle: "active", ports: BUILT_IN_PORTS.clock },
+        { id: "dff-1", kind: "d_flip_flop", displayName: "D Flip-Flop", position: { x: 320, y: 80 }, lifecycle: "active", ports: BUILT_IN_PORTS.d_flip_flop },
       ],
       connections: [{
         id: "connection-1",
@@ -79,7 +201,7 @@ test("projects a connection onto the d flip-flop clock port", () => {
     canRedo: false,
     confirmation: null,
     error: null,
-  }, { signals: { "clock-1:out": 1 } });
+  }, { signals: { "clock-1:out": "1" } });
 
   const clockPort = scene.nodes.find((node) => node.id === "dff-1")?.ports.find((port) => port.id === "clock");
   assert.equal(clockPort?.direction, "input");
@@ -88,12 +210,13 @@ test("projects a connection onto the d flip-flop clock port", () => {
 });
 
 test("projects non-default editor identities through explicit routes and signal state", () => {
-  const scene = projectCanvasScene(snapshot(), { signals: { "source-17:out": 1, "or-99:out": "X", "sink-4:in": "X" } }, createComponentDefinitionRegistry());
+  const scene = projectCanvasScene(snapshot(), { signals: { "source-17:out": "1", "or-99:out": "X", "sink-4:in": "X" } }, createComponentDefinitionRegistry());
   assert.deepEqual(scene.nodes.map((node) => node.id), ["source-17", "or-99", "sink-4"]);
   assert.equal(scene.nodes.find((node) => node.id === "or-99")?.selected, true);
-  assert.equal(scene.nodes.find((node) => node.id === "source-17")?.ports[0].signal, 1);
+  assert.equal(scene.nodes.find((node) => node.id === "source-17")?.ports[0].signal, "1");
   assert.deepEqual(scene.wires[0].route, snapshot().document.connections[0].route);
   assert.deepEqual(scene.wires[0].danglingEndpoints, ["target"]);
+  assert.equal(scene.wires[0].dangling, true);
   assert.equal(scene.wires[0].color, "blue");
   assert.equal(scene.wires[0].selected, false);
 });
@@ -122,7 +245,7 @@ test("a signal update replaces only the entities carrying that signal", () => {
   const base = snapshot();
   const first = projector.project(base, { signals: {} });
 
-  const signalled = projector.project(base, { signals: { "source-17:out": 1 } });
+  const signalled = projector.project(base, { signals: { "source-17:out": "1" } });
   assert.notEqual(signalled, first);
   assert.notEqual(signalled.wires[0], first.wires[0]);
   assert.notEqual(signalled.nodes.find((node) => node.id === "source-17"), first.nodes.find((node) => node.id === "source-17"));
@@ -140,6 +263,55 @@ test("a selection change replaces only the two affected nodes", () => {
   assert.notEqual(second.nodes.find((node) => node.id === "or-99"), first.nodes.find((node) => node.id === "or-99"));
   assert.notEqual(second.nodes.find((node) => node.id === "sink-4"), first.nodes.find((node) => node.id === "sink-4"));
   assert.equal(second.nodes.find((node) => node.id === "source-17"), first.nodes.find((node) => node.id === "source-17"));
+});
+
+/** 位宽不再匹配的连接与端点缺失的连接共用一种悬空外观，位宽匹配后自动恢复。 */
+test("marks a width-mismatched connection dangling without freezing its endpoints", () => {
+  const cloned = structuredClone(snapshot());
+  const document: EditorSnapshot = {
+    ...cloned,
+    document: {
+      ...cloned.document,
+      // 8 位输出接 1 位输入：两端位宽不同，但两个端点都还解析得到。
+      components: [
+        withPorts(cloned.document.components[0]!, [{ name: "out", direction: "output", width: 8 }]),
+        cloned.document.components[1]!,
+        cloned.document.components[2]!,
+      ],
+      connections: cloned.document.connections.map((connection) => ({ ...connection, danglingEndpoints: [] })),
+    },
+  };
+
+  const scene = projectCanvasScene(document, { signals: {} }, createComponentDefinitionRegistry());
+
+  assert.equal(scene.wires[0]!.dangling, true);
+  // 位宽不匹配不是端点缺失：两端仍然跟着元件位置走，因此不会被冻结在原坐标上。
+  assert.deepEqual(scene.wires[0]!.danglingEndpoints, []);
+  assert.deepEqual(scene.wires[0]!.source.point, { x: 180, y: 90 });
+
+  // 悬空只有一种表达：连线上那个布尔量为真时，两端端口也必须为真。只按 danglingEndpoints
+  // 推导端口会让改位宽造成的悬空点亮连线却不点亮端口，同一件事在画布上有两种外观。
+  const ports = scene.nodes.flatMap((node) => node.ports.map((port) => ({ node: node.id, ...port })));
+  assert.deepEqual(
+    ports.filter((port) => port.dangling).map((port) => `${port.node}:${port.id}`),
+    ["source-17:out", "or-99:in1"],
+  );
+  // 同一条规则的另一半：没被这条连接碰到的端口不跟着亮。
+  assert.equal(ports.find((port) => port.node === "or-99" && port.id === "out")?.dangling, false);
+});
+
+/** 端点缺失只让解析不出来的那一端算悬空，另一端与它上面的端口都不受影响。 */
+test("marks only the unresolvable endpoint of a connection dangling", () => {
+  const scene = projectCanvasScene(snapshot(), { signals: {} }, createComponentDefinitionRegistry());
+
+  assert.deepEqual(scene.wires[0]!.danglingEndpoints, ["target"]);
+  assert.equal(scene.wires[0]!.dangling, true);
+
+  const ports = scene.nodes.flatMap((node) => node.ports.map((port) => ({ node: node.id, ...port })));
+  assert.deepEqual(
+    ports.filter((port) => port.dangling).map((port) => `${port.node}:${port.id}`),
+    ["or-99:in1"],
+  );
 });
 
 test("derives connected endpoint geometry from the current Component and Port definition", () => {
