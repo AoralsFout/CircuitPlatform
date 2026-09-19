@@ -1,7 +1,9 @@
-const { app, BrowserWindow, Menu, ipcMain } = require("electron");
+const { app, BrowserWindow, Menu, dialog, ipcMain } = require("electron");
+const fs = require("node:fs");
 const path = require("node:path");
 const { EngineClient } = require("./engine-client.cjs");
-const { requirePositiveId } = require("./request-validation.cjs");
+const { requirePositiveId, requireNonEmptyString, requireSaveDialogOptions } = require("./request-validation.cjs");
+const { writeTextFileAtomically, readTextFile } = require("./project-file-io.cjs");
 
 const engineFileName = process.platform === "win32" ? "circuit-engine.exe" : "circuit-engine";
 
@@ -13,10 +15,21 @@ function getEnginePath() {
 const engineClient = new EngineClient(getEnginePath());
 
 // 健康检查复用正式长连接，确保检查成功后下一次业务请求不会重新启动进程。
+// 它同时是进程死亡后的唯一恢复入口：restart() 清除死亡记录后，下一次请求才会重新拉起进程；
+// 业务请求在死亡记录清除前一律失败，不会悄悄换一个空电路的新进程。
 async function checkEngineHealth() {
+  engineClient.restart();
   try {
     const response = await engineClient.request({ type: "health_check" });
-    if (response.type === "health_check_result") return response;
+    if (response.type === "health_check_result") {
+      return {
+        status: "ok",
+        engine: response.engine,
+        // 进程代号让渲染层能判断「进程是否真的换过」：换过才需要按文档重建，没换过（例如
+        // 一次请求超时误伤）只解除冻结，避免把同一份电路重复推送到还在服务的进程上。
+        processEpoch: engineClient.epoch,
+      };
+    }
     return { status: "error", message: response.message || "C++ 引擎返回了错误" };
   } catch (error) {
     return {
@@ -102,6 +115,53 @@ app.whenReady().then(() => {
       componentId: requirePositiveId(componentId, "componentId"),
       ports,
     }));
+  // 项目文件通道只做对话框与 IO：序列化与校验在渲染层，校验规则只有一份实现（规格 #34）。
+  // 参数校验失败按既有通道惯例抛 TypeError；文件系统失败进结果对象，让渲染层拿到可展示原因。
+  ipcMain.handle("project:pick-save-path", async (event, options) => {
+    const dialogOptions = requireSaveDialogOptions(options);
+    const result = await dialog.showSaveDialog(BrowserWindow.fromWebContents(event.sender), {
+      title: "保存项目文件",
+      defaultPath: dialogOptions.defaultPath,
+      filters: [{ name: "CircuitPlatform 项目", extensions: ["circuit.json"] }],
+    });
+    if (result.canceled || !result.filePath) return { ok: false, reason: "canceled" };
+    return { ok: true, path: result.filePath };
+  });
+  ipcMain.handle("project:write-file", (_event, filePath, content) => {
+    try {
+      requireNonEmptyString(filePath, "filePath");
+      requireNonEmptyString(content, "content");
+      writeTextFileAtomically(fs, filePath, content);
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, reason: error instanceof Error ? error.message : "写入项目文件失败。" };
+    }
+  });
+  // 打开通道与保存通道同一个分工：对话框与读文件在这里，解析与校验全在渲染层。
+  ipcMain.handle("project:pick-open-path", async (event) => {
+    const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), {
+      title: "打开项目文件",
+      filters: [{ name: "CircuitPlatform 项目", extensions: ["circuit.json"] }],
+      properties: ["openFile"],
+    });
+    if (result.canceled || result.filePaths.length === 0) return { ok: false, reason: "canceled" };
+    return { ok: true, path: result.filePaths[0] };
+  });
+  ipcMain.handle("project:read-file", (_event, filePath) => {
+    try {
+      requireNonEmptyString(filePath, "filePath");
+      return { ok: true, content: readTextFile(fs, filePath) };
+    } catch (error) {
+      // 错误对象上的 code（读文件失败带的 PROJECT_FILE_NOT_FOUND 等）随结果带回，让渲染层
+      // 按机器可读类别分支而不必解析展示文案；没有 code 的失败保持原形状。
+      const code = typeof (error && error.code) === "string" ? error.code : undefined;
+      return {
+        ok: false,
+        reason: error instanceof Error ? error.message : "读取项目文件失败。",
+        ...(code !== undefined ? { code } : {}),
+      };
+    }
+  });
   createWindow();
 
   app.on("activate", () => {

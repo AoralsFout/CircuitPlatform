@@ -181,14 +181,13 @@ export function useEditorState(
     if (workspaceState.value.engineState !== "ready") {
       return { focusedId: focusedId.value, draggingComponentId: null, dragPreview: null, connectionDraft: null, routeEditPreview: null, emptyState: { title: "等待仿真引擎", message: workspaceState.value.message } };
     }
-    if (!workspaceState.value.hasCircuit) {
-      return { focusedId: focusedId.value, draggingComponentId: null, dragPreview: null, connectionDraft: null, routeEditPreview: null, emptyState: { title: "正在准备示例电路", message: workspaceState.value.message } };
-    }
+    // 画布内的空状态文案服务于「已有文档但还没有元件」（新建或清空之后）。首启的引导面板
+    // 由 App 层在没有任何文档时占据画布区，加载示例的入口在那里，不在这条文案里。
     if (!editorState.value) {
-      return { focusedId: focusedId.value, draggingComponentId: null, dragPreview: null, connectionDraft: null, routeEditPreview: null, emptyState: { title: "还没有电路", message: "从左侧选择一个元件，或加载一份示例电路开始。" } };
+      return { focusedId: focusedId.value, draggingComponentId: null, dragPreview: null, connectionDraft: null, routeEditPreview: null, emptyState: { title: "还没有电路", message: "从左侧选择一个元件，开始搭建电路。" } };
     }
     if (editorState.value.document.components.length === 0 && !editorState.value.pendingPlacement) {
-      return { focusedId: focusedId.value, draggingComponentId: null, dragPreview: null, connectionDraft: null, emptyState: { title: "还没有电路", message: "从左侧选择一个元件，或加载一份示例电路开始。" } };
+      return { focusedId: focusedId.value, draggingComponentId: null, dragPreview: null, connectionDraft: null, emptyState: { title: "还没有电路", message: "从左侧选择一个元件，开始搭建电路。" } };
     }
     const pending = editorState.value.pendingPlacement;
     const definition = pending ? registry.get(pending.kind) : undefined;

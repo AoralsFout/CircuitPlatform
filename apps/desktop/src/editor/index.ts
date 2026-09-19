@@ -264,6 +264,13 @@ export interface EditorSession {
   subscribe(listener: (snapshot: EditorSnapshot) => void): () => void;
   /** 更新引擎可用性；只影响结构命令，不影响离线本地布局编辑。 */
   setEngineAvailability(available: boolean): void;
+  /**
+   * 用引擎重启后重建得到的绑定整体替换当前绑定；文档与撤销/重做历史原样保留。
+   * 这是 `onBindingsChanged` 的反向：由组合层在「同一文档采纳新引擎」时把新绑定喂回
+   * 既有会话，不重开会话，撤销栈因此不丢。它不触发 `onBindingsChanged`——新绑定此刻
+   * 已经是工作区手里的那一份。
+   */
+  adoptBindings(bindings: EditorBindings): void;
 }
 
 export interface EditorSessionOptions {
@@ -286,6 +293,8 @@ interface DeleteComponentFrame {
   selectionBefore: EditorSelection;
   kind: ComponentKindName;
   danglingConnectionIds: EngineConnectionId[];
+  /** 捕获这批引擎 ID 时的引擎代数；代数变化后旧 ID 不再存在于当前引擎。 */
+  engineGeneration: number;
   connectionPlans: Array<{
     id: EditorConnectionId;
     source: EditorConnection["source"];
@@ -448,6 +457,17 @@ const engineUnavailableError: EngineError = {
   retryable: true,
   category: "structure",
 };
+
+/**
+ * 传输层不可用的错误代码集合：请求没有得到协议响应（进程死亡、连接失败、超时）时
+ * `CircuitEnginePort` 的实现会以这些代码报告失败。看到它们就冻结结构事务，直到可用性
+ * 被显式恢复。组合层用同一份清单识别「结构事务因引擎不可用而失败」，据此发起恢复。
+ */
+export const ENGINE_TRANSPORT_ERROR_CODES: readonly string[] = [
+  "engine_unavailable",
+  "engine_offline",
+  "engine_connection_failed",
+];
 
 function cloneVisibleDocument(document: MutableDocument): EditorDocument {
   const isAttached = (componentId: EditorComponentId): boolean =>
@@ -672,6 +692,12 @@ export function createEditorSession(
 ): EditorSession {
   const document = toMutableDocument(initial.document);
   const bindings = cloneBindings(initial.bindings);
+  /**
+   * 引擎代数：每次整体采纳新绑定（引擎进程被更换）时递增。
+   * 历史帧里保存的引擎 ID 只在它被捕获时的那一代引擎上有意义；代数不同的帧不得再按旧 ID
+   * 操作当前引擎——新进程的身份从 1 重新计数，旧 ID 会恰好撞上新身份。
+   */
+  let engineGeneration = 0;
   // 文档自己带了端口清单就用它；否则用推送电路时 `component_added` 回传的那一份。
   // 两条路径合起来，编辑器文档里的每个元件在开始投影之前都有一份来自引擎的清单。
   for (const component of document.components.values()) {
@@ -792,7 +818,7 @@ export function createEditorSession(
       .catch((thrown): EngineResult<T> => failed<T>(normalizeThrown(thrown)))
       .then((result) => {
         // 传输/进程故障会冻结后续 Circuit 事务；协议业务拒绝仍可直接重试。
-        if (!result.ok && ["engine_unavailable", "engine_offline", "engine_connection_failed"].includes(result.error.code)) {
+        if (!result.ok && ENGINE_TRANSPORT_ERROR_CODES.includes(result.error.code)) {
           engineAvailabilityOverride = false;
         }
         return result;
@@ -919,6 +945,7 @@ export function createEditorSession(
       danglingConnectionIds: connectionPlans
         .map((connection) => bindings.connections[connection.id])
         .filter((id): id is EngineConnectionId => id !== undefined),
+      engineGeneration,
       connectionPlans,
     };
   }
@@ -1721,6 +1748,9 @@ export function createEditorSession(
 
     let removedOldConnection = false;
     for (const oldConnectionId of frame.danglingConnectionIds) {
+      // 代数不同说明这批引擎 ID 属于已被更换的引擎进程：整份重建后旧悬空连接从未进入当前
+      // 引擎，而新进程的连接身份从 1 重新计数，按旧 ID 删除会恰好误删刚重建的连接。
+      if (frame.engineGeneration !== engineGeneration) break;
       const removed = await call(() => engine.removeConnection(oldConnectionId));
       if (!removed.ok && !isAlreadyAbsent(removed.error)) {
         const compensationError = await compensateNewComponent(newComponentId, newConnectionIds);
@@ -2284,6 +2314,23 @@ export function createEditorSession(
     setEngineAvailability(available) {
       engineAvailabilityOverride = available;
       if (available && error?.code === engineUnavailableError.code) error = null;
+      publish();
+    },
+    adoptBindings(next) {
+      // 引擎身份映射整体替换：旧进程的引擎 ID 全部作废。历史帧里的结构数据以编辑器 ID 表达、
+      // 撤销/重做时按当时绑定重新解析，因此历史不需要改写；但帧里捕获的引擎 ID（悬空连接
+      // 清理清单）只在捕获时的引擎代数上有意义，代数计数随之递增。
+      engineGeneration += 1;
+      bindings.components = { ...next.components };
+      bindings.connections = { ...next.connections };
+      bindings.componentKinds = next.componentKinds ? { ...next.componentKinds } : undefined;
+      bindings.ports = next.ports ? { ...next.ports } : undefined;
+      // 端口清单以引擎回传为权威（ADR 0020）：重建后的清单随绑定刷新到文档上。
+      for (const component of document.components.values()) {
+        if (component.lifecycle !== "active") continue;
+        const known = bindings.ports?.[component.id];
+        if (known !== undefined) component.ports = clonePorts(known);
+      }
       publish();
     },
     subscribe(listener) {
