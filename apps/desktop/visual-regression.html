@@ -6,6 +6,18 @@
       // 截图使用真实 Vue 应用和 CircuitCanvas；此 adapter 只替代 Electron 引擎边界。
       const params = new URLSearchParams(location.search);
       const state = params.get("state") || "default";
+      // 最近项目的条目是存储种子而非注入的 DOM：面板列表仍由真实应用从 localStorage 渲染，
+      // 与 first-start 同属启动状态。种子路径即规范化形态（身份比较用的就是它）。
+      // 截图器与探针在同一个会话里按序加载各状态，先清掉上一次加载的残留再按需种入，
+      // 否则种子会泄漏进后续状态的画面。
+      localStorage.removeItem("circuit-platform.recent-projects");
+      if (state === "first-start-recent") {
+        const now = Date.now();
+        localStorage.setItem("circuit-platform.recent-projects", JSON.stringify([
+          { path: "C:\\电路示例\\八位加法器.circuit.json", displayName: "八位加法器.circuit.json", lastUsedAt: now - 60_000 },
+          { path: "C:\\电路示例\\流水灯.circuit.json", displayName: "流水灯.circuit.json", lastUsedAt: now - 3_600_000 },
+        ]));
+      }
       const theme = params.get("theme") === "light" ? "light" : "dark";
       const reducedMotion = params.get("motion") === "reduced";
       document.documentElement.dataset.theme = theme;
@@ -219,7 +231,7 @@
       const prepare = async () => {
         // 首启空状态（#40）本身就是画面：启动不再自动加载示例，其余状态先从空状态面板
         // 显式加载示例，再等电路出现在画布上。
-        if (state === "first-start") return;
+        if (state === "first-start" || state === "first-start-recent") return;
         click(await waitFor('[title="加载示例电路"]'));
         await waitFor(".circuit-node");
         failAdds = state === "error";

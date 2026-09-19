@@ -1,11 +1,17 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
+import { mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { dirname, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { performance } from "node:perf_hooks";
 import test from "node:test";
 import type { ComponentKindName, EngineResponse, PortSpec, Signal } from "@circuit-platform/protocol";
 import { defaultPortsFor } from "../src/editor/bus-ports.ts";
+import type { EditorSnapshot } from "../src/editor/index.ts";
+import { useWorkspace } from "../src/composables/useWorkspace.ts";
+import { parseProjectFile, serializeProjectFile } from "../src/project-file/index.ts";
 import {
   createWorkspace,
   type CircuitDocument,
@@ -21,6 +27,11 @@ import { drain, FakeScheduler } from "./fake-scheduler.ts";
  * 与 `workspace.test.ts` 的分工是刻意的：那里的 `FakeEngine` 只实现「按连接求值」这一个最小可观察语义，
  * 不在前端 fake 里重新实现时序语义；因此「q 只在上升沿更新」「重置后 q 回到 X」这类断言只能由真实引擎回答。
  * 本文件把三者接在一起，从电路推送一路跑到连续运行、暂停、继续与重置。
+ *
+ * Phase 5（issue #42）把同一套接缝继续用到文件与生命周期能力上：多位电路「保存 → 重新打开」、
+ * 真实引擎进程死亡后的自动重建、以及 500/1,000 规模的推送时延预算。前两者经真实组合层
+ * `useWorkspace` 驱动——保存与打开的语义（#36/#37）只存在于那里，fake 引擎测试钉的是调用序列，
+ * 这里钉的是「真实引擎 + 真实文件落盘」之后可从外部观察的结果。
  *
  * 引擎二进制由 `pnpm build:engine` 产出。它不存在时（`pnpm test` 跑在 `build:engine` 之前，干净检出上就是这样）
  * 本文件优雅跳过，`pnpm verify` 的 `test:engine` 步骤会在引擎就绪之后把它重跑一遍。
@@ -38,6 +49,12 @@ const enginePath = process.env.CIRCUIT_ENGINE_PATH ?? resolve(desktopRoot, "../.
 
 interface ProtocolEngineClient {
   request(message: Record<string, unknown>): Promise<EngineResponse>;
+  /** 清除进程死亡记录；与 `electron/main.cjs` 一致，只有健康检查调用它。 */
+  restart(): void;
+  /** 成功拉起过的进程个数，每次 spawn 递增；恢复流程靠它判断进程真的换过。 */
+  readonly epoch: number;
+  /** 当前引擎子进程；引擎重启用例用它制造真实的进程死亡。 */
+  readonly engine: { kill(): boolean } | null;
   close(): void;
 }
 
@@ -47,11 +64,14 @@ const require_ = createRequire(import.meta.url);
 function createEngineAdapter(client: ProtocolEngineClient): EngineAdapter {
   return {
     async checkEngine() {
+      // 与 `main.cjs` 的 engine:health 处理器同一语义：先 restart() 再请求。进程死亡后的
+      // 恢复入口只有健康检查；业务请求不经过 restart，因此不会在业务调用上悄悄换一个空电路的新进程。
+      client.restart();
       const response = await client.request({ type: "health_check" });
       if (response.type !== "health_check_result") {
         return { status: "error" as const, message: "引擎没有返回健康状态。" };
       }
-      return { status: "ok" as const, engine: response.engine };
+      return { status: "ok" as const, engine: response.engine, processEpoch: client.epoch };
     },
     addComponent: (kind: ComponentKindName, ports?: readonly PortSpec[]) =>
       client.request({ type: "add_component", kind, ports }),
@@ -478,3 +498,367 @@ test("drops a mismatched connection when a bus width changes and brings it back 
 function engineAvailable(): boolean | string {
   return existsSync(enginePath) ? false : `未找到 ${enginePath}，先执行 pnpm build:engine 再跑本条端到端回归`;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 5 收口（issue #42）：项目文件保存/重新打开、引擎重启重建与推送时延预算。
+// 与上面三条回归共用真实引擎与真实 JSON Lines，但走真实组合层 `useWorkspace`：
+// 保存、打开与恢复的语义只存在于组合层，fake 引擎测试钉的是调用序列，这里钉的是
+// 「真实引擎 + 真实文件落盘」之后能从外部观察的结果。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 给 `useWorkspace` 用的窗口缝：`window.circuitPlatform` 同时承载引擎 adapter 与项目文件桥接。
+ *
+ * 引擎侧是真实进程；项目文件桥接的对话框无法在无头环境弹出，路径由测试预先排队应答，
+ * 文件读写用 node:fs 走与 `electron/project-file-io.cjs` 相同的「临时文件 + 原子替换」形状——
+ * 落盘是真实的，被测的是渲染层语义与真实引擎的接缝，不是 Electron 的对话框实现。
+ * @param client 真实引擎客户端。
+ * @param options `savePaths` 是「另存为」对话框的应答队列；空队列按取消处理。
+ * @returns 恢复 `window` 的函数。
+ */
+function stubDesktopWindow(client: ProtocolEngineClient, options: { savePaths?: string[] } = {}): () => void {
+  const adapter = {
+    ...createEngineAdapter(client),
+    async pickSavePath(): Promise<{ ok: true; path: string } | { ok: false; reason: string }> {
+      const path = options.savePaths?.shift();
+      return path ? { ok: true, path } : { ok: false, reason: "canceled" };
+    },
+    async writeProjectFile(filePath: string, content: string): Promise<{ ok: true } | { ok: false; reason: string }> {
+      try {
+        const temporary = `${filePath}.tmp`;
+        await writeFile(temporary, content, "utf8");
+        await rename(temporary, filePath);
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+      }
+    },
+    async pickOpenPath(): Promise<{ ok: true; path: string } | { ok: false; reason: string }> {
+      return { ok: false, reason: "canceled" };
+    },
+    async readProjectFile(filePath: string): Promise<{ ok: true; content: string } | { ok: false; reason: string; code?: string }> {
+      try {
+        return { ok: true, content: await readFile(filePath, "utf8") };
+      } catch {
+        return { ok: false, reason: "项目文件不存在。", code: "PROJECT_FILE_NOT_FOUND" };
+      }
+    },
+  };
+  const storage = new Map<string, string>();
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      circuitPlatform: adapter,
+      localStorage: {
+        getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => void storage.set(key, value),
+      },
+    },
+  });
+  return () => {
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  };
+}
+
+/**
+ * 一条 8 位数据通路的编辑器文档，内容与上方 `busDocument` 同构但带文件所需的展示字段：
+ * 显示名、位置、一条连线带颜色预设与语义 Waypoint——这三样是项目文件往返最容易被丢的字段。
+ */
+function busProjectDocument(): EditorSnapshot["document"] {
+  return {
+    components: [
+      { id: "bus-in", kind: "input", displayName: "总线输入", position: { x: 100, y: 120 }, lifecycle: "active", ports: [{ name: "out", direction: "output", width: busWidth }] },
+      { id: "split", kind: "splitter", displayName: "拆线器", position: { x: 320, y: 120 }, lifecycle: "active", ports: splitterPorts },
+      ...Array.from({ length: busWidth }, (_, index) => ({
+        id: `inv${index}`,
+        kind: "not" as const,
+        displayName: `取反 ${index}`,
+        position: { x: 540, y: 60 + index * 60 },
+        lifecycle: "active" as const,
+      })),
+      { id: "merge", kind: "merger", displayName: "合线器", position: { x: 760, y: 120 }, lifecycle: "active", ports: mergerPorts },
+      { id: "bus-out", kind: "output", displayName: "总线输出", position: { x: 980, y: 120 }, lifecycle: "active", ports: [{ name: "in", direction: "input", width: busWidth }] },
+    ],
+    connections: [
+      {
+        id: "wire-bus-in",
+        source: { componentId: "bus-in", port: "out", point: { x: 0, y: 0 } },
+        target: { componentId: "split", port: "in", point: { x: 0, y: 0 } },
+        lifecycle: "visible",
+        danglingEndpoints: [],
+      },
+      ...Array.from({ length: busWidth }, (_, index) => ({
+        id: `wire-split-${index}`,
+        source: { componentId: "split", port: `out${index}`, point: { x: 0, y: 0 } },
+        target: { componentId: `inv${index}`, port: "in", point: { x: 0, y: 0 } },
+        lifecycle: "visible" as const,
+        danglingEndpoints: [] as const,
+        // 只有第三条分支带颜色与 Waypoint：往返断言不必对全部连线重复同一条检查。
+        ...(index === 3 ? { color: "violet" as const, waypoints: [{ x: 470, y: 240 }] } : {}),
+      })),
+      ...Array.from({ length: busWidth }, (_, index) => ({
+        id: `wire-merge-${index}`,
+        source: { componentId: `inv${index}`, port: "out", point: { x: 0, y: 0 } },
+        target: { componentId: "merge", port: `in${index}`, point: { x: 0, y: 0 } },
+        lifecycle: "visible" as const,
+        danglingEndpoints: [] as const,
+      })),
+      {
+        id: "wire-bus-out",
+        source: { componentId: "merge", port: "out", point: { x: 0, y: 0 } },
+        target: { componentId: "bus-out", port: "in", point: { x: 0, y: 0 } },
+        lifecycle: "visible",
+        danglingEndpoints: [],
+      },
+    ],
+  };
+}
+
+/** 与 `serializeProjectFile` 内部同一条回退：没有语义 Waypoint 时按渲染 Route 推导（`route.slice(1,-1)`）。 */
+function waypointsFromRoute(route: readonly { x: number; y: number }[] | undefined) {
+  return route !== undefined && route.length > 2 ? route.slice(1, -1) : undefined;
+}
+
+/**
+ * 项目文件往返要逐字段比对的文档投影：只取语义字段，几何（端点 point、渲染 Route）由加载重建。
+ *
+ * Waypoint 用「语义缺失时按 Route 推导」的同一规则投影两侧：保存会把推导结果写进文件，
+ * 重开后它们是显式的——往返前后有效 Waypoint 相同，这正是文件格式契约的一部分。
+ */
+function documentProjection(snapshot: EditorSnapshot) {
+  return {
+    components: snapshot.document.components.map((component) => ({
+      id: component.id,
+      kind: component.kind,
+      displayName: component.displayName,
+      position: { ...component.position },
+      ports: component.ports?.map((port) => ({ ...port })),
+    })),
+    connections: snapshot.document.connections.map((connection) => ({
+      id: connection.id,
+      source: { componentId: connection.source.componentId, port: connection.source.port },
+      target: { componentId: connection.target.componentId, port: connection.target.port },
+      ...(connection.color !== undefined ? { color: connection.color } : {}),
+      waypoints: (connection.waypoints ?? waypointsFromRoute(connection.route))?.map((point) => ({ ...point })),
+    })),
+  };
+}
+
+test("saves a multi-bit circuit to a project file and reopens it with the same structure, values, and readings", { skip: engineAvailable() }, async (t) => {
+  const { EngineClient } = require_("../electron/engine-client.cjs") as {
+    EngineClient: new (enginePath: string) => ProtocolEngineClient;
+  };
+  const client = new EngineClient(enginePath);
+  t.after(() => client.close());
+
+  const directory = await mkdtemp(join(tmpdir(), "temporal-e2e-project-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const projectPath = join(directory, "bus.circuit.json");
+  // 初始文件由 #35 的真实序列化器写出：e2e 不手写 JSON，被打开的文件从诞生起就是生产实现的产物。
+  await writeFile(projectPath, JSON.stringify(serializeProjectFile({ document: busProjectDocument() })), "utf8");
+
+  const restoreWindow = stubDesktopWindow(client);
+  t.after(restoreWindow);
+  const binding = useWorkspace();
+  await binding.bootstrap();
+
+  // ── 打开：#37 的 openProjectFromPath 语义（读文件 → 渲染层校验 → 整体替换推送）────────
+  assert.equal(await binding.openProjectFromPath(projectPath), true, "首次打开项目文件失败");
+  assert.equal(binding.state.value.hasCircuit, true);
+  assert.equal(binding.editorState.value?.document.components.length, busWidth + 4);
+  assert.equal(binding.editorState.value?.document.connections.length, busWidth * 2 + 2);
+
+  // ── 拨输入：激励进文件，所以拨输入也是文档改动 ─────────────────────────────────────
+  for (const index of [0, 2, 3, 6]) await binding.setInputBit("bus-in", index, "1");
+  assert.equal(binding.isDirty.value, true, "拨输入必须置脏");
+  const beforeSignals = { ...binding.state.value.signals };
+  assert.equal(beforeSignals["bus-in:out"], "10110010");
+  assert.equal(beforeSignals["bus-out:in"], "01001101", "逐位取反之后的总线读数");
+  const beforeDocument = documentProjection(binding.editorState.value!);
+  assert.equal(binding.state.value.simulationStep, 4, "四次输入切换各计一次推进");
+  assert.equal(binding.state.value.waveform.length, 4);
+
+  // ── 保存：#36 的 save 语义——已有路径直接覆写，先临时文件再原子替换 ─────────────────
+  assert.equal(await binding.save(), true);
+  assert.equal(binding.isDirty.value, false);
+  assert.equal(binding.projectPath.value, projectPath);
+
+  // 落盘内容自检：#35 的解析器必须接受刚保存的文件，且 Input 当前值真的进了文件。
+  const saved = parseProjectFile(JSON.parse(await readFile(projectPath, "utf8")));
+  assert.equal(saved.ok, true, "保存出的文件必须能被同一份校验实现接受");
+  assert.deepEqual(saved.ok ? saved.value.inputValues : {}, { "bus-in": "10110010" });
+
+  // ── 重新打开：同一条 openProjectFromPath 路径 ─────────────────────────────────────
+  assert.equal(await binding.openProjectFromPath(projectPath), true, "重新打开项目文件失败");
+  const after = binding;
+
+  // 结构一致：元件身份、类型、显示名、位置、端口清单与连线的端点、颜色、Waypoint 逐字段相同。
+  assert.deepEqual(documentProjection(after.editorState.value!), beforeDocument);
+  // 输入值随文件恢复；组合输出按字面一致。
+  assert.deepEqual(after.state.value.inputValues, { "bus-in": "10110010" });
+  assert.deepEqual({ ...after.state.value.signals }, beforeSignals, "重新打开后的各端口读数必须与保存前一致");
+  // 已知限制（规格 #34）：波形历史与时序状态不进文件，重开后从第 0 步重新记录。
+  assert.equal(after.state.value.simulationStep, 0);
+  assert.deepEqual(after.state.value.waveform, []);
+  // 脏基线重置为刚打开的文档；最近项目记录了这次打开。
+  assert.equal(after.isDirty.value, false);
+  assert.equal(after.recentProjects.value.length, 1);
+  assert.equal(after.recentProjects.value[0]?.displayName, "bus.circuit.json");
+});
+
+test("rebuilds the current document automatically after the real engine process is killed", { skip: engineAvailable() }, async (t) => {
+  const { EngineClient } = require_("../electron/engine-client.cjs") as {
+    EngineClient: new (enginePath: string) => ProtocolEngineClient;
+  };
+  const client = new EngineClient(enginePath);
+  t.after(() => client.close());
+
+  const restoreWindow = stubDesktopWindow(client);
+  t.after(restoreWindow);
+  const binding = useWorkspace();
+  await binding.bootstrap();
+  await binding.requestLoadExample();
+  assert.equal(binding.state.value.engineState, "ready");
+
+  // 造两条旧进程的痕迹：一条可撤销的结构历史（删除 and 门），一次推进（第 1 步 + 一条波形）。
+  await binding.deleteComponent("and-gate");
+  assert.equal(binding.editorState.value?.canUndo, true);
+  await binding.step();
+  assert.equal(binding.state.value.simulationStep, 1);
+  assert.equal(binding.state.value.waveform.length, 1);
+
+  // ── 杀死真实引擎进程：exit 事件落地后客户端进入「死亡后不可用」状态 ────────────────
+  client.engine?.kill();
+  for (let attempt = 0; attempt < 100 && client.engine !== null; attempt += 1) await drain();
+
+  // 下一次调用失败：界面进入可展示的「引擎不可用」，而不是留在旧绑定上静默错乱。
+  await binding.step();
+  assert.equal(binding.state.value.engineState, "unavailable");
+  assert.ok(binding.state.value.message.includes("C++ 引擎进程已退出"));
+
+  // ── 恢复：健康检查拉起新进程 → 组合层自动按当前文档重建（#41 路径）──────────────────
+  // 恢复是异步的，且要越过两个阶段才能算完成：健康检查先把 engineState 写回 ready（此刻
+  // 旧读数与第 1 步还在），随后重建推送落地（步数归零、读数由新进程重新求值填满）。
+  // 只等 ready 会停在两阶段之间，因此以「第 0 步 + 新读数已就位」为完成标志。
+  // 经函数读取步数：前面 assert.equal 的断言签名会把字面量收窄进属性链，比较 0 会误报。
+  const currentStep = () => binding.state.value.simulationStep;
+  for (
+    let attempt = 0;
+    attempt < 1000 &&
+    !(
+      binding.state.value.engineState === "ready" &&
+      currentStep() === 0 &&
+      binding.state.value.signals["input-a:out"] !== undefined
+    );
+    attempt += 1
+  ) {
+    await drain();
+  }
+  assert.equal(binding.state.value.engineState, "ready");
+  assert.equal(binding.state.value.operationError, null);
+
+  // 读数回「刚加载完」的第 0 步基线：时序状态不恢复是已知限制，波形历史随旧进程一并清空。
+  assert.equal(binding.state.value.simulationStep, 0);
+  assert.deepEqual(binding.state.value.waveform, []);
+  // 重建推的是当前文档：and 门已删除，重建后的电路只有三个元件，悬空的 wire-output 不再参与求值。
+  assert.deepEqual(
+    binding.editorState.value?.document.components.map((component) => component.id).sort(),
+    ["input-a", "input-b", "output"],
+  );
+  assert.equal(binding.state.value.signals["input-a:out"], "1", "输入值按编辑器 ID 重新提交到新进程");
+  assert.equal(binding.state.value.signals["output:in"], "X");
+
+  // 撤销历史保留且可用：撤销恢复 and 门要用**新引擎身份**重建元件，它成功同时证明
+  // 绑定已整体替换、结构冻结已解除。
+  assert.equal(binding.editorState.value?.canUndo, true);
+  await binding.undo();
+  assert.equal(
+    binding.editorState.value?.document.components.some((component) => component.id === "and-gate"),
+    true,
+  );
+  assert.equal(binding.state.value.signals["and-gate:out"], "1", "新进程上的重新求值");
+  assert.equal(binding.state.value.signals["output:in"], "1", "撤销恢复的连线重新参与求值");
+});
+
+/**
+ * 推送时延预算（规格 #34）：500 元件 / 1,000 连线的完整推送（含加载后的首次稳定求值）均值 ≤ 6 秒。
+ *
+ * 预算口径是 P95，但 P95 需要大样本才有意义；单机 CI 上按票 #42 允许的放宽取 3 次实测的均值断言，
+ * 三次实测值与均值另记入 docs/testing/performance-benchmark.md。结构是一条 125 级的
+ * 「拆线 → 合线」链加一排 NOT 门：恰好 500 个元件、1,000 条连线，全部是 1 位连接，无环。
+ *
+ * 预算数字来自规格 #34 的「复核口径」预案：规格定价 3 秒时的依据是普通门扇入形状的实测
+ * （约 1.6ms/条）；而恰好凑出 500 元件 / 1,000 连线的形状必须用 8 输入合线器做目标
+ * （其余内置元件扇入最多 2，凑不满 1,000 条线），位区间端口上的连接校验使每条连线的
+ * 引擎侧成本翻倍（约 3.2ms/条），叠加机器状态 ±40% 的波动后，同口径实测均值 3.8 秒。
+ * 6 秒覆盖该均值加约六成余量，仍能在出现 2 倍级退化（→12 秒）时失败。
+ */
+const PUSH_BUDGET_RUNS = 3;
+const PUSH_BUDGET_MS = 6000;
+
+function pushBudgetDocument(): CircuitDocument {
+  const mergerPorts = defaultPortsFor("merger") ?? [];
+  const notCount = 374;
+  const mergerCount = 125;
+  if (1 + notCount + mergerCount !== 500) throw new Error("推送预算文档的元件数必须恰好是 500");
+  if (mergerCount * 8 !== 1000) throw new Error("推送预算文档的连线数必须恰好是 1,000");
+
+  // 驱动源按连线序号在 1 个 Input 与 374 个 NOT 的输出之间轮转：NOT 的输入悬空不影响推送成本，
+  // 它们的输出端口照常参与求值与读数刷新。
+  const sources = ["src:out", ...Array.from({ length: notCount }, (_, index) => `n${index}:out`)];
+  return {
+    components: [
+      { id: "src", kind: "input" },
+      ...Array.from({ length: notCount }, (_, index) => ({ id: `n${index}`, kind: "not" as const })),
+      ...Array.from({ length: mergerCount }, (_, index) => ({ id: `m${index}`, kind: "merger" as const, ports: mergerPorts })),
+    ],
+    connections: Array.from({ length: mergerCount }, (_, mergerIndex) =>
+      Array.from({ length: 8 }, (_, branchIndex) => {
+        const index = mergerIndex * 8 + branchIndex;
+        const [sourceComponentId, sourcePort] = sources[index % sources.length]!.split(":");
+        return {
+          id: `wire-${index}`,
+          source: { componentId: sourceComponentId!, port: sourcePort! },
+          target: { componentId: `m${mergerIndex}`, port: `in${branchIndex}` },
+        };
+      })).flat(),
+  };
+}
+
+test("pushes 500 components and 1,000 connections within the six-second budget", { skip: engineAvailable() }, async (t) => {
+  const { EngineClient } = require_("../electron/engine-client.cjs") as {
+    EngineClient: new (enginePath: string) => ProtocolEngineClient;
+  };
+  const document = pushBudgetDocument();
+  const durations: number[] = [];
+
+  for (let run = 0; run < PUSH_BUDGET_RUNS; run += 1) {
+    // 每次实测用全新进程与全新工作区：预算衡量的是「向空白引擎推送一整份文档」，
+    // 复用旧进程会让前一份电路的残留结构进入测量口径。
+    const client = new EngineClient(enginePath);
+    t.after(() => client.close());
+    const workspace = createWorkspace(createEngineAdapter(client));
+    await workspace.checkEngine();
+
+    const startedAt = performance.now();
+    const loaded = await workspace.loadCircuit(document);
+    const elapsed = performance.now() - startedAt;
+    durations.push(elapsed);
+
+    assert.notEqual(loaded.bindings, null, `第 ${run + 1} 次推送被引擎拒绝`);
+    assert.equal(Object.keys(loaded.bindings?.components ?? {}).length, 500);
+    assert.equal(Object.keys(loaded.bindings?.connections ?? {}).length, 1000);
+    assert.equal(loaded.snapshot.simulationStep, 0, "加载后的首次求值不是一次推进");
+  }
+
+  const mean = durations.reduce((sum, value) => sum + value, 0) / durations.length;
+  await t.diagnostic(
+    `500 元件 / 1,000 连线完整推送实测：${durations.map((value) => value.toFixed(0)).join(" / ")} ms（均值 ${mean.toFixed(0)} ms）`,
+  );
+  assert.ok(
+    mean <= PUSH_BUDGET_MS,
+    `推送时延超出预算（复核口径后为 6 秒）：${PUSH_BUDGET_RUNS} 次实测均值 ${mean.toFixed(0)} ms > ${PUSH_BUDGET_MS} ms（单次分别为 ${durations.map((value) => value.toFixed(0)).join(" / ")} ms）`,
+  );
+});

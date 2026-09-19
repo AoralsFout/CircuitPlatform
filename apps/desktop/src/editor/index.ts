@@ -293,6 +293,8 @@ interface DeleteComponentFrame {
   selectionBefore: EditorSelection;
   kind: ComponentKindName;
   danglingConnectionIds: EngineConnectionId[];
+  /** 捕获这批引擎 ID 时的引擎代数；代数变化后旧 ID 不再存在于当前引擎。 */
+  engineGeneration: number;
   connectionPlans: Array<{
     id: EditorConnectionId;
     source: EditorConnection["source"];
@@ -690,6 +692,12 @@ export function createEditorSession(
 ): EditorSession {
   const document = toMutableDocument(initial.document);
   const bindings = cloneBindings(initial.bindings);
+  /**
+   * 引擎代数：每次整体采纳新绑定（引擎进程被更换）时递增。
+   * 历史帧里保存的引擎 ID 只在它被捕获时的那一代引擎上有意义；代数不同的帧不得再按旧 ID
+   * 操作当前引擎——新进程的身份从 1 重新计数，旧 ID 会恰好撞上新身份。
+   */
+  let engineGeneration = 0;
   // 文档自己带了端口清单就用它；否则用推送电路时 `component_added` 回传的那一份。
   // 两条路径合起来，编辑器文档里的每个元件在开始投影之前都有一份来自引擎的清单。
   for (const component of document.components.values()) {
@@ -937,6 +945,7 @@ export function createEditorSession(
       danglingConnectionIds: connectionPlans
         .map((connection) => bindings.connections[connection.id])
         .filter((id): id is EngineConnectionId => id !== undefined),
+      engineGeneration,
       connectionPlans,
     };
   }
@@ -1739,6 +1748,9 @@ export function createEditorSession(
 
     let removedOldConnection = false;
     for (const oldConnectionId of frame.danglingConnectionIds) {
+      // 代数不同说明这批引擎 ID 属于已被更换的引擎进程：整份重建后旧悬空连接从未进入当前
+      // 引擎，而新进程的连接身份从 1 重新计数，按旧 ID 删除会恰好误删刚重建的连接。
+      if (frame.engineGeneration !== engineGeneration) break;
       const removed = await call(() => engine.removeConnection(oldConnectionId));
       if (!removed.ok && !isAlreadyAbsent(removed.error)) {
         const compensationError = await compensateNewComponent(newComponentId, newConnectionIds);
@@ -2305,8 +2317,10 @@ export function createEditorSession(
       publish();
     },
     adoptBindings(next) {
-      // 引擎身份映射整体替换：旧进程的引擎 ID 全部作废，历史帧里没有存引擎 ID，
-      // 撤销/重做时都按当时的绑定重新解析，因此历史不需要改写。
+      // 引擎身份映射整体替换：旧进程的引擎 ID 全部作废。历史帧里的结构数据以编辑器 ID 表达、
+      // 撤销/重做时按当时绑定重新解析，因此历史不需要改写；但帧里捕获的引擎 ID（悬空连接
+      // 清理清单）只在捕获时的引擎代数上有意义，代数计数随之递增。
+      engineGeneration += 1;
       bindings.components = { ...next.components };
       bindings.connections = { ...next.connections };
       bindings.componentKinds = next.componentKinds ? { ...next.componentKinds } : undefined;
