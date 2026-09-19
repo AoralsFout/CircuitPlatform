@@ -39,16 +39,12 @@ export interface RememberRecentProjectOptions {
   limit?: number;
   /** 路径规范化与比较的平台语义；省略时取 `currentPathPlatform()`。 */
   platform?: PathPlatform;
-  /** 存储键；省略时取 `RECENT_PROJECTS_STORAGE_KEY`。 */
-  key?: string;
 }
 
 /** `forgetRecentProject` 的可选参数。 */
 export interface ForgetRecentProjectOptions {
   /** 路径规范化与比较的平台语义；省略时取 `currentPathPlatform()`。 */
   platform?: PathPlatform;
-  /** 存储键；省略时取 `RECENT_PROJECTS_STORAGE_KEY`。 */
-  key?: string;
 }
 
 /**
@@ -121,7 +117,7 @@ export function rememberRecentProject(
     ...recentProjects.filter((existing) => projectPathIdentity(existing.path, options.platform) !== identity),
   ].slice(0, Math.max(0, options.limit ?? RECENT_PROJECTS_LIMIT));
   try {
-    storage?.setItem(options.key ?? RECENT_PROJECTS_STORAGE_KEY, JSON.stringify(next));
+    storage?.setItem(RECENT_PROJECTS_STORAGE_KEY, JSON.stringify(next));
   } catch {
     // 存储不可写时仍返回内存状态：记录最近项目不能让已经成功的保存回退成失败。
   }
@@ -149,7 +145,7 @@ export function forgetRecentProject(
   const next = recentProjects.filter((existing) => projectPathIdentity(existing.path, options.platform) !== identity);
   if (next.length === recentProjects.length) return [...recentProjects];
   try {
-    storage?.setItem(options.key ?? RECENT_PROJECTS_STORAGE_KEY, JSON.stringify(next));
+    storage?.setItem(RECENT_PROJECTS_STORAGE_KEY, JSON.stringify(next));
   } catch {
     // 存储不可写时仍返回内存状态：清理死条目不能让打开失败的常规处理回退成异常。
   }

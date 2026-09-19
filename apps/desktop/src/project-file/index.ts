@@ -279,10 +279,8 @@ export function parseProjectFile(raw: unknown): ProjectFileParseResult {
       });
     }
     let ports: readonly PortSpec[] | undefined;
-    if (entry.ports !== undefined) {
-      if (!fileDataDrivenKindIs(kind)) {
-        // 内置元件的清单由引擎回退到内置定义（ADR 0020），文件里多余的清单按未知数据容忍忽略。
-      } else if (!isFilePortList(entry.ports)) {
+    if (entry.ports !== undefined && fileDataDrivenKindIs(kind)) {
+      if (!isFilePortList(entry.ports)) {
         valid = false;
         errors.push({
           code: "component-ports-invalid",
@@ -291,6 +289,7 @@ export function parseProjectFile(raw: unknown): ProjectFileParseResult {
       } else {
         ports = entry.ports.map(cloneFilePort);
       }
+      // 内置元件文件里多余的清单不在此处理：引擎回退到内置定义（ADR 0020），按未知数据容忍忽略。
     }
     if (entry.data !== undefined && kind === "input") {
       const data = entry.data;

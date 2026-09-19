@@ -132,16 +132,16 @@ function stubWindow(engine: SaveFlowEngine, storage: KeyValueStorage): () => voi
   };
 }
 
-/** 启动后的示例电路是一份未保存文档：脏标记干净、没有任何路径。#40 起示例由启动后的空状态显式加载。 */
+/** 启动后显式加载的示例电路是一份未保存文档：置脏（规格语义）、没有任何路径。 */
 async function bootstrappedBinding(engine: SaveFlowEngine, storage: KeyValueStorage) {
   const restore = stubWindow(engine, storage);
   try {
     const binding = useWorkspace();
     await binding.bootstrap();
     await binding.requestLoadExample();
-    assert.equal(binding.isDirty.value, false);
+    assert.equal(binding.isDirty.value, true);
     assert.equal(binding.projectPath.value, null);
-    assert.equal(binding.saveState.value, "saved");
+    assert.equal(binding.saveState.value, "dirty");
     return { binding, restore };
   } catch (error) {
     restore();
@@ -295,6 +295,11 @@ test("engine-rejected submissions do not mark the document dirty", async () => {
   const storage = memoryStorage();
   const { binding, restore } = await bootstrappedBinding(engine, storage);
   try {
+    // 示例加载后本身置脏（规格语义）；先落盘一次得到干净的脏基线，才能验证「拒绝不置脏」。
+    engine.dialogResults.push({ ok: true, path: "E:\\circuits\\scratch.circuit.json" });
+    assert.equal(await binding.saveAs(), true);
+    assert.equal(binding.isDirty.value, false);
+
     // 被拒绝的输入提交：inputValues 不变，不置脏。
     engine.errorOn = "setInput";
     await binding.setInputBit("input-a", 0, "0");

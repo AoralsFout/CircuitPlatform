@@ -261,6 +261,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
 
       <section v-if="activeRailPage !== 'settings'" class="editor-main" :class="{ 'editor-main--bottom-panel-collapsed': !isBottomPanelExpanded }" aria-label="电路编辑器">
         <p v-if="editorState?.operation === 'recovery-required'" class="bottom-error" role="alert">编辑器与仿真引擎的结构状态可能不一致。请关闭并重新打开应用后再继续编辑。</p>
+        <p v-else-if="saveError" class="bottom-error" role="alert" :title="saveError">{{ saveError }}</p>
         <p v-else-if="openError" class="bottom-error" role="alert" :title="openError">{{ openError }}</p>
         <EditorToolbar
           :zoom-label="zoomLabel"

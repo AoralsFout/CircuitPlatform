@@ -30,6 +30,7 @@ class OpenFlowEngine implements EngineAdapter {
   errorOn: "addComponent" | null = null;
   /** 打开对话框的应答队列；空队列时按取消处理。 */
   readonly openDialogResults: ({ ok: true; path: string } | { ok: false; reason: string })[] = [];
+  readonly saveDialogResults: ({ ok: true; path: string } | { ok: false; reason: string })[] = [];
   readonly pickedOpenDialogs: number[] = [];
   /** 可读取的项目文件；读取不存在的路径按「文件不存在」失败。 */
   readonly files = new Map<string, string>();
@@ -96,6 +97,16 @@ class OpenFlowEngine implements EngineAdapter {
     return result ?? { ok: false, reason: "canceled" };
   }
 
+  async pickSavePath(): Promise<{ ok: true; path: string } | { ok: false; reason: string }> {
+    const result = this.saveDialogResults.shift();
+    return result ?? { ok: false, reason: "canceled" };
+  }
+
+  async writeProjectFile(filePath: string, content: string): Promise<{ ok: true }> {
+    this.files.set(filePath, content);
+    return { ok: true };
+  }
+
   async readProjectFile(filePath: string): Promise<{ ok: true; content: string } | { ok: false; reason: string; code?: string }> {
     const content = this.files.get(filePath);
     if (content === undefined) {
@@ -148,6 +159,13 @@ async function bootstrappedBinding(engine: OpenFlowEngine, storage: KeyValueStor
   }
 }
 
+/** 把示例加载后的未保存文档落盘一次，得到干净的脏基线；供「干净文档」前提的用例使用。 */
+async function makeClean(engine: OpenFlowEngine, binding: ReturnType<typeof useWorkspace>): Promise<void> {
+  engine.saveDialogResults.push({ ok: true, path: "E:\\circuits\\scratch.circuit.json" });
+  assert.equal(await binding.saveAs(), true);
+  assert.equal(binding.isDirty.value, false);
+}
+
 /** 一份输入 → 输出（带 Waypoint 与输入值）的项目文件文本，供成功打开用例使用。 */
 function simpleProjectFileText(): string {
   const input: ProjectSerializationInput = {
@@ -176,6 +194,7 @@ test("opening a valid project file restores structure, values, geometry, identit
   const engine = new OpenFlowEngine();
   const storage = memoryStorage();
   const { binding, restore } = await bootstrappedBinding(engine, storage);
+    await makeClean(engine, binding);
   try {
     engine.files.set("E:\\circuits\\demo.circuit.json", simpleProjectFileText());
     engine.openDialogResults.push({ ok: true, path: "E:\\circuits\\demo.circuit.json" });
@@ -195,8 +214,8 @@ test("opening a valid project file restores structure, values, geometry, identit
     assert.equal(binding.isDirty.value, false);
     assert.equal(binding.saveError.value, null);
     assert.equal(binding.openError.value, null);
-    // 成功打开记录最近项目。
-    const recent = readRecentProjects(storage);
+    // 成功打开记录最近项目（列表里还有 makeClean 落盘时记下的 scratch，先过滤掉）。
+    const recent = readRecentProjects(storage).filter((entry) => entry.displayName !== "scratch.circuit.json");
     assert.equal(recent.length, 1);
     assert.equal(recent[0]?.displayName, "demo.circuit.json");
 
@@ -228,29 +247,36 @@ test("opening stops at the first failed step with a displayable reason and keeps
   try {
     // 文件不存在：读取失败即终止，当前文档原样保留。
     engine.openDialogResults.push({ ok: true, path: "E:\\circuits\\missing.circuit.json" });
+    // 示例加载后文档置脏（规格语义）：打开先经过置脏确认，确认后对话框照常执行。
     await binding.requestOpen();
+    assert.notEqual(binding.pendingFileAction.value, null, "置脏文档打开前必须先确认");
+    await binding.confirmPendingFileAction();
     assert.equal(binding.openError.value, "项目文件不存在。");
     assert.equal(binding.editorState.value?.document.components.length, 4);
-    assert.equal(readRecentProjects(storage).length, 0, "失败不写最近项目");
+    assert.equal(readRecentProjects(storage).some((entry) => entry.displayName === "demo.circuit.json"), false, "失败不写最近项目");
 
-    // 版本过高：整体拒绝。
+    // 版本过高：整体拒绝。失败的打开不改变文档，文档保持置脏，后续打开同样先确认。
     engine.openDialogResults.push({ ok: true, path: "E:\\circuits\\future.circuit.json" });
     engine.files.set("E:\\circuits\\future.circuit.json", JSON.stringify({ version: 99, circuit: { components: [], connections: [] } }));
     await binding.requestOpen();
+    assert.notEqual(binding.pendingFileAction.value, null);
+    await binding.confirmPendingFileAction();
     assert.match(binding.openError.value ?? "", /更新版本/);
     assert.equal(binding.editorState.value?.document.components.length, 4);
-    assert.equal(readRecentProjects(storage).length, 0);
+    assert.equal(readRecentProjects(storage).some((entry) => entry.displayName === "demo.circuit.json"), false);
 
     // 引擎推送失败：给出原因，旧电路仍然可用。
     engine.errorOn = "addComponent";
     engine.openDialogResults.push({ ok: true, path: "E:\\circuits\\demo.circuit.json" });
     engine.files.set("E:\\circuits\\demo.circuit.json", simpleProjectFileText());
     await binding.requestOpen();
+    assert.notEqual(binding.pendingFileAction.value, null);
+    await binding.confirmPendingFileAction();
     engine.errorOn = null;
     assert.equal(binding.openError.value, "创建元件失败");
     assert.equal(binding.editorState.value?.document.components.length, 4, "推送失败不产生半成品快照");
     assert.equal(binding.projectPath.value, null);
-    assert.equal(readRecentProjects(storage).length, 0);
+    assert.equal(readRecentProjects(storage).some((entry) => entry.displayName === "demo.circuit.json"), false);
     // 旧绑定仍然可用：按编辑器 ID 提交输入成功。
     await binding.setInputBit("input-a", 0, "0");
     assert.equal(binding.state.value.simulationStep, 1);
@@ -316,7 +342,7 @@ test("new builds an empty document through the replace push and resets the dirty
     assert.equal(binding.isDirty.value, false);
     assert.equal(binding.projectPath.value, null);
     assert.equal(binding.pendingFileAction.value, null);
-    assert.equal(readRecentProjects(storage).length, 0, "新建不记录最近项目");
+    assert.equal(readRecentProjects(storage).some((entry) => entry.displayName === "scratch.circuit.json" || entry.displayName === "demo.circuit.json"), false, "新建不记录最近项目");
 
     // 旧电路的结构已从引擎移除：连接先于元件，反向顺序。
     const removals = engine.calls.filter((call) => call.type === "removeConnection" || call.type === "removeComponent");
@@ -337,6 +363,7 @@ test("new on a clean document runs without confirmation", async () => {
   const engine = new OpenFlowEngine();
   const storage = memoryStorage();
   const { binding, restore } = await bootstrappedBinding(engine, storage);
+    await makeClean(engine, binding);
   try {
     await binding.requestNew();
     assert.equal(binding.pendingFileAction.value, null, "干净文档不需要确认");
@@ -362,7 +389,10 @@ test("opening a dead recent entry explains why, prunes it and keeps the editor s
   try {
     engine.files.set("E:\\circuits\\demo.circuit.json", simpleProjectFileText());
 
+    // 示例加载后文档置脏（规格语义）：从最近项目打开同样先经过置脏确认。
     await binding.requestOpenRecent("E:\\circuits\\gone.circuit.json");
+    assert.notEqual(binding.pendingFileAction.value, null, "置脏文档打开前必须先确认");
+    await binding.confirmPendingFileAction();
 
     // 失败给出可展示原因，当前编辑器状态原样保留。
     assert.equal(binding.openError.value, "项目文件不存在。");
@@ -373,7 +403,10 @@ test("opening a dead recent entry explains why, prunes it and keeps the editor s
     assert.deepEqual(readRecentProjects(storage).map((item) => item.path), ["E:\\circuits\\demo.circuit.json"]);
 
     // 剩余条目从同一入口打开成功：与对话框打开走同一条加载路径。
+    // 失败的打开不改变文档，文档保持置脏，这次打开同样先确认。
     await binding.requestOpenRecent("E:\\circuits\\demo.circuit.json");
+    assert.notEqual(binding.pendingFileAction.value, null);
+    await binding.confirmPendingFileAction();
     assert.equal(binding.openError.value, null);
     assert.equal(binding.editorState.value?.document.components.length, 2);
     assert.equal(binding.projectPath.value, "E:\\circuits\\demo.circuit.json");
@@ -394,7 +427,10 @@ test("a failed open leaves the recent list exactly as it was", async () => {
     engine.files.set("E:\\circuits\\demo.circuit.json", simpleProjectFileText());
     engine.files.set("E:\\circuits\\future.circuit.json", JSON.stringify({ version: 99, circuit: { components: [], connections: [] } }));
 
+    // 示例加载后文档置脏（规格语义）：打开先经过置脏确认。
     await binding.requestOpenRecent("E:\\circuits\\future.circuit.json");
+    assert.notEqual(binding.pendingFileAction.value, null, "置脏文档打开前必须先确认");
+    await binding.confirmPendingFileAction();
     assert.match(binding.openError.value ?? "", /更新版本/);
     assert.deepEqual(binding.recentProjects.value.map((item) => item.path), [
       "E:\\circuits\\gone.circuit.json", "E:\\circuits\\demo.circuit.json",

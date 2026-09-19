@@ -191,13 +191,14 @@ test("loading the example pushes it as an ordinary document and leaves it unsave
       ["input", "input", "and", "output"],
     );
 
-    // 加载后是一份未保存文档：会话建立、有电路，但没有文件身份、不置脏、不写最近项目。
+    // 加载后是一份未保存文档（规格语义）：会话建立、有电路，但没有文件身份、**置脏**、不写最近项目——
+    // 顶栏必须显示「未保存」，用户才知道示例还没有落盘、要不要保存由自己决定。
     assert.equal(binding.editorState.value?.document.components.length, 4);
     assert.equal(binding.state.value.hasCircuit, true);
     assert.equal(binding.projectPath.value, null);
     assert.equal(binding.projectName.value, null);
-    assert.equal(binding.isDirty.value, false, "脏基线是示例文档本身");
-    assert.equal(binding.saveState.value, "saved");
+    assert.equal(binding.isDirty.value, true, "示例加载后是未保存文档，不是已保存");
+    assert.equal(binding.saveState.value, "dirty");
     assert.equal(binding.openError.value, null);
     assert.equal(readRecentProjects(storage).length, 0, "示例不记录最近项目");
   } finally {
@@ -240,7 +241,10 @@ test("an unavailable engine still starts into the empty state with displayable i
     assert.equal(binding.editorState.value?.document.components.length, 4);
 
     // 加载示例后再开项目走整体替换：最近项目入口同样可用。
+    // 示例加载后文档置脏（规格语义），从最近项目打开先经过置脏确认。
     await binding.requestOpenRecent("E:\\circuits\\demo.circuit.json");
+    assert.notEqual(binding.pendingFileAction.value, null, "置脏文档打开前必须先确认");
+    await binding.confirmPendingFileAction();
     assert.equal(binding.openError.value, null);
     assert.equal(binding.editorState.value?.document.components.length, 2);
     assert.equal(binding.projectPath.value, "E:\\circuits\\demo.circuit.json");
@@ -301,14 +305,15 @@ test("loading the example onto a dirty document confirms first, and confirming r
     assert.equal(binding.isDirty.value, true);
     assert.equal(binding.editorState.value?.document.components.length, 4);
 
-    // 确认：示例按普通文档整体替换——结构重新推送、时间线归零，脏基线重置为替换后的
-    // 示例，身份仍为无路径。输入值走推送路径的既有规则（沿用工作区当前值，与引擎重建一致）。
+    // 确认：示例按普通文档整体替换——结构重新推送、时间线归零；替换后的示例仍是**未保存
+    // 文档**（置脏，等待用户决定是否保存），身份仍为无路径。输入值走推送路径的既有规则
+    // （沿用工作区当前值，与引擎重建一致）。
     await binding.requestLoadExample();
     await binding.confirmPendingFileAction();
     assert.equal(binding.pendingFileAction.value, null);
     assert.equal(binding.editorState.value?.document.components.length, 4);
     assert.equal(binding.state.value.simulationStep, 0);
-    assert.equal(binding.isDirty.value, false);
+    assert.equal(binding.isDirty.value, true);
     assert.equal(binding.projectPath.value, null);
     assert.equal(readRecentProjects(storage).length, 0);
   } finally {

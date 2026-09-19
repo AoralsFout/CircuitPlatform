@@ -235,6 +235,14 @@
         click(await waitFor('[title="加载示例电路"]'));
         await waitFor(".circuit-node");
         failAdds = state === "error";
+        if (state === "unsaved-confirm") {
+          // 未保存改动的确认（规格测试决策）：示例加载后本身就是一份未保存文档，
+          // 点「新建」触发置脏确认对话框，画面停在对话框上。对话框由真实交互产生。
+          click(await waitFor('[title="新建 (Ctrl/Cmd+N)"]'));
+          await waitFor(".confirmation-dialog");
+          await settle(40);
+          return;
+        }
         if (state === "selected-component") click(document.querySelector(".circuit-node"));
         if (state === "selected-wire") click(document.querySelector(".signal-wire-hit"));
         if (state === "draft") click(document.querySelector("[data-port-id]"));

@@ -75,6 +75,9 @@ const UNTITLED_PROJECT_NAME = "未命名电路.circuit.json";
 /** `readProjectFile` 失败结果里「目标文件不存在」的机器可读类别；抛出侧约定见 electron/project-file-io.cjs。 */
 const PROJECT_FILE_NOT_FOUND_CODE = "PROJECT_FILE_NOT_FOUND";
 
+/** 置脏确认挂起的文件操作种类；`open` 可能携带最近项目入口挂起的路径。 */
+type PendingFileActionKind = "open" | "new" | "load-example";
+
 interface WorkspaceBinding {
   state: DeepReadonly<Ref<WorkspaceSnapshot>>;
   editorState: DeepReadonly<Ref<EditorSnapshot | null>>;
@@ -281,7 +284,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   // 顶栏下拉与首启空状态（#40）直接消费这份响应式列表。
   const recentProjects = shallowRef<RecentProject[]>(readRecentProjects(preferenceStorage()));
   /** 待确认的文件动作；置脏文档的打开/新建/加载示例必须先经过确认。 */
-  const pendingFileAction = shallowRef<"open" | "new" | "load-example" | null>(null);
+  const pendingFileAction = shallowRef<PendingFileActionKind | null>(null);
   // 待确认「打开」的来源路径：来自最近项目入口时非空（确认后不再弹文件对话框，
   // 直接打开该路径）；来自对话框打开时为 null。与 pendingFileAction 同生共死。
   let pendingOpenPath: string | null = null;
@@ -309,8 +312,10 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
 
   /** 用当前内容对照上次落盘内容刷新脏标记；在每条会改动文档或输入的命令之后调用。 */
   function refreshDirtyMarker(): void {
+    // 基线为 null 有两种含义：没有文档（序列化同为 null，视为干净），或文档从未落盘——
+    // 加载示例就是后者（规格语义：未保存文档），只要存在可序列化的文档就保持置脏。
     const current = serializeCurrentProjectFile();
-    isDirty.value = savedFileSnapshot !== null && current !== savedFileSnapshot;
+    isDirty.value = savedFileSnapshot === null ? current !== null : current !== savedFileSnapshot;
   }
 
   /** 读取本地偏好存储；浏览器禁用持久化时返回 null，记录最近项目安静降级。 */
@@ -471,6 +476,23 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     }
   }
 
+  /**
+   * 文档成功落地的公共收尾：发布工作区快照、建立编辑器会话、切换文档身份并清空两类文件错误。
+   * 脏基线由 attachEditor 重置为刚加载的文档本身；「未保存文档」语义（如加载示例）由调用方覆盖。
+   */
+  function finishDocumentLoad(
+    loaded: { snapshot: WorkspaceSnapshot },
+    document: EditorDocument,
+    bindings: SimulationBindings,
+    path: string | null,
+  ): void {
+    state.value = loaded.snapshot;
+    attachEditor(document, bindings);
+    projectPath.value = path;
+    saveError.value = null;
+    openError.value = null;
+  }
+
   function attachEditor(document: EditorDocument, bindings: SimulationBindings): void {
     unsubscribeEditor?.();
     // 新会话的绑定建立在当前进程上；此前的「进程已更换待重建」闩锁随之作废。
@@ -516,11 +538,11 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
       openError.value = loaded.snapshot.operationError ?? "加载示例失败。";
       return;
     }
-    state.value = loaded.snapshot;
-    attachEditor(document, loaded.bindings);
-    projectPath.value = null;
-    saveError.value = null;
-    openError.value = null;
+    finishDocumentLoad(loaded, document, loaded.bindings, null);
+    // 规格要求示例加载后是一份「未保存文档，由用户决定是否保存」：脏基线不能落在示例本身，
+    // 否则顶栏显示「已保存」，用户无从知道它还没有落盘。
+    savedFileSnapshot = null;
+    isDirty.value = true;
   }
 
   async function checkEngine(): Promise<void> {
@@ -695,11 +717,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
       },
       defaultComponentDefinitionRegistry,
     );
-    state.value = loaded.snapshot;
-    attachEditor(document, loaded.bindings);
-    projectPath.value = path;
-    saveError.value = null;
-    openError.value = null;
+    finishDocumentLoad(loaded, document, loaded.bindings, path);
     recordRecentProject(path);
     return true;
   }
@@ -757,20 +775,26 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
       openError.value = loaded.snapshot.operationError ?? "新建文档失败。";
       return;
     }
-    state.value = loaded.snapshot;
-    attachEditor({ components: [], connections: [] }, loaded.bindings);
-    projectPath.value = null;
-    saveError.value = null;
-    openError.value = null;
+    finishDocumentLoad(loaded, { components: [], connections: [] }, loaded.bindings, null);
+  }
+
+  /**
+   * 文件操作的公共前言：已有确认挂起时不叠加强求；文档置脏时先挂起等待确认。
+   * @returns 是否可以直接执行该操作（false 表示已挂起或已有挂起，调用方直接返回）。
+   */
+  function beginFileAction(action: PendingFileActionKind, openPath?: string): boolean {
+    if (pendingFileAction.value !== null) return false;
+    if (isDirty.value) {
+      pendingOpenPath = openPath ?? null;
+      pendingFileAction.value = action;
+      return false;
+    }
+    return true;
   }
 
   /** 文件操作的入口：文档置脏时先确认，否则直接执行。 */
   async function requestOpen(): Promise<void> {
-    if (pendingFileAction.value !== null) return;
-    if (isDirty.value) {
-      pendingFileAction.value = "open";
-      return;
-    }
+    if (!beginFileAction("open")) return;
     await performOpen();
   }
 
@@ -781,31 +805,18 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
    * @param path 最近项目条目记录的路径。
    */
   async function requestOpenRecent(path: string): Promise<void> {
-    if (pendingFileAction.value !== null) return;
-    if (isDirty.value) {
-      pendingOpenPath = path;
-      pendingFileAction.value = "open";
-      return;
-    }
+    if (!beginFileAction("open", path)) return;
     openError.value = null;
     await openProjectFromPath(path);
   }
 
   async function requestNew(): Promise<void> {
-    if (pendingFileAction.value !== null) return;
-    if (isDirty.value) {
-      pendingFileAction.value = "new";
-      return;
-    }
+    if (!beginFileAction("new")) return;
     await performNew();
   }
 
   async function requestLoadExample(): Promise<void> {
-    if (pendingFileAction.value !== null) return;
-    if (isDirty.value) {
-      pendingFileAction.value = "load-example";
-      return;
-    }
+    if (!beginFileAction("load-example")) return;
     await performLoadExample();
   }
 

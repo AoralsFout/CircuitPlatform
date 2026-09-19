@@ -57,6 +57,7 @@ const COLLECT = `(async () => {
       state: [...bit.classList].find((name) => name.startsWith("input-bit--")) ?? null,
     })),
   }));
+  const unsavedDialog = document.querySelector('.confirmation-dialog[role="alertdialog"]');
   const emptyState = document.querySelector(".empty-state");
   const recentItems = [...document.querySelectorAll(".recent-projects-item")].map((item) => ({
     name: text(item.querySelector(".recent-projects-name")),
@@ -80,6 +81,12 @@ const COLLECT = `(async () => {
       : {
           recentItems: recentItems.length,
           recentFirst: recentItems[0]?.name ?? null,
+        },
+    unsavedDialog: unsavedDialog === null
+      ? null
+      : {
+          title: text(unsavedDialog.querySelector("h2")),
+          confirmText: text(unsavedDialog.querySelector("button.dialog-button--danger")),
         },
   };
 })()`;
@@ -173,6 +180,11 @@ const interactions = {
 
 /** 每个状态一条断言集：只断言「这个状态确实渲染成了它该有的样子」。 */
 const expectations = {
+  "unsaved-confirm": (facts, failures) => {
+    check(failures, facts.unsavedDialog !== null, "置脏后新建应呈现未保存确认对话框");
+    check(failures, facts.unsavedDialog?.title === "新建文档？", `对话框标题不符：${facts.unsavedDialog?.title}`);
+    check(failures, typeof facts.unsavedDialog?.confirmText === "string" && facts.unsavedDialog.confirmText.length > 0, "对话框缺少放弃操作的确认按钮");
+  },
   "first-start-recent": (facts, failures) => {
     check(failures, facts.emptyState !== null, "首启应渲染空状态面板");
     check(failures, facts.emptyState?.recentItems === 2, `最近项目列表应有 2 条，实际是 ${facts.emptyState?.recentItems}`);
