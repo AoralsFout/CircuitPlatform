@@ -57,6 +57,10 @@ const COLLECT = `(async () => {
       state: [...bit.classList].find((name) => name.startsWith("input-bit--")) ?? null,
     })),
   }));
+  const emptyState = document.querySelector(".empty-state");
+  const recentItems = [...document.querySelectorAll(".recent-projects-item")].map((item) => ({
+    name: text(item.querySelector(".recent-projects-name")),
+  }));
   const attributeValues = [...document.querySelectorAll(".inspector-attributes label")].map((label) => ({
     label: text(label.querySelector("span")),
     value: label.querySelector("input")?.value ?? null,
@@ -71,6 +75,12 @@ const COLLECT = `(async () => {
     attributeValues,
     inspectorPortRows: [...document.querySelectorAll(".inspector-port-row")].map((row) => text(row)),
     railPage: document.querySelector(".sidebar-heading h1")?.textContent?.trim() ?? null,
+    emptyState: emptyState === null
+      ? null
+      : {
+          recentItems: recentItems.length,
+          recentFirst: recentItems[0]?.name ?? null,
+        },
   };
 })()`;
 
@@ -163,6 +173,11 @@ const interactions = {
 
 /** 每个状态一条断言集：只断言「这个状态确实渲染成了它该有的样子」。 */
 const expectations = {
+  "first-start-recent": (facts, failures) => {
+    check(failures, facts.emptyState !== null, "首启应渲染空状态面板");
+    check(failures, facts.emptyState?.recentItems === 2, `最近项目列表应有 2 条，实际是 ${facts.emptyState?.recentItems}`);
+    check(failures, facts.emptyState?.recentFirst === "八位加法器.circuit.json", `最近使用的一项应排在最前，实际是 ${facts.emptyState?.recentFirst}`);
+  },
   "bus-canvas": (facts, failures) => {
     check(failures, facts.nodeKinds.includes("SPLITTER"), "画布上没有拆线器");
     check(failures, facts.nodeKinds.includes("MERGER"), "画布上没有合线器");

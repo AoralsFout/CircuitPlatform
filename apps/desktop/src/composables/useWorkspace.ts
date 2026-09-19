@@ -459,6 +459,9 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
           continue;
         }
         rebuildLatched = false;
+        // 重建产生的新快照要显式发布：rebuildCircuit 只改工作区内部状态，不通知订阅者，
+        // 不发布的话界面会停在恢复前的旧读数上（engineState 已是 ready，步数与信号却是旧的）。
+        state.value = loaded.snapshot;
         editor?.adoptBindings(toEditorBindings(loaded.bindings));
         editor?.setEngineAvailability(true);
         return;
@@ -565,7 +568,6 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     editorState.value = editor.snapshot();
     const result = await pending;
     editorState.value = result.snapshot;
-    await refreshSimulationAfterBindingsChange();
     await refreshSimulationAfterBindingsChange();
     // 命令可能改变文档或输入值：脏标记在这里统一刷新，包装函数不必各自记挂。
     refreshDirtyMarker();

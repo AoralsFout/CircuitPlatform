@@ -10,6 +10,8 @@ const outputRoot = resolve(desktopRoot, "artifacts", "visual-regression");
 const states = [
   // 首启空状态（Phase 5 #40）：启动不再自动加载示例，画布区由引导面板占据。
   "first-start",
+  // 最近项目（Phase 5 #42）：空状态面板里的最近项目列表，条目来自启动前种入的存储。
+  "first-start-recent",
   "default", "empty", "selected-component", "selected-wire", "draft", "dangling", "pending", "error", "running", "paused",
   // 多位电路（Phase 4.5）：画布上的位区间标注与二进制信号文本、检查器的位宽编辑与位区间列表、
   // 输入设置里的按位按钮组（展开 / 收起，8 位与 1 位两种）。`bus-bit-space` 的画面与展开态
