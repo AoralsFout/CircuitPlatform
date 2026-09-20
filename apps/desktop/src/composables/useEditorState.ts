@@ -375,6 +375,7 @@ export function useEditorState(
   function setBitRanges(componentId: EditorComponentId, ranges: readonly BitRange[]): void {
     const node = canvasScene.value.nodes.find((candidate) => candidate.id === componentId);
     if (!node) return;
+    if (node.kind !== "splitter" && node.kind !== "merger") return;
     const ports = node.ports.map((port) => ({
       name: port.id,
       direction: port.direction,

@@ -21,6 +21,8 @@ const states = [
   // 仍然是原生按钮的激活语义（`visual:probe`）。
   "bus-canvas", "bus-inspector", "bus-ranges", "bus-bits-expanded", "bus-bits-collapsed", "bus-bit-single",
   "bus-bit-space",
+  // 层次电路：父级画布只展示 Subcircuit 外壳；解析状态与缓存端口仍可读。
+  "hierarchy-resolved", "hierarchy-unresolved",
 ];
 const themes = ["dark", "light"];
 const viewports = {

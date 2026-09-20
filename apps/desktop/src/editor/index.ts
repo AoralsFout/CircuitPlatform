@@ -29,6 +29,14 @@ export {
 import type { ConnectionDraftPort } from "./connection-draft.ts";
 import { normalizeConnectionEndpoints, validateConnectionDraftTarget } from "./connection-draft.ts";
 import type { WireColorId } from "./wire-appearance.ts";
+export {
+  type EditorComponentData,
+  type EditorComponentKind,
+  type SubcircuitComponentData,
+  type SubcircuitDiagnostic,
+  type SubcircuitStatus,
+} from "./component.ts";
+import type { EditorComponentData, EditorComponentKind } from "./component.ts";
 
 export {
   DEFAULT_WIRE_COLOR,
@@ -70,6 +78,33 @@ export type EditorConnectionId = string;
 export type EngineComponentId = number;
 export type EngineConnectionId = number;
 
+/** 一个顶层编辑器对象所拥有的扁平引擎 Component 身份。普通对象通常只有一个。 */
+export type EngineComponentBinding = EngineComponentId | readonly EngineComponentId[];
+
+/** 一个顶层编辑器连接所拥有的扁平引擎 Connection 身份。普通连接通常只有一个。 */
+export type EngineConnectionBinding = EngineConnectionId | readonly EngineConnectionId[];
+
+/** 扁平引擎中的端口身份；Subcircuit 的外部端口通过它投影回编辑器键空间。 */
+export interface EnginePortRef {
+  /** 已解析的引擎身份；局部 projection diff 也可只携带稳定 flatId。 */
+  componentId?: EngineComponentId;
+  /** 稳定扁平身份，由 EditorBindings.flatComponents 解析。 */
+  flatId?: string;
+  port: string;
+}
+
+/** 一个编辑器外部 Port 到扁平端点的来源映射。 */
+export interface EditorPortSource {
+  /** 外部输入 Port 展平后要驱动的全部内部目标端点。 */
+  inputTargets?: readonly EnginePortRef[];
+  /** 外部输出 Port 的首选内部来源端点。 */
+  outputSource?: EnginePortRef;
+  /** 展平器可产生多个来源；按顺序读取，等价于 readableRefs 的来源别名。 */
+  outputSources?: readonly EnginePortRef[];
+  /** 可读取的内部来源端点；多个来源时按顺序取第一个引擎快照中存在的值。 */
+  readableRefs?: readonly EnginePortRef[];
+}
+
 export interface Point {
   x: number;
   y: number;
@@ -77,10 +112,12 @@ export interface Point {
 
 export interface EditorComponent {
   id: EditorComponentId;
-  kind: ComponentKindName;
+  kind: EditorComponentKind;
   displayName: string;
   position: Point;
   lifecycle: "active" | "deleted";
+  /** 类型扩展数据；Subcircuit 的解析元数据统一保存在这里。 */
+  data?: EditorComponentData;
   /**
    * 该元件由引擎回传的端口清单，是端口名与位宽的唯一权威来源。
    *
@@ -99,6 +136,21 @@ function clonePorts(ports: readonly PortSpec[] | undefined): readonly PortSpec[]
     width: port.width,
     ...(port.bitRange ? { bitRange: { ...port.bitRange } } : {}),
   }));
+}
+
+function cloneComponentData(data: EditorComponentData | undefined): EditorComponentData | undefined {
+  const subcircuit = data?.subcircuit;
+  if (!subcircuit) return data;
+  return {
+    subcircuit: {
+      ...subcircuit,
+      cachedPorts: clonePorts(subcircuit.cachedPorts),
+      ...(subcircuit.portOrder ? { portOrder: [...subcircuit.portOrder] } : {}),
+      ...(subcircuit.diagnostic
+        ? { diagnostic: { ...subcircuit.diagnostic, ...(subcircuit.diagnostic.chain ? { chain: [...subcircuit.diagnostic.chain] } : {}) } }
+        : {}),
+    },
+  };
 }
 
 export type EditorEndpointSide = "source" | "target";
@@ -133,15 +185,52 @@ export interface EditorDocument {
 export interface EditorInitialState {
   document: EditorDocument;
   bindings: EditorBindings;
+  /** 可选的当前层次投影快照，用于首次替换的完整回滚与历史重做。 */
+  projection?: EditorProjectionInput;
 }
 
 export interface EditorBindings {
-  components: Readonly<Partial<Record<EditorComponentId, EngineComponentId>>>;
-  connections: Readonly<Partial<Record<EditorConnectionId, EngineConnectionId>>>;
+  components: Readonly<Partial<Record<EditorComponentId, EngineComponentBinding>>>;
+  connections: Readonly<Partial<Record<EditorConnectionId, EngineConnectionBinding>>>;
+  /** 稳定扁平身份到当前引擎身份的映射；用于局部投影替换，不暴露给 Vue。 */
+  flatComponents?: Readonly<Partial<Record<string, EngineComponentId>>>;
+  flatConnections?: Readonly<Partial<Record<string, EngineConnectionId>>>;
+  /** 顶层 Editor ID 所拥有的稳定扁平身份；缺省时普通对象可直接使用自身 ID。 */
+  componentFlatIds?: Readonly<Partial<Record<EditorComponentId, readonly string[]>>>;
+  connectionFlatIds?: Readonly<Partial<Record<EditorConnectionId, readonly string[]>>>;
   /** 用于通用仿真投影的类型元数据；不包含任何固定示例身份。 */
-  componentKinds?: Readonly<Partial<Record<EditorComponentId, ComponentKindName>>>;
+  componentKinds?: Readonly<Partial<Record<EditorComponentId, EditorComponentKind>>>;
   /** 每个元件的端口清单；运行时要读哪些端口由它推导，前端不再内置一份 kind → 端口名的副本。 */
   ports?: Readonly<Partial<Record<EditorComponentId, readonly PortSpec[]>>>;
+  /** 顶层 Editor Component 的外部 Port 到扁平端点的来源映射。 */
+  portSources?: Readonly<Partial<Record<EditorComponentId, Readonly<Partial<Record<string, EditorPortSource>>>>>>;
+}
+
+/** 展平器交给编辑器事务层的引擎平面；每个 id 都是稳定的扁平字符串身份。 */
+export interface EditorFlatCircuit {
+  components: readonly {
+    id: string;
+    kind: ComponentKindName;
+    ports?: readonly PortSpec[];
+  }[];
+  connections: readonly {
+    id: string;
+    source: { componentId: string; port: string };
+    target: { componentId: string; port: string };
+  }[];
+}
+
+/** 一次层次投影替换的输入；源映射保持编辑器键与扁平身份解耦。 */
+export interface EditorProjectionInput {
+  document: EditorDocument;
+  flatCircuit: EditorFlatCircuit;
+  componentFlatIds: Readonly<Partial<Record<EditorComponentId, readonly string[]>>>;
+  connectionFlatIds: Readonly<Partial<Record<EditorConnectionId, readonly string[]>>>;
+  portSources?: Readonly<Partial<Record<EditorComponentId, Readonly<Partial<Record<string, EditorPortSource>>>>>>;
+  /** 仅用于显式重载：强制替换该顶层 owner 所拥有的扁平对象。 */
+  forceReplaceOwner?: EditorComponentId;
+  /** 由组合层管理的不可解释版本；不参与编辑器文档序列化。 */
+  revision?: string;
 }
 
 export interface EngineError {
@@ -271,6 +360,14 @@ export interface EditorSession {
    * 已经是工作区手里的那一份。
    */
   adoptBindings(bindings: EditorBindings): void;
+  /** 原子替换层次展平投影；成功只提交一帧历史，失败不发布中间绑定。 */
+  replaceProjection(input: EditorProjectionInput): Promise<CommandResult>;
+  /** 当前层次投影快照；只读副本，不进入编辑器可见快照。 */
+  projection(): EditorProjectionInput | null;
+  /** 普通编辑命令已同步引擎后刷新当前投影元数据；不调用引擎、不新增历史。 */
+  adoptProjection(input: EditorProjectionInput): void;
+  /** Save As 后重写 Subcircuit 引用元数据；不触碰引擎、不新增历史帧。 */
+  rewriteSubcircuitReferences(references: Readonly<Partial<Record<EditorComponentId, string>>>): boolean;
 }
 
 export interface EditorSessionOptions {
@@ -413,7 +510,14 @@ interface SetWireColorFrame {
   selectionBefore: EditorSelection;
 }
 
-type HistoryFrame = DeleteComponentFrame | DeleteConnectionFrame | ClearDocumentFrame | MoveComponentFrame | AddComponentFrame | SetPortWidthFrame | CreateConnectionFrame | ReconnectConnectionFrame | EditRouteFrame | SetWireColorFrame;
+interface ReplaceProjectionFrame {
+  type: "replace-projection";
+  before: EditorProjectionInput;
+  after: EditorProjectionInput;
+  selectionBefore: EditorSelection;
+}
+
+type HistoryFrame = DeleteComponentFrame | DeleteConnectionFrame | ClearDocumentFrame | MoveComponentFrame | AddComponentFrame | SetPortWidthFrame | CreateConnectionFrame | ReconnectConnectionFrame | EditRouteFrame | SetWireColorFrame | ReplaceProjectionFrame;
 
 const busyError: EngineError = {
   code: "editor_busy",
@@ -475,7 +579,7 @@ function cloneVisibleDocument(document: MutableDocument): EditorDocument {
   return {
     components: [...document.components.values()]
       .filter((component) => component.lifecycle === "active")
-      .map((component) => ({ ...component, position: { ...component.position } })),
+      .map((component) => ({ ...component, position: { ...component.position }, ...(component.data ? { data: cloneComponentData(component.data) } : {}) })),
     connections: [...document.connections.values()]
       .filter((connection) => connection.lifecycle === "visible")
       .map((connection) => ({
@@ -497,7 +601,7 @@ function toMutableDocument(document: EditorDocument): MutableDocument {
     components: new Map(
       document.components.map((component) => [
         component.id,
-        { ...component, position: { ...component.position } },
+        { ...component, position: { ...component.position }, ...(component.data ? { data: cloneComponentData(component.data) } : {}) },
       ]),
     ),
     connections: new Map(
@@ -516,17 +620,101 @@ function toMutableDocument(document: EditorDocument): MutableDocument {
   };
 }
 
-function cloneBindings(bindings: EditorBindings): {
-  components: Partial<Record<EditorComponentId, EngineComponentId>>;
-  connections: Partial<Record<EditorConnectionId, EngineConnectionId>>;
-  componentKinds?: Partial<Record<EditorComponentId, ComponentKindName>>;
-  ports?: Partial<Record<EditorComponentId, readonly PortSpec[]>>;
-} {
+function cloneEditorDocument(document: EditorDocument): EditorDocument {
+  return {
+    components: document.components.map((component) => ({
+      ...component,
+      position: { ...component.position },
+      ...(component.data ? { data: cloneComponentData(component.data) } : {}),
+      ...(component.ports ? { ports: clonePorts(component.ports) } : {}),
+    })),
+    connections: document.connections.map((connection) => ({
+      ...connection,
+      source: { ...connection.source, point: { ...connection.source.point } },
+      target: { ...connection.target, point: { ...connection.target.point } },
+      danglingEndpoints: [...connection.danglingEndpoints],
+      ...(connection.route ? { route: connection.route.map((point) => ({ ...point })) } : {}),
+      ...(connection.waypoints ? { waypoints: connection.waypoints.map((point) => ({ ...point })) } : {}),
+    })),
+  };
+}
+
+function cloneProjectionInput(input: EditorProjectionInput): EditorProjectionInput {
+  return {
+    document: cloneEditorDocument(input.document),
+    flatCircuit: {
+      components: input.flatCircuit.components.map((component) => ({
+        ...component,
+        ...(component.ports ? { ports: clonePorts(component.ports) } : {}),
+      })),
+      connections: input.flatCircuit.connections.map((connection) => ({
+        ...connection,
+        source: { ...connection.source },
+        target: { ...connection.target },
+      })),
+    },
+    componentFlatIds: Object.fromEntries(Object.entries(input.componentFlatIds).map(([id, flatIds]) => [id, flatIds ? [...flatIds] : flatIds])),
+    connectionFlatIds: Object.fromEntries(Object.entries(input.connectionFlatIds).map(([id, flatIds]) => [id, flatIds ? [...flatIds] : flatIds])),
+    ...(input.portSources ? { portSources: input.portSources } : {}),
+    ...(input.forceReplaceOwner !== undefined ? { forceReplaceOwner: input.forceReplaceOwner } : {}),
+    ...(input.revision !== undefined ? { revision: input.revision } : {}),
+  };
+}
+
+/** 将顶层绑定展开为稳定、去重的扁平引擎身份。 */
+export function engineComponentIds(binding: EngineComponentBinding | undefined): readonly EngineComponentId[] {
+  if (binding === undefined) return [];
+  return typeof binding === "number" ? [binding] : [...new Set(binding)];
+}
+
+/** 将顶层连接绑定展开为稳定、去重的扁平引擎身份。 */
+export function engineConnectionIds(binding: EngineConnectionBinding | undefined): readonly EngineConnectionId[] {
+  if (binding === undefined) return [];
+  return typeof binding === "number" ? [binding] : [...new Set(binding)];
+}
+
+/** 普通电路操作只接受一个引擎身份；组绑定由投影层处理。 */
+export function singleEngineComponentId(binding: EngineComponentBinding | undefined): EngineComponentId | undefined {
+  const ids = engineComponentIds(binding);
+  return ids.length === 1 ? ids[0] : undefined;
+}
+
+/** 普通电路操作只接受一个引擎身份；组绑定由投影层处理。 */
+export function singleEngineConnectionId(binding: EngineConnectionBinding | undefined): EngineConnectionId | undefined {
+  const ids = engineConnectionIds(binding);
+  return ids.length === 1 ? ids[0] : undefined;
+}
+
+/** 历史/协议路径只接受可直接放置的普通 ComponentKindName。 */
+function protocolKind(kind: EditorComponentKind): ComponentKindName {
+  return kind as ComponentKindName;
+}
+
+function cloneBindings(bindings: EditorBindings): EditorBindings {
+  const clonePortSources = bindings.portSources && Object.fromEntries(
+    Object.entries(bindings.portSources).map(([componentId, ports]) => [
+      componentId,
+      ports && Object.fromEntries(Object.entries(ports).map(([port, source]) => [
+        port,
+        source && {
+          ...(source.inputTargets ? { inputTargets: source.inputTargets.map((ref) => ({ ...ref })) } : {}),
+          ...(source.outputSource ? { outputSource: { ...source.outputSource } } : {}),
+          ...(source.outputSources ? { outputSources: source.outputSources.map((ref) => ({ ...ref })) } : {}),
+          ...(source.readableRefs ? { readableRefs: source.readableRefs.map((ref) => ({ ...ref })) } : {}),
+        },
+      ])),
+    ]),
+  );
   return {
     components: { ...bindings.components },
     connections: { ...bindings.connections },
-    componentKinds: bindings.componentKinds ? { ...bindings.componentKinds } : undefined,
-    ports: bindings.ports ? { ...bindings.ports } : undefined,
+    ...(bindings.flatComponents ? { flatComponents: { ...bindings.flatComponents } } : {}),
+    ...(bindings.flatConnections ? { flatConnections: { ...bindings.flatConnections } } : {}),
+    ...(bindings.componentFlatIds ? { componentFlatIds: Object.fromEntries(Object.entries(bindings.componentFlatIds).map(([id, flatIds]) => [id, flatIds ? [...flatIds] : flatIds])) } : {}),
+    ...(bindings.connectionFlatIds ? { connectionFlatIds: Object.fromEntries(Object.entries(bindings.connectionFlatIds).map(([id, flatIds]) => [id, flatIds ? [...flatIds] : flatIds])) } : {}),
+    ...(bindings.componentKinds ? { componentKinds: { ...bindings.componentKinds } } : {}),
+    ...(bindings.ports ? { ports: Object.fromEntries(Object.entries(bindings.ports).map(([id, ports]) => [id, ports ? clonePorts(ports) : ports])) } : {}),
+    ...(clonePortSources ? { portSources: clonePortSources } : {}),
   };
 }
 
@@ -691,7 +879,10 @@ export function createEditorSession(
   options: EditorSessionOptions = {},
 ): EditorSession {
   const document = toMutableDocument(initial.document);
-  const bindings = cloneBindings(initial.bindings);
+  // 历史命令只覆盖普通平面元件；层次组绑定由 Workspace 投影层消费。
+  // 这里保留完整绑定形状，避免普通命令路径被迫了解层次投影的内部身份。
+  const bindings: any = cloneBindings(initial.bindings);
+  let lastProjection: EditorProjectionInput | null = initial.projection ? cloneProjectionInput(initial.projection) : null;
   /**
    * 引擎代数：每次整体采纳新绑定（引擎进程被更换）时递增。
    * 历史帧里保存的引擎 ID 只在它被捕获时的那一代引擎上有意义；代数不同的帧不得再按旧 ID
@@ -721,18 +912,29 @@ export function createEditorSession(
   let nextEditorComponentSequence = 1;
   let nextEditorConnectionSequence = 1;
   const componentNameSequences = new Map<ComponentKindName, number>();
-  for (const component of document.components.values()) {
-    const match = component.displayName.match(/(\d+)$/);
-    const sequence = match ? Number(match[1]) : 0;
-    const currentSequence = componentNameSequences.get(component.kind) ?? 0;
-    componentNameSequences.set(component.kind, Math.max(currentSequence + 1, sequence));
-    const editorSequence = component.id.match(/^component-(\d+)$/);
-    if (editorSequence) nextEditorComponentSequence = Math.max(nextEditorComponentSequence, Number(editorSequence[1]) + 1);
+
+  /** 把外部采用的文档身份纳入本地分配器，避免投影替换后新增对象覆盖既有稳定 ID。 */
+  function observeDocumentIdentities(): void {
+    const observedKindCounts = new Map<ComponentKindName, number>();
+    for (const component of document.components.values()) {
+      const match = component.displayName.match(/(\d+)$/);
+      const sequence = match ? Number(match[1]) : 0;
+      if (component.kind !== "subcircuit") {
+        const observedCount = (observedKindCounts.get(component.kind) ?? 0) + 1;
+        observedKindCounts.set(component.kind, observedCount);
+        const currentSequence = componentNameSequences.get(component.kind) ?? 0;
+        componentNameSequences.set(component.kind, Math.max(currentSequence, observedCount, sequence));
+      }
+      const editorSequence = component.id.match(/^component-(\d+)$/);
+      if (editorSequence) nextEditorComponentSequence = Math.max(nextEditorComponentSequence, Number(editorSequence[1]) + 1);
+    }
+    for (const connection of document.connections.values()) {
+      const editorSequence = connection.id.match(/^connection-(\d+)$/);
+      if (editorSequence) nextEditorConnectionSequence = Math.max(nextEditorConnectionSequence, Number(editorSequence[1]) + 1);
+    }
   }
-  for (const connection of document.connections.values()) {
-    const editorSequence = connection.id.match(/^connection-(\d+)$/);
-    if (editorSequence) nextEditorConnectionSequence = Math.max(nextEditorConnectionSequence, Number(editorSequence[1]) + 1);
-  }
+
+  observeDocumentIdentities();
 
   function isLiveConnection(connection: EditorConnection): boolean {
     return connection.lifecycle === "visible" &&
@@ -767,11 +969,311 @@ export function createEditorSession(
         .map((component) => [component.id, component.ports!]),
     );
     if (Object.keys(knownPorts).length > 0) nextBindings.ports = knownPorts;
+    if (bindings.flatComponents) nextBindings.flatComponents = { ...bindings.flatComponents };
+    if (bindings.flatConnections) nextBindings.flatConnections = { ...bindings.flatConnections };
+    if (bindings.componentFlatIds) nextBindings.componentFlatIds = { ...bindings.componentFlatIds };
+    if (bindings.connectionFlatIds) nextBindings.connectionFlatIds = { ...bindings.connectionFlatIds };
+    if (bindings.portSources) nextBindings.portSources = bindings.portSources;
     Object.defineProperty(nextBindings, "componentKinds", {
       value: Object.fromEntries([...document.components.values()].map((component) => [component.id, component.kind])),
       enumerable: false,
     });
     options.onBindingsChanged?.(nextBindings);
+  }
+
+  /** 整体采用一份绑定状态；用于投影提交与补偿后引擎身份发生变化的恢复。 */
+  function adoptBindingState(nextBindings: EditorBindings): void {
+    bindings.components = nextBindings.components;
+    bindings.connections = nextBindings.connections;
+    bindings.flatComponents = nextBindings.flatComponents;
+    bindings.flatConnections = nextBindings.flatConnections;
+    bindings.componentFlatIds = nextBindings.componentFlatIds;
+    bindings.connectionFlatIds = nextBindings.connectionFlatIds;
+    bindings.componentKinds = nextBindings.componentKinds;
+    bindings.ports = nextBindings.ports;
+    bindings.portSources = nextBindings.portSources;
+  }
+
+  function projectionForCurrentDocument(): EditorProjectionInput {
+    if (lastProjection) return cloneProjectionInput(lastProjection);
+    const componentFlatIds: Record<string, readonly string[]> = {};
+    const flatComponents: EditorFlatCircuit["components"] = [...document.components.values()]
+      .filter((component) => component.lifecycle === "active")
+      .flatMap((component) => {
+        const ids: readonly string[] = bindings.componentFlatIds?.[component.id] ?? [component.id];
+        componentFlatIds[component.id] = [...ids];
+        return ids.map((id) => ({ id, kind: protocolKind(component.kind), ...(component.ports ? { ports: clonePorts(component.ports) } : {}) }));
+      });
+    const connectionFlatIds: Record<string, readonly string[]> = {};
+    const flatConnections: EditorFlatCircuit["connections"] = [...document.connections.values()]
+      .filter(isLiveConnection)
+      .flatMap((connection) => {
+        const ids: readonly string[] = bindings.connectionFlatIds?.[connection.id] ?? [connection.id];
+        connectionFlatIds[connection.id] = [...ids];
+        return ids.map((id) => ({
+          id,
+          source: { componentId: connection.source.componentId, port: connection.source.port },
+          target: { componentId: connection.target.componentId, port: connection.target.port },
+        }));
+      });
+    return {
+      document: cloneEditorDocument(cloneVisibleDocument(document)),
+      flatCircuit: { components: flatComponents, connections: flatConnections },
+      componentFlatIds,
+      connectionFlatIds,
+      ...(bindings.portSources ? { portSources: bindings.portSources } : {}),
+    };
+  }
+
+  function projectionBindings(
+    input: EditorProjectionInput,
+    flatComponents: Readonly<Record<string, EngineComponentId>>,
+    flatConnections: Readonly<Record<string, EngineConnectionId>>,
+  ): EditorBindings {
+    const components: Record<string, EngineComponentBinding> = {};
+    const connections: Record<string, EngineConnectionBinding> = {};
+    for (const [editorId, flatIds] of Object.entries(input.componentFlatIds)) {
+      const ids = (flatIds ?? []).map((flatId) => flatComponents[flatId]).filter((id): id is number => id !== undefined);
+      if (ids.length > 0) components[editorId] = ids.length === 1 ? ids[0]! : [...new Set(ids)];
+    }
+    for (const [editorId, flatIds] of Object.entries(input.connectionFlatIds)) {
+      const ids = (flatIds ?? []).map((flatId) => flatConnections[flatId]).filter((id): id is number => id !== undefined);
+      if (ids.length > 0) connections[editorId] = ids.length === 1 ? ids[0]! : [...new Set(ids)];
+    }
+    const componentKinds = Object.fromEntries(input.document.components.map((component) => [component.id, component.kind]));
+    const ports = Object.fromEntries(input.document.components
+      .filter((component) => component.ports !== undefined)
+      .map((component) => [component.id, component.ports!]));
+    return {
+      components,
+      connections,
+      flatComponents,
+      flatConnections,
+      componentFlatIds: input.componentFlatIds,
+      connectionFlatIds: input.connectionFlatIds,
+      componentKinds,
+      ...(Object.keys(ports).length > 0 ? { ports } : {}),
+      ...(input.portSources ? { portSources: input.portSources } : {}),
+    };
+  }
+
+  async function replaceProjectionOnEngine(
+    target: EditorProjectionInput,
+  ): Promise<{ error: EngineError | null; rollbackError: EngineError | null }> {
+    const before = lastProjection ?? projectionForCurrentDocument();
+    const oldComponents = new Map((before.flatCircuit.components).map((component) => [component.id, component]));
+    const newComponents = new Map(target.flatCircuit.components.map((component) => [component.id, component]));
+    const oldConnections = new Map(before.flatCircuit.connections.map((connection) => [connection.id, connection]));
+    const newConnections = new Map(target.flatCircuit.connections.map((connection) => [connection.id, connection]));
+    const oldComponentIds: Record<string, number> = { ...(bindings.flatComponents ?? {}) };
+    for (const [editorId, flatIds] of Object.entries(before.componentFlatIds)) {
+      for (const [index, flatId] of (flatIds ?? []).entries()) {
+        const id = (bindings.components[editorId] !== undefined ? engineComponentIds(bindings.components[editorId])[index] : undefined);
+        if (id !== undefined) oldComponentIds[flatId] = id;
+      }
+    }
+    const oldConnectionIds: Record<string, number> = { ...(bindings.flatConnections ?? {}) };
+    for (const [editorId, flatIds] of Object.entries(before.connectionFlatIds)) {
+      for (const [index, flatId] of (flatIds ?? []).entries()) {
+        const id = (bindings.connections[editorId] !== undefined ? engineConnectionIds(bindings.connections[editorId])[index] : undefined);
+        if (id !== undefined) oldConnectionIds[flatId] = id;
+      }
+    }
+    const forced = new Set(target.forceReplaceOwner ? target.componentFlatIds[target.forceReplaceOwner] ?? [] : []);
+    const replacedComponents = new Set<string>(forced);
+    const sameConnection = (left: EditorFlatCircuit["connections"][number], right: EditorFlatCircuit["connections"][number]) =>
+      left.source.componentId === right.source.componentId && left.source.port === right.source.port &&
+      left.target.componentId === right.target.componentId && left.target.port === right.target.port;
+    const removedConnectionIds = [...oldConnections.values()]
+      .filter((connection) => !newConnections.has(connection.id) ||
+        replacedComponents.has(connection.source.componentId) || replacedComponents.has(connection.target.componentId) ||
+        (newConnections.has(connection.id) && !sameConnection(connection, newConnections.get(connection.id)!)));
+    const addedConnectionIds = [...newConnections.values()]
+      .filter((connection) => !oldConnections.has(connection.id) || removedConnectionIds.some((old) => old.id === connection.id));
+    const removedComponentValues = [...oldComponents.values()].filter((component) => !newComponents.has(component.id) || forced.has(component.id));
+    const addedComponentValues = [...newComponents.values()].filter((component) => !oldComponents.has(component.id) || forced.has(component.id));
+    const nextComponents: Record<string, number> = { ...oldComponentIds };
+    const nextConnections: Record<string, number> = { ...oldConnectionIds };
+    const createdComponents: number[] = [];
+    const createdConnections: number[] = [];
+    const removedComponents: EditorFlatCircuit["components"][number][] = [];
+    const removedConnections: EditorFlatCircuit["connections"][number][] = [];
+    const rollback = async (): Promise<EngineError | null> => {
+      for (const id of [...createdConnections].reverse()) {
+        const result = await call(() => engine.removeConnection(id));
+        if (!result.ok && !isAlreadyAbsent(result.error)) return result.error;
+      }
+      for (const id of [...createdComponents].reverse()) {
+        const result = await call(() => engine.removeComponent(id));
+        if (!result.ok && !isAlreadyAbsent(result.error)) return result.error;
+      }
+      for (const component of removedComponents) {
+        const result = await call(() => engine.addComponent(component.kind, component.ports));
+        if (!result.ok) return result.error;
+        nextComponents[component.id] = result.value.componentId;
+      }
+      for (const connection of removedConnections) {
+        const sourceComponentId = nextComponents[connection.source.componentId];
+        const targetComponentId = nextComponents[connection.target.componentId];
+        if (sourceComponentId === undefined || targetComponentId === undefined) return recoveryError(`回滚连接 ${connection.id} 的端点没有有效引擎身份。`);
+        const result = await call(() => engine.addConnection({ sourceComponentId, sourcePort: connection.source.port, targetComponentId, targetPort: connection.target.port }));
+        if (!result.ok) return result.error;
+        nextConnections[connection.id] = result.value.connectionId;
+      }
+      if (removedComponents.length > 0 || removedConnections.length > 0) {
+        // 补偿重建会得到新的数字身份；可见文档保持旧投影，但内部绑定必须同步切换，
+        // 否则下一条命令会拿已删除的旧 ID 操作引擎。这里只发布绑定，不发布中间文档快照。
+        adoptBindingState(projectionBindings(before, nextComponents, nextConnections));
+        publishBindings();
+      }
+      return null;
+    };
+    for (const connection of [...removedConnectionIds].reverse()) {
+      const id = oldConnectionIds[connection.id];
+      if (id === undefined) continue;
+      const result = await call(() => engine.removeConnection(id));
+      if (!result.ok && !isAlreadyAbsent(result.error)) {
+        const compensation = await rollback();
+        return { error: result.error, rollbackError: compensation };
+      }
+      delete nextConnections[connection.id];
+      removedConnections.push(connection);
+    }
+    for (const component of [...removedComponentValues].reverse()) {
+      const id = oldComponentIds[component.id];
+      if (id === undefined) continue;
+      const result = await call(() => engine.removeComponent(id));
+      if (!result.ok && !isAlreadyAbsent(result.error)) {
+        const compensation = await rollback();
+        return { error: result.error, rollbackError: compensation };
+      }
+      delete nextComponents[component.id];
+      removedComponents.push(component);
+    }
+    for (const component of addedComponentValues) {
+      const result = await call(() => engine.addComponent(component.kind, component.ports));
+      if (!result.ok) {
+        const compensation = await rollback();
+        return { error: result.error, rollbackError: compensation };
+      }
+      nextComponents[component.id] = result.value.componentId;
+      createdComponents.push(result.value.componentId);
+    }
+    for (const connection of addedConnectionIds) {
+      const sourceComponentId = nextComponents[connection.source.componentId];
+      const targetComponentId = nextComponents[connection.target.componentId];
+      if (sourceComponentId === undefined || targetComponentId === undefined) {
+        const compensation = await rollback();
+        return { error: recoveryError(`扁平连接 ${connection.id} 的端点没有有效引擎身份。`), rollbackError: compensation };
+      }
+      const result = await call(() => engine.addConnection({ sourceComponentId, sourcePort: connection.source.port, targetComponentId, targetPort: connection.target.port }));
+      if (!result.ok) {
+        const compensation = await rollback();
+        return { error: result.error, rollbackError: compensation };
+      }
+      nextConnections[connection.id] = result.value.connectionId;
+      createdConnections.push(result.value.connectionId);
+    }
+    // 到这里引擎已完成新投影；旧文档、绑定和历史仍未发布。
+    document.components.clear();
+    for (const component of toMutableDocument(target.document).components.values()) document.components.set(component.id, component);
+    document.connections.clear();
+    for (const connection of toMutableDocument(target.document).connections.values()) document.connections.set(connection.id, connection);
+    observeDocumentIdentities();
+    const nextBindings = projectionBindings(target, nextComponents, nextConnections);
+    adoptBindingState(nextBindings);
+    lastProjection = cloneProjectionInput(target);
+    return { error: null, rollbackError: null };
+  }
+
+  async function replaceProjectionTransaction(input: EditorProjectionInput): Promise<CommandResult> {
+    const target = cloneProjectionInput(input);
+    const result = await replaceProjectionOnEngine(target);
+    if (result.error !== null) {
+      return result.rollbackError
+        ? enterRecovery(recoveryError(`替换层次投影失败且回滚未完成：${result.rollbackError.message}`))
+        : fail(result.error);
+    }
+    await settleAfterStructure();
+    publishBindings();
+    return { ok: true, snapshot: finishOperation() };
+  }
+
+  async function replaceProjection(input: EditorProjectionInput): Promise<CommandResult> {
+    if (operation === "recovery-required") {
+      return { ok: false, error: error ?? recoveryError("编辑器需要恢复后才能替换层次投影。"), snapshot: currentSnapshot() };
+    }
+    if (operation === "busy") return { ok: false, error: busyError, snapshot: currentSnapshot() };
+    if (!isEngineAvailable()) return structureUnavailable();
+    if (!beginOperation()) return { ok: false, error: busyError, snapshot: currentSnapshot() };
+    const before = cloneProjectionInput(lastProjection ?? projectionForCurrentDocument());
+    const result = await replaceProjectionTransaction(input);
+    if (result.ok) {
+      // 强制 owner 替换时，撤销也必须重新建立该 owner 的身份；旧引擎身份不可复用。
+      const historyBefore = input.forceReplaceOwner === undefined
+        ? before
+        : { ...before, forceReplaceOwner: input.forceReplaceOwner };
+      undoStack.push({ type: "replace-projection", before: historyBefore, after: cloneProjectionInput(input), selectionBefore: selection ? { ...selection } : null });
+      redoStack.length = 0;
+      return { ok: true, snapshot: publish() };
+    }
+    return result;
+  }
+
+  async function undoReplaceProjection(frame: ReplaceProjectionFrame): Promise<CommandResult> {
+    const result = await replaceProjectionTransaction(frame.before);
+    if (!result.ok) return result;
+    selection = frame.selectionBefore;
+    undoStack.pop();
+    redoStack.push(frame);
+    return { ok: true, snapshot: publish() };
+  }
+
+  async function redoReplaceProjection(frame: ReplaceProjectionFrame, remainingRedo: readonly HistoryFrame[]): Promise<CommandResult> {
+    const result = await replaceProjectionTransaction(frame.after);
+    if (!result.ok) return result;
+    redoStack.length = 0;
+    redoStack.push(...remainingRedo);
+    undoStack.push(frame);
+    return { ok: true, snapshot: publish() };
+  }
+
+  function rewriteProjectionReferences(input: EditorProjectionInput, references: Readonly<Partial<Record<EditorComponentId, string>>>): void {
+    for (const [componentId, reference] of Object.entries(references)) {
+      if (reference === undefined) continue;
+      const component = input.document.components.find((candidate) => candidate.id === componentId);
+      if (!component || component.kind !== "subcircuit" || component.data?.subcircuit === undefined) continue;
+      component.data = {
+        ...component.data,
+        subcircuit: { ...component.data.subcircuit, reference },
+      };
+    }
+  }
+
+  function rewriteSubcircuitReferences(
+    references: Readonly<Partial<Record<EditorComponentId, string>>>,
+  ): boolean {
+    const entries = Object.entries(references).filter((entry): entry is [string, string] => entry[1] !== undefined);
+    for (const [componentId] of entries) {
+      const component = document.components.get(componentId);
+      if (!component || component.kind !== "subcircuit" || component.data?.subcircuit === undefined) return false;
+    }
+    if (entries.length === 0) return true;
+    for (const [componentId, reference] of entries) {
+      const component = document.components.get(componentId)!;
+      component.data = {
+        ...component.data,
+        subcircuit: { ...component.data!.subcircuit!, reference },
+      };
+    }
+    if (lastProjection) rewriteProjectionReferences(lastProjection, references);
+    for (const frame of [...undoStack, ...redoStack]) {
+      if (frame.type !== "replace-projection") continue;
+      rewriteProjectionReferences(frame.before, references);
+      rewriteProjectionReferences(frame.after, references);
+    }
+    publish();
+    return true;
   }
 
   function currentSnapshot(): EditorSnapshot {
@@ -940,11 +1442,10 @@ export function createEditorSession(
       type: "delete-component",
       componentId,
       selectionBefore: selection ? { ...selection } : null,
-      kind: component.kind,
+      kind: protocolKind(component.kind),
       ports: clonePorts(component.ports),
       danglingConnectionIds: connectionPlans
-        .map((connection) => bindings.connections[connection.id])
-        .filter((id): id is EngineConnectionId => id !== undefined),
+        .flatMap((connection) => engineConnectionIds(bindings.connections[connection.id])),
       engineGeneration,
       connectionPlans,
     };
@@ -953,7 +1454,7 @@ export function createEditorSession(
   function makeClearDocumentFrame(): ClearDocumentFrame | null {
     const components = [...document.components.values()]
       .filter((component) => component.lifecycle === "active")
-      .map((component) => ({ id: component.id, kind: component.kind, ports: clonePorts(component.ports) }));
+      .map((component) => ({ id: component.id, kind: protocolKind(component.kind), ports: clonePorts(component.ports) }));
     const connections = [...document.connections.values()]
       .filter((connection) => connection.lifecycle === "visible")
       .map((connection) => ({
@@ -1027,7 +1528,7 @@ export function createEditorSession(
     removedConnections: readonly ClearDocumentFrame["connections"][number][],
   ): Promise<EngineError | null> {
     for (const component of removedComponents) {
-      const added = await call(() => engine.addComponent(component.kind, component.ports));
+      const added = await call(() => engine.addComponent(protocolKind(component.kind), component.ports));
       if (!added.ok) return added.error;
       bindings.components[component.id] = added.value.componentId;
     }
@@ -1225,14 +1726,14 @@ export function createEditorSession(
   async function duplicateComponent(componentId: EditorComponentId): Promise<CommandResult> {
     const source = requireComponent(componentId);
     if (!source) return fail(noSelectionError);
-    const identity = nextComponentIdentity(source.kind);
+    const identity = nextComponentIdentity(protocolKind(source.kind));
     const position = { x: source.position.x + 32, y: source.position.y + 32 };
-    const added = await call(() => engine.addComponent(source.kind, source.ports));
+    const added = await call(() => engine.addComponent(protocolKind(source.kind), source.ports));
     if (!added.ok) return fail(added.error);
 
     const component: EditorComponent = {
       id: identity.id,
-      kind: source.kind,
+      kind: protocolKind(source.kind),
       displayName: identity.displayName,
       position,
       lifecycle: "active",
@@ -1244,7 +1745,7 @@ export function createEditorSession(
     undoStack.push({
       type: "add-component",
       componentId: component.id,
-      kind: component.kind,
+      kind: protocolKind(component.kind),
       displayName: component.displayName,
       position: { ...position },
       ports: clonePorts(component.ports),
@@ -2019,7 +2520,7 @@ export function createEditorSession(
     };
 
     for (const component of frame.components) {
-      const added = await call(() => engine.addComponent(component.kind, component.ports));
+      const added = await call(() => engine.addComponent(protocolKind(component.kind), component.ports));
       if (!added.ok) {
         const compensationError = await rollback();
         return compensationError
@@ -2078,6 +2579,7 @@ export function createEditorSession(
     if (frame.type === "reconnect-connection") return undoReconnectConnection(frame);
     if (frame.type === "edit-route") return undoEditRoute(frame);
     if (frame.type === "set-wire-color") return undoSetWireColor(frame);
+    if (frame.type === "replace-projection") return undoReplaceProjection(frame);
     return undoDeleteConnection(frame);
   }
 
@@ -2113,6 +2615,7 @@ export function createEditorSession(
     }
     if (frame.type === "edit-route") return redoEditRoute(frame, remainingRedo);
     if (frame.type === "set-wire-color") return redoSetWireColor(frame, remainingRedo);
+    if (frame.type === "replace-projection") return redoReplaceProjection(frame, remainingRedo);
     const connection = document.connections.get(frame.connectionId);
     if (!connection) return fail(recoveryError("重做所需的连接不存在。"));
     const result = await deleteConnection({
@@ -2321,10 +2824,16 @@ export function createEditorSession(
       // 撤销/重做时按当时绑定重新解析，因此历史不需要改写；但帧里捕获的引擎 ID（悬空连接
       // 清理清单）只在捕获时的引擎代数上有意义，代数计数随之递增。
       engineGeneration += 1;
-      bindings.components = { ...next.components };
-      bindings.connections = { ...next.connections };
-      bindings.componentKinds = next.componentKinds ? { ...next.componentKinds } : undefined;
-      bindings.ports = next.ports ? { ...next.ports } : undefined;
+      const adopted = cloneBindings(next);
+      bindings.components = adopted.components;
+      bindings.connections = adopted.connections;
+      bindings.flatComponents = adopted.flatComponents;
+      bindings.flatConnections = adopted.flatConnections;
+      bindings.componentFlatIds = adopted.componentFlatIds;
+      bindings.connectionFlatIds = adopted.connectionFlatIds;
+      bindings.componentKinds = adopted.componentKinds;
+      bindings.ports = adopted.ports;
+      bindings.portSources = adopted.portSources;
       // 端口清单以引擎回传为权威（ADR 0020）：重建后的清单随绑定刷新到文档上。
       for (const component of document.components.values()) {
         if (component.lifecycle !== "active") continue;
@@ -2333,6 +2842,14 @@ export function createEditorSession(
       }
       publish();
     },
+    replaceProjection,
+    projection() {
+      return lastProjection ? cloneProjectionInput(lastProjection) : null;
+    },
+    adoptProjection(input) {
+      lastProjection = cloneProjectionInput(input);
+    },
+    rewriteSubcircuitReferences,
     subscribe(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);

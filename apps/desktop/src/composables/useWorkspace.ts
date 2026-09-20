@@ -6,8 +6,11 @@ import {
   type CommandResult,
   type EditorBindings,
   type EditorCommand,
+  type EditorComponent,
+  type EditorComponentKind,
   type EditorComponentId,
   type EditorDocument,
+  type EditorProjectionInput,
   type Point,
   type EditorSelection,
   type EditorSession,
@@ -15,7 +18,7 @@ import {
   type WireColorId,
 } from "../editor/index.ts";
 import { createProtocolEnginePort } from "../editor/protocolEnginePort.ts";
-import type { ConnectionDraftPort } from "../editor/connection-draft.ts";
+import { normalizeConnectionEndpoints, type ConnectionDraftPort } from "../editor/connection-draft.ts";
 import {
   createWorkspace,
   type CircuitDocument,
@@ -30,9 +33,19 @@ import {
 import { createEngineCallQueue } from "../workspace/engineQueue.ts";
 import {
   parseProjectFile,
+  projectPathIdentity,
+  rebaseProjectFileReferences,
+  relativeProjectReference,
+  resolveProjectReference,
   serializeProjectFile,
   type ParsedProjectFile,
+  type ProjectFileData,
 } from "../project-file/index.ts";
+import {
+  flattenProjectHierarchy,
+  type FlattenProjectResult,
+  type HierarchyProjectReader,
+} from "../project-file/hierarchy.ts";
 import {
   forgetRecentProject,
   projectDisplayName,
@@ -132,6 +145,10 @@ interface WorkspaceBinding {
   addComponent(kind: ComponentKindName, center: Point, altKey?: boolean, continuous?: boolean): Promise<boolean>;
   /** 复制指定稳定编辑器元件；副本不继承连接、路线、选择或信号。 */
   duplicateComponent(componentId?: EditorComponentId): Promise<boolean>;
+  /** 选择一份已保存 Project 并把它作为 Subcircuit 加入当前父 Project。 */
+  addSubcircuitFromDialog(center?: Point): Promise<boolean>;
+  /** 显式重新读取并采用一个 Subcircuit 及其递归依赖；磁盘变化不会自动传播。 */
+  reloadSubcircuit(componentId: EditorComponentId): Promise<boolean>;
   /** 当前文档已保存到的路径原始写法；从未保存过时为 null。 */
   projectPath: DeepReadonly<Ref<string | null>>;
   /** 文档内容（结构与 Input 当前值）自上次保存以来是否有改动。 */
@@ -200,7 +217,17 @@ interface WorkspaceBinding {
 
 function toEditorBindings(bindings: SimulationBindings): EditorBindings {
   // 端口清单一并转交：编辑器文档里的元件靠它拿到自己的端口几何，运行时要读哪些端口也由它推导。
-  return { components: bindings.components, connections: bindings.connections ?? {}, componentKinds: bindings.componentKinds, ports: bindings.ports };
+  return {
+    components: bindings.components,
+    connections: bindings.connections ?? {},
+    ...(bindings.flatComponents ? { flatComponents: bindings.flatComponents } : {}),
+    ...(bindings.flatConnections ? { flatConnections: bindings.flatConnections } : {}),
+    ...(bindings.componentFlatIds ? { componentFlatIds: bindings.componentFlatIds } : {}),
+    ...(bindings.connectionFlatIds ? { connectionFlatIds: bindings.connectionFlatIds } : {}),
+    ...(bindings.componentKinds ? { componentKinds: bindings.componentKinds } : {}),
+    ...(bindings.ports ? { ports: bindings.ports } : {}),
+    ...(bindings.portSources ? { portSources: bindings.portSources } : {}),
+  };
 }
 
 /** 引擎不可用期间，两次健康检查重试之间的默认间隔。 */
@@ -272,6 +299,18 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   const editorState = shallowRef<EditorSnapshot | null>(null);
   let editor: EditorSession | null = null;
   let unsubscribeEditor: (() => void) | null = null;
+  /** 当前文档已经显式采用的层次投影；引擎重建只复用它，绝不重新读取磁盘。 */
+  let adoptedHierarchy: FlattenProjectResult | null = null;
+  /** 与 `adoptedHierarchy` 对应、可直接重建到空引擎的扁平 Circuit。 */
+  let adoptedCircuit: CircuitDocument | null = null;
+  /** 当前显式采用的 Project 图快照；普通编辑与引擎重建只读这份内存图。 */
+  let adoptedProjectFiles: Map<string, ProjectFileData> | null = null;
+  /** 投影历史只保存不含引擎 ID 的采用快照；接口不变的重载也靠 revision 区分。 */
+  const adoptedProjectionRevisions = new Map<string, {
+    hierarchy: FlattenProjectResult;
+    projectFiles: Map<string, ProjectFileData>;
+  }>();
+  let nextProjectionRevision = 1;
   let simulationRefreshRequested = false;
   /** 恢复循环是否在跑：防止同一次不可用触发多条并行的恢复路径。 */
   let recovering = false;
@@ -368,7 +407,244 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
 
   /** 当前编辑器文档里是否还有值得重建的电路：恢复只服务于「有文档要重建」的场景。 */
   function hasRebuildableDocument(): boolean {
+    if (adoptedCircuit !== null) return adoptedCircuit.components.length > 0;
     return (editor?.snapshot().document.components.length ?? 0) > 0;
+  }
+
+  /** 把一组引擎身份压回普通标量兼容形态；零个和多个身份保留数组语义。 */
+  function groupedIdentity(ids: readonly number[]): number | readonly number[] {
+    return ids.length === 1 ? ids[0]! : [...ids];
+  }
+
+  /**
+   * 将工作区按扁平 ID 返回的绑定投影回顶层 Editor ID。
+   * 层次来源映射只含稳定字符串 ID；数字引擎身份仍由工作区独占并可在重建后整体替换。
+   */
+  function hierarchyBindings(
+    flatBindings: SimulationBindings,
+    hierarchy: FlattenProjectResult,
+  ): SimulationBindings {
+    const flatComponents = Object.fromEntries(
+      Object.entries(flatBindings.components).flatMap(([flatId, binding]) => {
+        if (binding === undefined) return [];
+        const ids = Array.isArray(binding) ? binding : [binding];
+        return ids.length > 0 ? [[flatId, ids[0]!] as const] : [];
+      }),
+    );
+    const flatConnections = Object.fromEntries(
+      Object.entries(flatBindings.connections ?? {}).flatMap(([flatId, binding]) => {
+        if (binding === undefined) return [];
+        const ids = Array.isArray(binding) ? binding : [binding];
+        return ids.length > 0 ? [[flatId, ids[0]!] as const] : [];
+      }),
+    );
+    const components: Record<string, number | readonly number[]> = {};
+    const connections: Record<string, number | readonly number[]> = {};
+    const componentKinds: Record<string, EditorComponentKind> = {};
+    const ports: Record<string, readonly PortSpec[]> = {};
+    const componentFlatIds: Record<string, readonly string[]> = {};
+    const connectionFlatIds: Record<string, readonly string[]> = {};
+
+    for (const component of hierarchy.document.components) {
+      const flatIds = hierarchy.sources.components[component.id] ?? [];
+      const ids = flatIds.flatMap((flatId) => flatComponents[flatId] === undefined ? [] : [flatComponents[flatId]!]);
+      components[component.id] = groupedIdentity(ids);
+      componentFlatIds[component.id] = [...flatIds];
+      componentKinds[component.id] = component.kind;
+      const authoritative = component.kind === "subcircuit"
+        ? component.ports
+        : flatBindings.ports?.[flatIds[0] ?? component.id] ?? component.ports;
+      if (authoritative !== undefined) ports[component.id] = authoritative;
+    }
+    for (const connection of hierarchy.document.connections) {
+      const flatIds = hierarchy.sources.connections[connection.id] ?? [];
+      const ids = flatIds.flatMap((flatId) => flatConnections[flatId] === undefined ? [] : [flatConnections[flatId]!]);
+      connections[connection.id] = groupedIdentity(ids);
+      connectionFlatIds[connection.id] = [...flatIds];
+    }
+
+    const portSources = Object.fromEntries(
+      Object.entries(hierarchy.sources.ports).map(([componentId, byPort]) => [
+        componentId,
+        Object.fromEntries(Object.entries(byPort).map(([portName, source]) => {
+          const inputTargets = source.inputTargets?.map((endpoint) => ({ flatId: endpoint.componentId, port: endpoint.port }));
+          const outputRefs = source.outputSources?.map((endpoint) => ({ flatId: endpoint.componentId, port: endpoint.port }));
+          return [portName, {
+            ...(inputTargets && inputTargets.length > 0 ? { inputTargets, readableRefs: inputTargets } : {}),
+            ...(outputRefs && outputRefs.length > 0 ? { outputSource: outputRefs[0], readableRefs: outputRefs } : {}),
+          }];
+        })),
+      ]),
+    );
+
+    return {
+      components,
+      connections,
+      componentKinds,
+      ports,
+      flatComponents,
+      flatConnections,
+      componentFlatIds,
+      connectionFlatIds,
+      portSources,
+    };
+  }
+
+  /** 把层次解析器的稳定来源映射转换成编辑器事务所需的扁平投影。 */
+  function editorProjectionFromHierarchy(
+    hierarchy: FlattenProjectResult,
+    forceReplaceOwner?: EditorComponentId,
+    revision?: string,
+  ): EditorProjectionInput {
+    const portSources = Object.fromEntries(
+      Object.entries(hierarchy.sources.ports).map(([componentId, ports]) => [
+        componentId,
+        Object.fromEntries(Object.entries(ports).map(([portName, source]) => {
+          const inputTargets = source.inputTargets?.map((endpoint) => ({
+            flatId: endpoint.componentId,
+            port: endpoint.port,
+          }));
+          const readableRefs = source.outputSources?.map((endpoint) => ({
+            flatId: endpoint.componentId,
+            port: endpoint.port,
+          }));
+          return [portName, {
+            ...(inputTargets?.length ? { inputTargets } : {}),
+            ...(readableRefs?.length ? { outputSource: readableRefs[0], readableRefs } : {}),
+          }];
+        })),
+      ]),
+    );
+    return {
+      document: hierarchy.document,
+      flatCircuit: hierarchy.circuit,
+      componentFlatIds: hierarchy.sources.components,
+      connectionFlatIds: hierarchy.sources.connections,
+      portSources,
+      ...(forceReplaceOwner !== undefined ? { forceReplaceOwner } : {}),
+      ...(revision !== undefined ? { revision } : {}),
+    };
+  }
+
+  /**
+   * 用当前可见文档更新内存中的根 Project，再从已采用的子 Project 快照重新计算扁平投影。
+   * `readThrough` 只用于显式添加/重载；普通编辑与引擎重建绝不碰磁盘。
+   */
+  async function flattenVisibleDocument(
+    document: EditorDocument,
+    projectFiles: Map<string, ProjectFileData>,
+    readThrough: boolean,
+    refreshRoots?: ReadonlySet<string>,
+  ): Promise<FlattenProjectResult | null> {
+    const rootPath = projectPath.value;
+    if (rootPath === null) return null;
+    const rootFile = serializeProjectFile({ document, inputValues: state.value.inputValues });
+    projectFiles.set(projectPathIdentity(rootPath), rootFile);
+    const flattened = await flattenProjectHierarchy({
+      rootIdentity: rootPath,
+      root: rootFile,
+      reader: hierarchyProjectReader(projectFiles, readThrough, refreshRoots),
+    });
+    const previous = new Map(document.components.map((component) => [component.id, component]));
+    const rebuilt = rebuildLoadedDocumentGeometry({
+      components: flattened.document.components.map((component) => ({
+        ...component,
+        ...(component.ports === undefined && previous.get(component.id)?.ports !== undefined
+          ? { ports: previous.get(component.id)!.ports }
+          : {}),
+      })),
+      connections: flattened.document.connections,
+    }, defaultComponentDefinitionRegistry);
+    return { ...flattened, document: rebuilt };
+  }
+
+  /** 成功的普通编辑同步到已采用层次快照；这里只重算内存投影，不触发任何引擎调用。 */
+  async function syncAdoptedHierarchyFromEditor(): Promise<void> {
+    if (adoptedHierarchy === null || adoptedProjectFiles === null || projectPath.value === null || editor === null) return;
+    const cache = new Map(adoptedProjectFiles);
+    const flattened = await flattenVisibleDocument(editor.snapshot().document, cache, false);
+    if (flattened === null) return;
+    adoptedHierarchy = { ...flattened, document: editor.snapshot().document };
+    adoptedCircuit = circuitFromHierarchy(flattened);
+    adoptedProjectFiles = cache;
+    const revision = editor.projection()?.revision;
+    editor.adoptProjection(editorProjectionFromHierarchy(adoptedHierarchy, undefined, revision));
+    if (revision !== undefined) {
+      adoptedProjectionRevisions.set(revision, {
+        hierarchy: adoptedHierarchy,
+        projectFiles: new Map(cache),
+      });
+    }
+  }
+
+  /**
+   * 原子采用一份新的层次投影。EditorSession 负责局部引擎 diff、反向补偿和单历史帧；
+   * 组合层只在成功后切换内存 Project 图与恢复快照。
+   */
+  async function replaceHierarchyProjection(
+    hierarchy: FlattenProjectResult,
+    projectFiles: Map<string, ProjectFileData>,
+    forceReplaceOwner?: EditorComponentId,
+  ): Promise<boolean> {
+    if (editor === null) return false;
+    const revision = `hierarchy-${nextProjectionRevision++}`;
+    const result = await editor.replaceProjection(editorProjectionFromHierarchy(hierarchy, forceReplaceOwner, revision));
+    editorState.value = result.snapshot;
+    await refreshSimulationAfterBindingsChange();
+    if (!result.ok) {
+      if (ENGINE_TRANSPORT_ERROR_CODES.includes(result.error.code)) beginRecovery();
+      return false;
+    }
+    adoptedHierarchy = hierarchy;
+    adoptedCircuit = circuitFromHierarchy(hierarchy);
+    adoptedProjectFiles = projectFiles;
+    adoptedProjectionRevisions.set(revision, { hierarchy, projectFiles: new Map(projectFiles) });
+    refreshDirtyMarker();
+    return true;
+  }
+
+  /** 撤销/重做投影替换后，按会话携带的 revision 恢复相同的隐藏 Project 快照。 */
+  function restoreAdoptedProjectionRevision(): void {
+    const revision = editor?.projection()?.revision;
+    if (revision === undefined) return;
+    const adopted = adoptedProjectionRevisions.get(revision);
+    if (adopted === undefined) return;
+    adoptedHierarchy = { ...adopted.hierarchy, document: editor!.snapshot().document };
+    adoptedCircuit = circuitFromHierarchy(adopted.hierarchy);
+    adoptedProjectFiles = new Map(adopted.projectFiles);
+  }
+
+  /** 层次解析结果的扁平 Circuit 适配；协议类型在这个 seam 之后保持闭合。 */
+  function circuitFromHierarchy(hierarchy: FlattenProjectResult): CircuitDocument {
+    return {
+      components: hierarchy.circuit.components.map((component) => ({
+        id: component.id,
+        kind: component.kind,
+        ...(component.ports ? { ports: component.ports } : {}),
+      })),
+      connections: hierarchy.circuit.connections.map((connection) => ({
+        id: connection.id,
+        source: { ...connection.source },
+        target: { ...connection.target },
+      })),
+    };
+  }
+
+  /** 只改 Subcircuit 引用元数据，保持可见对象身份、几何与运行状态不变。 */
+  function documentWithReferences(
+    document: EditorDocument,
+    references: Readonly<Record<string, string>>,
+  ): EditorDocument {
+    return {
+      components: document.components.map((component) => {
+        const reference = references[component.id];
+        const subcircuit = component.data?.subcircuit;
+        return reference === undefined || subcircuit === undefined
+          ? component
+          : { ...component, data: { subcircuit: { ...subcircuit, reference } } };
+      }),
+      connections: document.connections,
+    };
   }
 
   /**
@@ -377,8 +653,9 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
    * 不参与推送；它们的引擎绑定随整体替换一起作废，撤销重建元件时会重新建立。
    */
   function currentCircuitDocument(): CircuitDocument {
+    if (adoptedCircuit !== null) return adoptedCircuit;
     const snapshot = editor?.snapshot();
-    const components = snapshot?.document.components ?? [];
+    const components = (snapshot?.document.components ?? []).filter((component) => component.kind !== "subcircuit");
     const present = new Set(components.map((component) => component.id));
     return circuitDocumentFrom({
       components,
@@ -393,17 +670,23 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
    * @returns 可直接交给 `Workspace.loadCircuit` / `openCircuit` 的电路文档。
    */
   function circuitDocumentFrom(document: EditorDocument): CircuitDocument {
+    const ordinary = document.components.filter(
+      (component): component is EditorComponent & { kind: ComponentKindName } => component.kind !== "subcircuit",
+    );
+    const ordinaryIds = new Set(ordinary.map((component) => component.id));
     return {
-      components: document.components.map((component) => ({
+      components: ordinary.map((component) => ({
         id: component.id,
         kind: component.kind,
         ...(component.ports ? { ports: component.ports } : {}),
       })),
-      connections: document.connections.map((connection) => ({
-        id: connection.id,
-        source: { componentId: connection.source.componentId, port: connection.source.port },
-        target: { componentId: connection.target.componentId, port: connection.target.port },
-      })),
+      connections: document.connections
+        .filter((connection) => ordinaryIds.has(connection.source.componentId) && ordinaryIds.has(connection.target.componentId))
+        .map((connection) => ({
+          id: connection.id,
+          source: { componentId: connection.source.componentId, port: connection.source.port },
+          target: { componentId: connection.target.componentId, port: connection.target.port },
+        })),
     };
   }
 
@@ -464,11 +747,18 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
           continue;
         }
         rebuildLatched = false;
+        const nextBindings = adoptedHierarchy === null
+          ? loaded.bindings
+          : hierarchyBindings(loaded.bindings, adoptedHierarchy);
         // 重建产生的新快照要显式发布：rebuildCircuit 只改工作区内部状态，不通知订阅者，
         // 不发布的话界面会停在恢复前的旧读数上（engineState 已是 ready，步数与信号却是旧的）。
-        state.value = loaded.snapshot;
-        editor?.adoptBindings(toEditorBindings(loaded.bindings));
+        workspace.rebindSimulation(nextBindings);
+        const rebuiltSnapshot = await workspace.refreshReadings();
+        editor?.adoptBindings(toEditorBindings(nextBindings));
         editor?.setEngineAvailability(true);
+        // 最后才发布「第 0 步 + 新读数」完成标志：观察者看到完成时，编辑器绑定与可用性
+        // 已同步切换，不能在两条赋值之间抢先提交一次仍被冻结的 undo。
+        state.value = rebuiltSnapshot;
         return;
       }
     } finally {
@@ -485,20 +775,37 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     document: EditorDocument,
     bindings: SimulationBindings,
     path: string | null,
+    hierarchy: FlattenProjectResult | null = null,
+    circuit: CircuitDocument | null = null,
+    projectFiles: Map<string, ProjectFileData> | null = null,
   ): void {
+    const adopted = hierarchy === null ? null : { ...hierarchy, document };
+    adoptedHierarchy = adopted;
+    adoptedCircuit = circuit;
+    adoptedProjectFiles = projectFiles;
     state.value = loaded.snapshot;
-    attachEditor(document, bindings);
+    if (adopted !== null && projectFiles !== null) {
+      const revision = `hierarchy-${nextProjectionRevision++}`;
+      adoptedProjectionRevisions.set(revision, { hierarchy: adopted, projectFiles: new Map(projectFiles) });
+      attachEditor(document, bindings, editorProjectionFromHierarchy(adopted, undefined, revision));
+    } else {
+      attachEditor(document, bindings);
+    }
     projectPath.value = path;
     saveError.value = null;
     openError.value = null;
   }
 
-  function attachEditor(document: EditorDocument, bindings: SimulationBindings): void {
+  function attachEditor(
+    document: EditorDocument,
+    bindings: SimulationBindings,
+    projection?: EditorProjectionInput,
+  ): void {
     unsubscribeEditor?.();
     // 新会话的绑定建立在当前进程上；此前的「进程已更换待重建」闩锁随之作废。
     rebuildLatched = false;
     editor = createEditorSession(
-      { document, bindings: toEditorBindings(bindings) },
+      { document, bindings: toEditorBindings(bindings), ...(projection ? { projection } : {}) },
       createProtocolEnginePort(monitoredAdapter, queue),
       {
         // EditorSession 只询问一个布尔可用性 seam；引擎状态仍留在 Workspace 快照中。
@@ -533,7 +840,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     }
     const document = createAndDemoDocument();
     // 初值省略：沿推送路径的既有规则沿用工作区当前输入值（与引擎重建同规则），示例不另立语义。
-    const loaded = await workspace.openCircuit(document);
+    const loaded = await workspace.openCircuit(circuitDocumentFrom(document));
     if (loaded.bindings === null) {
       openError.value = loaded.snapshot.operationError ?? "加载示例失败。";
       return;
@@ -591,6 +898,10 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     const result = await pending;
     editorState.value = result.snapshot;
     await refreshSimulationAfterBindingsChange();
+    if (result.ok && (command.type === "undo" || command.type === "redo")) {
+      restoreAdoptedProjectionRevision();
+    }
+    if (result.ok) await syncAdoptedHierarchyFromEditor();
     // 命令可能改变文档或输入值：脏标记在这里统一刷新，包装函数不必各自记挂。
     refreshDirtyMarker();
     if (!result.ok && ENGINE_TRANSPORT_ERROR_CODES.includes(result.error.code)) {
@@ -608,6 +919,17 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     await dispatch({ type: "set-port-width", componentId, ports });
   }
 
+  /** 把一份新的顶层可见文档经当前内存 Project 图展平并原子采用。 */
+  async function replaceVisibleHierarchyDocument(
+    document: EditorDocument,
+    forceReplaceOwner?: EditorComponentId,
+  ): Promise<boolean> {
+    if (adoptedProjectFiles === null) return false;
+    const cache = new Map(adoptedProjectFiles);
+    const hierarchy = await flattenVisibleDocument(document, cache, false);
+    return hierarchy !== null && replaceHierarchyProjection(hierarchy, cache, forceReplaceOwner);
+  }
+
   /** 右键菜单直接复用 EditorSession 的 add-component 命令；成功才返回 true。 */
   async function addComponent(kind: ComponentKindName, center: Point, altKey = false, continuous = false): Promise<boolean> {
     const result = await runEditorCommand({ type: "add-component", kind, position: center, altKey, continuous });
@@ -619,8 +941,106 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     const selection = editor?.snapshot().selection ?? null;
     const selectedId = componentId ?? (selection?.kind === "component" ? selection.id : undefined);
     if (!selectedId) return false;
+    const source = editor?.snapshot().document.components.find((component) => component.id === selectedId);
+    if (source?.kind === "subcircuit") {
+      return duplicateSubcircuit(source);
+    }
     const result = await runEditorCommand({ type: "duplicate-component", componentId: selectedId });
     return result?.ok ?? false;
+  }
+
+  /** 产生一个不与当前文档冲突、并与普通元件序列兼容的稳定 Editor ID。 */
+  function nextComponentId(document: EditorDocument): EditorComponentId {
+    const occupied = new Set(document.components.map((component) => component.id));
+    let sequence = 1;
+    while (occupied.has(`component-${sequence}`)) sequence += 1;
+    return `component-${sequence}`;
+  }
+
+  /** 复制 Subcircuit 的引用与当前缓存接口；内部结构由同一内存快照重新展平。 */
+  async function duplicateSubcircuit(source: EditorComponent): Promise<boolean> {
+    if (adoptedProjectFiles === null || projectPath.value === null || editor === null) return false;
+    const snapshot = editor.snapshot();
+    const duplicate: EditorComponent = {
+      ...source,
+      id: nextComponentId(snapshot.document),
+      displayName: source.displayName,
+      position: { x: source.position.x + 32, y: source.position.y + 32 },
+      ports: source.ports?.map((port) => ({ ...port, ...(port.bitRange ? { bitRange: { ...port.bitRange } } : {}) })),
+      data: source.data?.subcircuit ? {
+        subcircuit: {
+          ...source.data.subcircuit,
+          cachedPorts: source.data.subcircuit.cachedPorts.map((port) => ({ ...port, ...(port.bitRange ? { bitRange: { ...port.bitRange } } : {}) })),
+          ...(source.data.subcircuit.portOrder ? { portOrder: [...source.data.subcircuit.portOrder] } : {}),
+        },
+      } : source.data,
+    };
+    const document = { ...snapshot.document, components: [...snapshot.document.components, duplicate] };
+    const cache = new Map(adoptedProjectFiles);
+    const hierarchy = await flattenVisibleDocument(document, cache, false);
+    return hierarchy !== null && replaceHierarchyProjection(hierarchy, cache);
+  }
+
+  /**
+   * 从文件选择器添加 Subcircuit。父文档没有路径时先沿用既有保存流程建立身份；
+   * 取消、读取失败、接口非法或成环都不会发布文档或历史。
+   */
+  async function addSubcircuitFromDialog(center: Point = { x: 240, y: 180 }): Promise<boolean> {
+    if (editor === null) return false;
+    if (projectPath.value === null && !(await saveAs())) return false;
+    const parentPath = projectPath.value;
+    if (parentPath === null) return false;
+    const picked = await adapter.pickOpenPath();
+    if (!picked.ok) {
+      if (picked.reason !== "canceled") openError.value = picked.reason;
+      return false;
+    }
+    const reference = relativeProjectReference(picked.path, parentPath);
+    if (reference === null) {
+      openError.value = "所选 Project 与父 Project 不在同一路径根下，无法保存为可移植的相对引用。";
+      return false;
+    }
+    const snapshot = editor.snapshot();
+    const id = nextComponentId(snapshot.document);
+    const candidate: EditorComponent = {
+      id,
+      kind: "subcircuit",
+      displayName: projectDisplayName(picked.path),
+      position: { ...center },
+      lifecycle: "active",
+      ports: [],
+      data: { subcircuit: { reference, cachedPorts: [], status: "resolving" } },
+    };
+    const document = { ...snapshot.document, components: [...snapshot.document.components, candidate] };
+    const cache = new Map(adoptedProjectFiles ?? []);
+    const hierarchy = await flattenVisibleDocument(document, cache, true, new Set([projectPathIdentity(picked.path)]));
+    const added = hierarchy?.document.components.find((component) => component.id === id);
+    if (hierarchy === null || added?.data?.subcircuit?.status !== "resolved") {
+      const diagnostic = hierarchy?.diagnostics.find((item) => item.componentId === id);
+      openError.value = diagnostic?.message ?? "所选 Project 不能作为 Subcircuit 使用。";
+      return false;
+    }
+    openError.value = null;
+    return replaceHierarchyProjection(hierarchy, cache);
+  }
+
+  /** 显式采用磁盘上的 Subcircuit 新快照；失败结果也以完整未解析状态原子采用。 */
+  async function reloadSubcircuit(componentId: EditorComponentId): Promise<boolean> {
+    if (editor === null || adoptedProjectFiles === null || projectPath.value === null) return false;
+    const component = editor.snapshot().document.components.find((candidate) => candidate.id === componentId);
+    const data = component?.data?.subcircuit;
+    if (!component || component.kind !== "subcircuit" || data === undefined) return false;
+    const target = projectPathIdentity(data.targetIdentity ?? resolveProjectReference(data.reference, projectPath.value));
+    const cache = new Map(adoptedProjectFiles);
+    cache.delete(target);
+    const hierarchy = await flattenVisibleDocument(editor.snapshot().document, cache, true, new Set([target]));
+    if (hierarchy === null) return false;
+    const succeeded = await replaceHierarchyProjection(hierarchy, cache, componentId);
+    if (succeeded) {
+      const diagnostic = hierarchy.diagnostics.find((item) => item.componentId === componentId);
+      openError.value = diagnostic?.message ?? null;
+    }
+    return succeeded;
   }
 
   /** 提交元件库产生的待放置意图；成功才返回 true，供最近使用偏好记录使用。 */
@@ -635,13 +1055,67 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     return result?.ok ?? false;
   }
 
+  /** Subcircuit 删除必须移除完整扁平子树；普通元件继续走既有单对象事务。 */
+  async function deleteComponentCommand(componentId: EditorComponentId): Promise<void> {
+    const snapshot = editor?.snapshot();
+    const component = snapshot?.document.components.find((candidate) => candidate.id === componentId);
+    if (snapshot && component?.kind === "subcircuit") {
+      await replaceVisibleHierarchyDocument({
+        components: snapshot.document.components.filter((candidate) => candidate.id !== componentId),
+        connections: snapshot.document.connections,
+      });
+      return;
+    }
+    await dispatch({ type: "delete-component", componentId });
+  }
+
+  async function deleteSelectionCommand(): Promise<void> {
+    const selection = editor?.snapshot().selection;
+    if (selection?.kind === "component") {
+      const component = editor?.snapshot().document.components.find((candidate) => candidate.id === selection.id);
+      if (component?.kind === "subcircuit") {
+        await deleteComponentCommand(selection.id);
+        return;
+      }
+    }
+    await dispatch({ type: "delete-selected" });
+  }
+
+  async function deleteConnectionCommand(connectionId: string): Promise<void> {
+    const snapshot = editor?.snapshot();
+    const connection = snapshot?.document.connections.find((candidate) => candidate.id === connectionId);
+    const touchesSubcircuit = connection !== undefined && snapshot?.document.components.some((component) =>
+      component.kind === "subcircuit" &&
+      (component.id === connection.source.componentId || component.id === connection.target.componentId));
+    if (snapshot && connection && touchesSubcircuit) {
+      await replaceVisibleHierarchyDocument({
+        components: snapshot.document.components,
+        connections: snapshot.document.connections.filter((candidate) => candidate.id !== connectionId),
+      });
+      return;
+    }
+    await dispatch({ type: "delete-connection", connectionId });
+  }
+
+  async function confirmClearCommand(): Promise<void> {
+    const snapshot = editor?.snapshot();
+    if (snapshot && adoptedHierarchy !== null) {
+      await dispatch({ type: "cancel-current-operation" });
+      await replaceVisibleHierarchyDocument({ components: [], connections: [] });
+      return;
+    }
+    await dispatch({ type: "confirm-clear" });
+  }
+
   /**
    * 把文档写入指定路径并落定保存结果：成功则文档身份切换为该路径、脏标记清除并记录最近项目；
    * 失败只记录可展示原因，编辑器内容原样保留。
    * 序列化与校验都在这一刻完成，写入期间用户的继续编辑会反映在保存结束后的脏标记上。
    */
-  async function commitSave(path: string): Promise<boolean> {
-    const content = serializeCurrentProjectFile();
+  async function commitSave(path: string, fileOverride?: ProjectFileData): Promise<boolean> {
+    const content = fileOverride === undefined
+      ? serializeCurrentProjectFile()
+      : JSON.stringify(fileOverride);
     if (content === null) return false;
     // 落盘前用同一份校验实现做往返自检：保存出一个自己都打不开的文件是不可接受的。
     const validation = parseProjectFile(JSON.parse(content));
@@ -654,7 +1128,48 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
       saveError.value = result.reason;
       return false;
     }
+    const previousPath = projectPath.value;
+    if (fileOverride !== undefined && editor !== null) {
+      const references = Object.fromEntries(fileOverride.circuit.components.flatMap((component) =>
+        component.kind === "subcircuit" && component.data !== undefined && "reference" in component.data
+          ? [[component.id, component.data.reference] as const]
+          : []));
+      editor.rewriteSubcircuitReferences(references);
+      editorState.value = editor.snapshot();
+      if (previousPath !== null) {
+        for (const [revision, adopted] of adoptedProjectionRevisions) {
+          const oldRoot = adopted.projectFiles.get(projectPathIdentity(previousPath));
+          if (oldRoot === undefined) continue;
+          const rebased = rebaseProjectFileReferences(oldRoot, previousPath, path);
+          if (!rebased.ok) continue;
+          const historicalReferences = Object.fromEntries(rebased.value.circuit.components.flatMap((component) =>
+            component.kind === "subcircuit" && component.data !== undefined && "reference" in component.data
+              ? [[component.id, component.data.reference] as const]
+              : []));
+          const projectFiles = new Map(adopted.projectFiles);
+          projectFiles.delete(projectPathIdentity(previousPath));
+          projectFiles.set(projectPathIdentity(path), rebased.value);
+          adoptedProjectionRevisions.set(revision, {
+            hierarchy: {
+              ...adopted.hierarchy,
+              document: documentWithReferences(adopted.hierarchy.document, historicalReferences),
+            },
+            projectFiles,
+          });
+        }
+      }
+    }
     projectPath.value = path;
+    if (adoptedProjectFiles !== null) {
+      const cache = new Map(adoptedProjectFiles);
+      if (previousPath !== null) cache.delete(projectPathIdentity(previousPath));
+      const currentFile = fileOverride ?? serializeProjectFile({
+        document: editor!.snapshot().document,
+        inputValues: state.value.inputValues,
+      });
+      cache.set(projectPathIdentity(path), currentFile);
+      adoptedProjectFiles = cache;
+    }
     saveError.value = null;
     // 基线取序列化时刻的内容：写文件期间用户又做了编辑的话，保存结束后仍然是脏的。
     savedFileSnapshot = content;
@@ -673,7 +1188,17 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
       if (dialog.reason !== "canceled") saveError.value = dialog.reason;
       return false;
     }
-    return commitSave(dialog.path);
+    const current = editor.snapshot();
+    const file = serializeProjectFile({ document: current.document, inputValues: state.value.inputValues });
+    if (projectPath.value === null || projectPathIdentity(projectPath.value) === projectPathIdentity(dialog.path)) {
+      return commitSave(dialog.path, file);
+    }
+    const rebased = rebaseProjectFileReferences(file, projectPath.value, dialog.path);
+    if (!rebased.ok) {
+      saveError.value = rebased.error.message;
+      return false;
+    }
+    return commitSave(dialog.path, rebased.value);
   }
 
   async function save(): Promise<boolean> {
@@ -698,28 +1223,99 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
       openError.value = "仿真引擎不可用，无法打开项目。";
       return false;
     }
-    const loaded = await workspace.openCircuit(circuitDocumentFrom(parsed.document), {
+    const projectFiles = new Map<string, ProjectFileData>([
+      [projectPathIdentity(path), parsed.file],
+    ]);
+    const hierarchy = await flattenProjectHierarchy({
+      rootIdentity: path,
+      root: parsed.file,
+      reader: hierarchyProjectReader(projectFiles, true),
+    });
+    const circuit = circuitFromHierarchy(hierarchy);
+    const loaded = await workspace.openCircuit(circuit, {
       inputValues: parsed.inputValues,
     });
     if (loaded.bindings === null) {
       openError.value = loaded.snapshot.operationError ?? "打开项目失败。";
       return false;
     }
+    const projectedBindings = hierarchyBindings(loaded.bindings, hierarchy);
+    state.value = workspace.rebindSimulation(projectedBindings);
+    state.value = await workspace.refreshReadings();
     // 解析出的端点 point 是占位零点（#35 契约）：端口清单此刻已由引擎回传，先用元件位置
     // 与端口几何重建端点与 Route，再把文档交给会话；占位值不能带进后续编辑。
     const document = rebuildLoadedDocumentGeometry(
       {
-        components: parsed.document.components.map((component) => ({
+        components: hierarchy.document.components.map((component) => ({
           ...component,
-          ...(loaded.ports[component.id] !== undefined ? { ports: loaded.ports[component.id] } : {}),
+          ...(projectedBindings.ports?.[component.id] !== undefined ? { ports: projectedBindings.ports[component.id] } : {}),
         })),
-        connections: parsed.document.connections,
+        connections: hierarchy.document.connections,
       },
       defaultComponentDefinitionRegistry,
     );
-    finishDocumentLoad(loaded, document, loaded.bindings, path);
+    finishDocumentLoad({ snapshot: state.value }, document, projectedBindings, path, hierarchy, circuit, projectFiles);
     recordRecentProject(path);
     return true;
+  }
+
+  /** 子 Project 读取只做 IO 与项目文件校验；递归、接口和环规则全部留给 hierarchy 模块。 */
+  function hierarchyProjectReader(
+    cache: Map<string, ProjectFileData>,
+    readThrough: boolean,
+    refreshRoots: ReadonlySet<string> = new Set(),
+  ): HierarchyProjectReader {
+    const refreshing = new Set([...refreshRoots].map((identity) => projectPathIdentity(identity)));
+    return {
+      async read(identity) {
+        const key = projectPathIdentity(identity);
+        const adopted = cache.get(key);
+        const refresh = refreshing.has(key);
+        if (adopted !== undefined && !refresh) return { ok: true, value: adopted };
+        if (!readThrough) {
+          return { ok: false, code: "file-not-found", message: `当前采用快照中没有 Project：${identity}` };
+        }
+        const file = await adapter.readProjectFile(identity);
+        if (!file.ok) {
+          return {
+            ok: false,
+            code: file.code === PROJECT_FILE_NOT_FOUND_CODE ? "file-not-found" : "project-read-failed",
+            message: file.reason,
+          };
+        }
+        let raw: unknown;
+        try {
+          raw = JSON.parse(file.content);
+        } catch (error) {
+          return {
+            ok: false,
+            code: "project-file-invalid",
+            message: `项目文件不是合法的 JSON：${error instanceof Error ? error.message : "解析失败"}`,
+          };
+        }
+        const parsed = parseProjectFile(raw);
+        if (parsed.ok) {
+          cache.set(key, parsed.value.file);
+          if (refresh) {
+            for (const component of parsed.value.file.circuit.components) {
+              if (component.kind !== "subcircuit") continue;
+              const data = component.data;
+              if (!data || !("reference" in data)) continue;
+              refreshing.add(projectPathIdentity(resolveProjectReference(data.reference, identity)));
+            }
+          }
+        } else if (refresh) {
+          cache.delete(key);
+        }
+        return parsed.ok
+          ? { ok: true, value: parsed.value.file }
+          : {
+              ok: false,
+              code: "project-file-invalid",
+              message: parsed.errors[0]?.message ?? "项目文件校验失败。",
+            };
+      },
+    };
   }
 
   async function openProjectFromPath(path: string): Promise<boolean> {
@@ -844,12 +1440,48 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
 
   /** 创建或安全重接连接；失败只返回错误，草稿由画布交互层继续保留。 */
   async function createConnection(left: Parameters<WorkspaceBinding["createConnection"]>[0], right: Parameters<WorkspaceBinding["createConnection"]>[1], route?: readonly Point[], connectionId?: string, color?: WireColorId): Promise<{ ok: boolean; error?: string }> {
+    const snapshot = editor?.snapshot();
+    const subcircuitIds = new Set(snapshot?.document.components
+      .filter((component) => component.kind === "subcircuit")
+      .map((component) => component.id) ?? []);
+    const existing = connectionId === undefined
+      ? undefined
+      : snapshot?.document.connections.find((connection) => connection.id === connectionId);
+    const touchesSubcircuit = subcircuitIds.has(left.componentId) || subcircuitIds.has(right.componentId) ||
+      (existing !== undefined && (subcircuitIds.has(existing.source.componentId) || subcircuitIds.has(existing.target.componentId)));
+    if (snapshot && adoptedHierarchy !== null && touchesSubcircuit) {
+      const { source, target } = normalizeConnectionEndpoints(left, right);
+      const id = connectionId ?? nextConnectionId(snapshot.document);
+      const nextConnection = {
+        id,
+        source: { componentId: source.componentId, port: source.port, point: { ...source.point } },
+        target: { componentId: target.componentId, port: target.port, point: { ...target.point } },
+        lifecycle: "visible" as const,
+        danglingEndpoints: [] as const,
+        ...(route ? { route: route.map((point) => ({ ...point })), waypoints: route.length > 2 ? route.slice(1, -1).map((point) => ({ ...point })) : [] } : {}),
+        ...(color !== undefined ? { color } : existing?.color !== undefined ? { color: existing.color } : {}),
+      };
+      const connections = connectionId === undefined
+        ? [...snapshot.document.connections, nextConnection]
+        : snapshot.document.connections.map((connection) => connection.id === connectionId ? nextConnection : connection);
+      const succeeded = await replaceVisibleHierarchyDocument({ components: snapshot.document.components, connections });
+      return succeeded
+        ? { ok: true }
+        : { ok: false, error: editor?.snapshot().error?.message ?? "层次 Connection 提交失败。" };
+    }
     const command = connectionId
       ? { type: "reconnect-connection" as const, connectionId, left, right, route }
       : { type: "create-connection" as const, left, right, route, color };
     const result = await runEditorCommand(command);
     if (result === null) return { ok: false, error: "编辑器尚未准备好。" };
     return result.ok ? { ok: true } : { ok: false, error: result.error.message };
+  }
+
+  function nextConnectionId(document: EditorDocument): string {
+    const occupied = new Set(document.connections.map((connection) => connection.id));
+    let sequence = 1;
+    while (occupied.has(`connection-${sequence}`)) sequence += 1;
+    return `connection-${sequence}`;
   }
 
   async function reconnectConnection(connectionId: string, left: Parameters<WorkspaceBinding["createConnection"]>[0], right: Parameters<WorkspaceBinding["createConnection"]>[1], route?: readonly Point[]): Promise<{ ok: boolean; error?: string }> {
@@ -875,12 +1507,12 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     resetRoute: (connectionId) => dispatch({ type: "reset-route", connectionId }),
     setWireColor: (connectionId, color) => dispatch({ type: "set-wire-color", connectionId, color }),
     deleteWaypoint: (connectionId, pointIndex) => dispatch({ type: "delete-waypoint", connectionId, pointIndex }),
-    deleteSelection: () => dispatch({ type: "delete-selected" }),
-    deleteComponent: (componentId) => dispatch({ type: "delete-component", componentId }),
+    deleteSelection: deleteSelectionCommand,
+    deleteComponent: deleteComponentCommand,
     setPortWidthCommand,
-    deleteConnection: (connectionId) => dispatch({ type: "delete-connection", connectionId }),
+    deleteConnection: deleteConnectionCommand,
     requestClear: () => dispatch({ type: "request-clear" }),
-    confirmClear: () => dispatch({ type: "confirm-clear" }),
+    confirmClear: confirmClearCommand,
     cancelCurrentOperation: () => dispatch({ type: "cancel-current-operation" }),
     undo: () => dispatch({ type: "undo" }),
     redo: () => dispatch({ type: "redo" }),
@@ -890,6 +1522,8 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     retryPlacement,
     addComponent,
     duplicateComponent,
+    addSubcircuitFromDialog,
+    reloadSubcircuit,
     projectPath: readonly(projectPath),
     isDirty: readonly(isDirty),
     saveError: readonly(saveError),

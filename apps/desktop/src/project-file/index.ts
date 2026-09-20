@@ -7,21 +7,27 @@
  *
  * v1 的既定取舍（规格 #34）：Editor ID 写入文件并作为文件内唯一身份，加载后沿用同一套
  * 身份；Waypoint 以语义形式内联在连接记录上，渲染 Route 不进文件；端口清单只为数据驱动
- * 元件写入，且只是缓存——引擎回传的清单仍是权威；`data` 数据袋 v1 只有 Input 的当前值；
+ * 元件写入，且只是缓存——引擎回传的清单仍是权威；`data` 数据袋 v1 保存 Input 当前值或
+ * Subcircuit 的引用与缓存接口；
  * 视口、选中、撤销历史、波形历史与时序状态都是会话状态，不进文件。
  */
 
 import type { ComponentKindName, PortSpec, Signal } from "@circuit-platform/protocol";
+import type { EditorComponentKind, EditorComponentData, SubcircuitComponentData } from "../editor/component.ts";
 import type { EditorComponent, EditorConnection, EditorDocument, Point } from "../editor/index.ts";
 import { isWireColorId, type WireColorId } from "../editor/wire-appearance.ts";
+import { relativeProjectReference, resolveProjectReference, type PathPlatform } from "./paths.ts";
 
 export {
   currentPathPlatform,
   normalizeProjectPath,
   projectPathIdentity,
-  sameProjectPath,
+  projectDirectory,
+  resolveProjectReference,
+  relativeProjectReference,
   type PathPlatform,
   type ProjectPathOptions,
+  sameProjectPath,
 } from "./paths.ts";
 
 /** 当前实现支持的最高项目文件版本；版本规则由 `parseProjectFile` 执行。 */
@@ -45,7 +51,8 @@ const FILE_KINDS = [
   "d_flip_flop",
   "splitter",
   "merger",
-] as const satisfies readonly ComponentKindName[];
+  "subcircuit",
+] as const satisfies readonly EditorComponentKind[];
 
 /**
  * 文件里写端口清单的「数据驱动」元件：Input/Output 的位宽与拆线器/合线器的位区间是用户
@@ -68,14 +75,19 @@ export interface ProjectFileData {
 /** 文件里一个元件的记录。 */
 export interface ProjectFileComponent {
   id: string;
-  kind: ComponentKindName;
+  kind: EditorComponentKind;
   displayName: string;
   position: { x: number; y: number };
   /** 端口清单缓存，只在数据驱动元件上写入；引擎回传的清单仍是权威。 */
   ports?: readonly PortSpec[];
-  /** 按类型扩展的数据袋；v1 只有 Input 使用，存保存时的当前激励值。 */
-  data?: { value?: string };
+  /** 按类型扩展的数据袋；v1 支持 Input 当前激励值与 Subcircuit 引用缓存。 */
+  data?: ProjectFileComponentData;
 }
+
+/** 按元件类型扩展的项目文件数据袋；Subcircuit 的缓存接口随父文件保存。 */
+export type ProjectFileComponentData =
+  | { value?: string }
+  | { reference: string; cachedPorts: readonly PortSpec[]; portOrder?: readonly string[] };
 
 /** 文件里一条连接的记录；端点用元件的 Editor ID 引用。 */
 export interface ProjectFileConnection {
@@ -98,6 +110,87 @@ export interface ProjectSerializationInput {
   inputValues?: Readonly<Record<string, Signal>>;
 }
 
+/** Save As 重定位引用时返回的稳定错误；失败时原文件不会产生部分改写。 */
+export interface ProjectFileRebaseError {
+  code: "reference-rebase-cross-root";
+  message: string;
+  componentId: string;
+  target: string;
+}
+
+export type ProjectFileRebaseResult =
+  | { ok: true; value: ProjectFileData }
+  | { ok: false; error: ProjectFileRebaseError };
+
+/**
+ * 将项目文件中顶层 Subcircuit 的引用从旧父路径重定位到新父路径。
+ *
+ * 每条引用先按旧父路径解析为目标身份，再按新父路径计算相对写法；所有目标都能
+ * 相对化后才一次性返回新文件，因此跨盘符或跨根失败时不会留下半成品修改。
+ * @param file 已通过 `parseProjectFile` 的规范化项目文件。
+ * @param oldParentProject 原父 Project 路径。
+ * @param newParentProject Save As 后的新父 Project 路径。
+ * @param platform 路径语义平台。
+ * @returns 全部引用重定位后的新文件，或稳定的跨根错误。
+ */
+export function rebaseProjectFileReferences(
+  file: ProjectFileData,
+  oldParentProject: string,
+  newParentProject: string,
+  platform?: PathPlatform,
+): ProjectFileRebaseResult {
+  const references = file.circuit.components.flatMap((component) => {
+    if (component.kind !== "subcircuit" || component.data === undefined || !("reference" in component.data)) return [];
+    const target = resolveProjectReference(component.data.reference, oldParentProject, platform);
+    const reference = relativeProjectReference(target, newParentProject, platform);
+    return [{ component, target, reference }];
+  });
+  const failed = references.find((item) => item.reference === null);
+  if (failed !== undefined) {
+    return {
+      ok: false,
+      error: {
+        code: "reference-rebase-cross-root",
+        message: `Subcircuit「${failed.component.id}」的目标无法从新父路径计算相对引用：${failed.target}。`,
+        componentId: failed.component.id,
+        target: failed.target,
+      },
+    };
+  }
+  const rebased = new Map(references.map((item) => [item.component.id, item.reference!]));
+  return {
+    ok: true,
+    value: {
+      version: file.version,
+      circuit: {
+        components: file.circuit.components.map((component) => ({
+          ...component,
+          position: { ...component.position },
+          ...(component.ports !== undefined ? { ports: component.ports.map(cloneFilePort) } : {}),
+          ...(component.kind === "subcircuit" && component.data !== undefined && "reference" in component.data
+            ? {
+                data: {
+                  ...component.data,
+                  reference: rebased.get(component.id)!,
+                  cachedPorts: component.data.cachedPorts.map(cloneFilePort),
+                  ...(component.data.portOrder !== undefined ? { portOrder: [...component.data.portOrder] } : {}),
+                },
+              }
+            : component.data !== undefined
+              ? { data: { ...component.data } }
+              : {}),
+        })),
+        connections: file.circuit.connections.map((connection) => ({
+          ...connection,
+          source: { ...connection.source },
+          target: { ...connection.target },
+          ...(connection.waypoints !== undefined ? { waypoints: connection.waypoints.map((point) => ({ ...point })) } : {}),
+        })),
+      },
+    },
+  };
+}
+
 /** 一次校验失败的单一原因；`code` 供程序分支，`message` 可直接展示。 */
 export interface ProjectFileError {
   code: string;
@@ -116,6 +209,8 @@ export interface ParsedProjectFile {
    * 再交给会话——会话的移动命令把持久 point 当作端口偏移使用，占位值不能带进后续编辑。
    */
   document: EditorDocument;
+  /** 通过同一份校验规则规范化后的文件结构，供层次解析器读取，不需要调用方回到 raw。 */
+  file: ProjectFileData;
   /** Input 元件保存时的当前值，键为元件 ID；重新打开后经既有 `set_input` 路径提交。 */
   inputValues: Readonly<Record<string, Signal>>;
 }
@@ -141,10 +236,13 @@ export function serializeProjectFile(input: ProjectSerializationInput): ProjectF
     // 快照文档本就只含活动元件，这里按生命周期过滤是防御性的：被删除的结构不属于文件。
     if (component.lifecycle !== "active") continue;
     const ports =
-      FILE_DATA_DRIVEN_KINDS.includes(component.kind) && component.ports !== undefined
+      component.kind !== "subcircuit" && FILE_DATA_DRIVEN_KINDS.includes(component.kind) && component.ports !== undefined
         ? component.ports.map(cloneFilePort)
         : undefined;
     const value = component.kind === "input" ? input.inputValues?.[component.id] : undefined;
+    const subcircuit = component.kind === "subcircuit"
+      ? (component as EditorComponent & { data?: EditorComponentData }).data?.subcircuit
+      : undefined;
     components.push({
       id: component.id,
       kind: component.kind,
@@ -152,6 +250,7 @@ export function serializeProjectFile(input: ProjectSerializationInput): ProjectF
       position: { x: component.position.x, y: component.position.y },
       ...(ports !== undefined ? { ports } : {}),
       ...(value !== undefined ? { data: { value } } : {}),
+      ...(subcircuit !== undefined ? { data: serializeSubcircuitData(subcircuit) } : {}),
     });
   }
 
@@ -279,7 +378,7 @@ export function parseProjectFile(raw: unknown): ProjectFileParseResult {
       });
     }
     let ports: readonly PortSpec[] | undefined;
-    if (entry.ports !== undefined && fileDataDrivenKindIs(kind)) {
+    if (entry.ports !== undefined && kind !== "subcircuit" && fileDataDrivenKindIs(kind)) {
       if (!isFilePortList(entry.ports)) {
         valid = false;
         errors.push({
@@ -303,16 +402,28 @@ export function parseProjectFile(raw: unknown): ProjectFileParseResult {
         inputValues[id] = data.value;
       }
     }
+    let subcircuitData: SubcircuitComponentData | undefined;
+    if (kind === "subcircuit") {
+      subcircuitData = parseSubcircuitData(entry.data);
+      if (subcircuitData === undefined) {
+        valid = false;
+        errors.push({
+          code: "subcircuit-data-invalid",
+          message: `${label}（${id}）的 data 必须包含非空 reference 与合法 cachedPorts。`,
+        });
+      }
+    }
     // `data` 袋在其余类型上未定义（含未来类型），按未知数据容忍忽略。
 
     if (valid && displayName !== null && position !== null) {
       components.push({
         id,
-        kind,
+        kind: kind as EditorComponent["kind"],
         displayName,
         position: { x: position.x, y: position.y },
         lifecycle: "active",
         ...(ports !== undefined ? { ports } : {}),
+        ...(subcircuitData !== undefined ? { data: { subcircuit: subcircuitData } } : {}),
       });
     }
   }
@@ -409,7 +520,16 @@ export function parseProjectFile(raw: unknown): ProjectFileParseResult {
   }
 
   if (errors.length > 0) return { ok: false, errors };
-  return { ok: true, value: { version, document: { components, connections }, inputValues } };
+  const document = { components, connections } as unknown as EditorDocument;
+  return {
+    ok: true,
+    value: {
+      version,
+      document,
+      file: serializeProjectFile({ document, inputValues }),
+      inputValues,
+    },
+  };
 }
 
 /** 连接只有渲染 Route、没有 Waypoint 投影时的语义回退；与会话移动元件时的推导是同一条规则。 */
@@ -427,13 +547,32 @@ function cloneFilePort(port: PortSpec): PortSpec {
 }
 
 /** 检查元件类型是否在 v1 文件格式允许的清单内。 */
-function fileKindIs(kind: string): kind is ComponentKindName {
+function fileKindIs(kind: string): kind is EditorComponentKind {
   return (FILE_KINDS as readonly string[]).includes(kind);
 }
 
 /** 检查元件类型是否为「端口清单必须进文件」的数据驱动元件。 */
 function fileDataDrivenKindIs(kind: ComponentKindName): boolean {
   return FILE_DATA_DRIVEN_KINDS.includes(kind);
+}
+
+function serializeSubcircuitData(data: SubcircuitComponentData): ProjectFileComponentData {
+  return {
+    reference: data.reference,
+    cachedPorts: data.cachedPorts.map(cloneFilePort),
+    ...(data.portOrder !== undefined ? { portOrder: [...data.portOrder] } : {}),
+  };
+}
+
+function parseSubcircuitData(value: unknown): SubcircuitComponentData | undefined {
+  if (!isRecord(value) || !isNonEmptyString(value.reference) || !isFilePortList(value.cachedPorts)) return undefined;
+  const cachedPorts = value.cachedPorts.map(cloneFilePort);
+  if (value.portOrder === undefined) return { reference: value.reference, cachedPorts };
+  if (!Array.isArray(value.portOrder) || !value.portOrder.every(isNonEmptyString)) return undefined;
+  const names = new Set(cachedPorts.map((port) => port.name));
+  const order = value.portOrder;
+  if (new Set(order).size !== order.length || order.length !== names.size || order.some((name) => !names.has(name))) return undefined;
+  return { reference: value.reference, cachedPorts, portOrder: [...order] };
 }
 
 function parseEndpointShape(value: unknown): { component: string; port: string } | null {

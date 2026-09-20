@@ -82,6 +82,67 @@ export function projectPathIdentity(path: string, platform: PathPlatform = curre
   return platform === "windows" ? normalized.toLowerCase() : normalized;
 }
 
+/**
+ * 取项目文件所在目录的词法路径。
+ * @param path 项目文件路径，可以是绝对路径或带 `base` 的相对路径。
+ * @param options 路径平台与相对路径基准。
+ * @returns 不含最后一段文件名的规范化目录路径。
+ */
+export function projectDirectory(path: string, options: ProjectPathOptions = {}): string {
+  const platform = options.platform ?? currentPathPlatform();
+  const normalized = normalizeProjectPath(path, options);
+  const parts = platform === "windows" ? parseWindowsPath(normalized) : parsePosixPath(normalized);
+  if (parts.segments.length > 0) parts.segments.pop();
+  return platform === "windows" ? joinWindowsPath(parts.root, parts.segments) : joinPosixPath(parts.root, parts.segments);
+}
+
+/**
+ * 按包含它的 Project 目录解析一条 Subcircuit 相对引用。
+ * @param reference 文件中保存的相对引用或绝对路径。
+ * @param parentProject 父 Project 的路径。
+ * @param platform 平台语义。
+ * @returns 规范化后的目标路径；不访问文件系统。
+ */
+export function resolveProjectReference(
+  reference: string,
+  parentProject: string,
+  platform: PathPlatform = currentPathPlatform(),
+): string {
+  return normalizeProjectPath(reference, { base: projectDirectory(parentProject, { platform }), platform });
+}
+
+/**
+ * 以父 Project 所在目录为基准计算目标 Project 的相对引用。
+ * @param targetProject 目标 Project 路径。
+ * @param parentProject 父 Project 路径。
+ * @param platform 平台语义。
+ * @returns 可保存的相对路径；不同根（例如不同 Windows 盘符）时返回 null。
+ */
+export function relativeProjectReference(
+  targetProject: string,
+  parentProject: string,
+  platform: PathPlatform = currentPathPlatform(),
+): string | null {
+  const target = normalizeProjectPath(targetProject, { platform });
+  const base = projectDirectory(parentProject, { platform });
+  const targetParts = platform === "windows" ? parseWindowsPath(target) : parsePosixPath(target);
+  const baseParts = platform === "windows" ? parseWindowsPath(base) : parsePosixPath(base);
+  const equalSegment = platform === "windows"
+    ? (left: string, right: string) => left.toLowerCase() === right.toLowerCase()
+    : (left: string, right: string) => left === right;
+  if (targetParts.root.toLowerCase() !== baseParts.root.toLowerCase()) return null;
+
+  let common = 0;
+  while (common < targetParts.segments.length && common < baseParts.segments.length &&
+    equalSegment(targetParts.segments[common]!, baseParts.segments[common]!)) common += 1;
+  const relative = [
+    ...baseParts.segments.slice(common).map(() => ".."),
+    ...targetParts.segments.slice(common),
+  ];
+  if (relative.length === 0) return ".";
+  return platform === "windows" ? relative.join("\\") : relative.join("/");
+}
+
 /** 按 Windows 分隔符拆出原始段，空段与 `.` 段在词法上不承载任何信息，直接丢弃。 */
 function splitWindowsSegments(text: string): string[] {
   return text.split("\\").filter((segment) => segment !== "" && segment !== ".");

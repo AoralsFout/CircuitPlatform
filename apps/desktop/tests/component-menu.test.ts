@@ -20,7 +20,7 @@ test("component menu searches Chinese names and logic aliases", () => {
 test("component menu groups recent items before categories and caps them at five", () => {
   const groups = createComponentMenuGroups(definitions, ["xor", "and", "or", "not", "input", "output"]);
   assert.deepEqual(groups[0]?.definitions.map((item) => item.kind), ["xor", "and", "or", "not", "input"]);
-  assert.equal(groups.map((group) => group.id).join(","), "recent,input-output,logic,sequential,bus");
+  assert.equal(groups.map((group) => group.id).join(","), "recent,input-output,logic,sequential,bus,subcircuit");
 });
 
 /** 「总线」是 Phase 4.5 新加的分类，拆线器与合线器列在它下面。 */
@@ -31,6 +31,13 @@ test("the bus category holds the splitter and the merger", () => {
   // 两个条目放下即可用，因此都不带禁用原因。
   assert.ok(bus?.definitions.every((item) => item.available && item.disabledReason === null));
   assert.equal(createComponentMenuGroups(definitions, [], "拆线")[0]?.definitions[0]?.kind, "splitter");
+});
+
+test("subcircuit definitions are searchable in their own category", () => {
+  const groups = createComponentMenuGroups(definitions);
+  const subcircuits = groups.find((group) => group.id === "subcircuit");
+  assert.deepEqual(subcircuits?.definitions.map((item) => item.kind), ["subcircuit"]);
+  assert.equal(createComponentMenuGroups(definitions, [], "层次")[0]?.definitions[0]?.kind, "subcircuit");
 });
 
 test("sequential definitions expose a usable clock and d flip-flop", () => {

@@ -20,6 +20,10 @@ test("visual fixture covers the required state matrix and reduced motion mode", 
     assert.match(script, new RegExp(state.replace("-", "\\-")), `截图脚本的状态表里没有 ${state}`);
     assert.match(fixture, new RegExp(`state === "${state}"`), `视觉夹具的 prepare() 里没有 ${state}`);
   }
+  for (const state of ["hierarchy-resolved", "hierarchy-unresolved"]) {
+    assert.match(script, new RegExp(state.replace("-", "\\-")), `截图脚本的状态表里没有 ${state}`);
+    assert.match(fixture, new RegExp(`state === "${state}"`), `视觉夹具的 prepare() 里没有 ${state}`);
+  }
   assert.match(script, /regular: \{ width: 1440, height: 900 \}/);
   assert.match(script, /narrow: \{ width: 720, height: 560 \}/);
   assert.match(fixture, /data-motion="reduced"/);

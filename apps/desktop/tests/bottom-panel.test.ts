@@ -17,10 +17,22 @@ test("bottom panel exposes an accessible expand and collapse control", async () 
   assert.match(panel, /aria-expanded="isExpanded"/);
   assert.match(panel, /isExpanded \? '收起仿真结果面板' : '展开仿真结果面板'/);
   assert.match(panel, /v-if="isExpanded && bottomTab === 'inspector'"/);
+  assert.match(panel, /reloadSubcircuit: \[componentId: string\]/);
+  assert.match(panel, /重新加载子电路/);
+  assert.match(panel, /emit\('reloadSubcircuit', inspector\.id\)/);
   assert.match(app, /const isBottomPanelExpanded = ref\(true\)/);
   assert.match(app, /editor-main--bottom-panel-collapsed/);
   assert.match(app, /@toggle-panel="toggleBottomPanel"/);
   assert.match(styles, /\.editor-main\.editor-main--bottom-panel-collapsed[^}]*35px/);
+});
+
+test("App forwards hierarchy intents through the workspace actions", async () => {
+  const app = await readFile(join(desktopRoot, "src", "App.vue"), "utf8");
+  assert.match(app, /addSubcircuitFromDialog,/);
+  assert.match(app, /reloadSubcircuit,/);
+  assert.match(app, /@select-subcircuit="addSubcircuitFromDialog"/);
+  assert.match(app, /selectSubcircuit: addSubcircuitFromDialog/);
+  assert.match(app, /@reload-subcircuit="reloadSubcircuit"/);
 });
 
 /**

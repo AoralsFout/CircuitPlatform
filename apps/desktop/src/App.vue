@@ -63,6 +63,8 @@ const {
   recentProjects,
   requestOpenRecent,
   requestLoadExample,
+  addSubcircuitFromDialog,
+  reloadSubcircuit,
 } = useWorkspace();
 const {
   selectedConnection,
@@ -256,6 +258,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
         @select-component="selectComponent"
         @set-input-bit="setInputBit"
         @place-component="beginPlacementFromSidebar"
+        @select-subcircuit="addSubcircuitFromDialog"
         @default-wire-color-change="setDefaultWireColor"
       />
 
@@ -308,7 +311,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           :scene="canvasScene"
           :viewport="viewport"
           :interaction="interaction"
-          :controller="{ componentDefinitions, recentComponentKinds, addComponent, rememberComponentKind, duplicateComponent, deleteComponent, resetRoute, setWireColor, deleteWaypoint, deleteConnection }"
+          :controller="{ componentDefinitions, recentComponentKinds, addComponent, selectSubcircuit: addSubcircuitFromDialog, rememberComponentKind, duplicateComponent, deleteComponent, resetRoute, setWireColor, deleteWaypoint, deleteConnection }"
           @select-component="select({ kind: 'component', id: $event })"
           @select-connection="select({ kind: 'connection', id: $event })"
           @clear-selection="select(null)"
@@ -352,6 +355,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           :inspector="inspector"
           @set-port-width="setPortWidth"
           @set-bit-ranges="setBitRanges"
+          @reload-subcircuit="reloadSubcircuit"
           :waveform="state.waveform"
           :waveform-rows="waveformRows"
           @select-tab="bottomTab = $event"

@@ -11,7 +11,7 @@ import type { ComponentKindName, EngineResponse, PortSpec, Signal } from "@circu
 import { defaultPortsFor } from "../src/editor/bus-ports.ts";
 import type { EditorSnapshot } from "../src/editor/index.ts";
 import { useWorkspace } from "../src/composables/useWorkspace.ts";
-import { parseProjectFile, serializeProjectFile } from "../src/project-file/index.ts";
+import { parseProjectFile, serializeProjectFile, type ProjectFileData } from "../src/project-file/index.ts";
 import {
   createWorkspace,
   type CircuitDocument,
@@ -616,6 +616,60 @@ function busProjectDocument(): EditorSnapshot["document"] {
   };
 }
 
+function dffSubcircuitProject(): ProjectFileData {
+  const inputPort = [{ name: "out", direction: "output", width: 1 }] as const;
+  const outputPort = [{ name: "in", direction: "input", width: 1 }] as const;
+  return {
+    version: 1,
+    circuit: {
+      components: [
+        { id: "boundary-d", kind: "input", displayName: "d", position: { x: 0, y: 0 }, ports: inputPort },
+        { id: "boundary-clock", kind: "input", displayName: "clock", position: { x: 0, y: 80 }, ports: inputPort },
+        { id: "ff", kind: "d_flip_flop", displayName: "FF", position: { x: 180, y: 40 } },
+        { id: "boundary-q", kind: "output", displayName: "q", position: { x: 360, y: 40 }, ports: outputPort },
+      ],
+      connections: [
+        { id: "d-to-ff", source: { component: "boundary-d", port: "out" }, target: { component: "ff", port: "d" } },
+        { id: "clock-to-ff", source: { component: "boundary-clock", port: "out" }, target: { component: "ff", port: "clock" } },
+        { id: "ff-to-q", source: { component: "ff", port: "q" }, target: { component: "boundary-q", port: "in" } },
+      ],
+    },
+  };
+}
+
+function twoDffParentProject(): ProjectFileData {
+  const inputPort = [{ name: "out", direction: "output", width: 1 }] as const;
+  const outputPort = [{ name: "in", direction: "input", width: 1 }] as const;
+  const cachedPorts = [
+    { name: "d", direction: "input", width: 1 },
+    { name: "clock", direction: "input", width: 1 },
+    { name: "q", direction: "output", width: 1 },
+  ] as const;
+  return {
+    version: 1,
+    circuit: {
+      components: [
+        { id: "data-1", kind: "input", displayName: "Data 1", position: { x: 0, y: 0 }, ports: inputPort, data: { value: "0" } },
+        { id: "clock-1", kind: "input", displayName: "Clock 1", position: { x: 0, y: 80 }, ports: inputPort, data: { value: "0" } },
+        { id: "data-2", kind: "input", displayName: "Data 2", position: { x: 0, y: 200 }, ports: inputPort, data: { value: "0" } },
+        { id: "clock-2", kind: "input", displayName: "Clock 2", position: { x: 0, y: 280 }, ports: inputPort, data: { value: "0" } },
+        { id: "u1", kind: "subcircuit", displayName: "register.circuit.json", position: { x: 260, y: 40 }, data: { reference: ".\\register.circuit.json", cachedPorts } },
+        { id: "u2", kind: "subcircuit", displayName: "register.circuit.json", position: { x: 260, y: 240 }, data: { reference: ".\\register.circuit.json", cachedPorts } },
+        { id: "out-1", kind: "output", displayName: "Q 1", position: { x: 540, y: 40 }, ports: outputPort },
+        { id: "out-2", kind: "output", displayName: "Q 2", position: { x: 540, y: 240 }, ports: outputPort },
+      ],
+      connections: [
+        { id: "u1-d", source: { component: "data-1", port: "out" }, target: { component: "u1", port: "d" } },
+        { id: "u1-clock", source: { component: "clock-1", port: "out" }, target: { component: "u1", port: "clock" } },
+        { id: "u1-q", source: { component: "u1", port: "q" }, target: { component: "out-1", port: "in" } },
+        { id: "u2-d", source: { component: "data-2", port: "out" }, target: { component: "u2", port: "d" } },
+        { id: "u2-clock", source: { component: "clock-2", port: "out" }, target: { component: "u2", port: "clock" } },
+        { id: "u2-q", source: { component: "u2", port: "q" }, target: { component: "out-2", port: "in" } },
+      ],
+    },
+  };
+}
+
 /** 与 `serializeProjectFile` 内部同一条回退：没有语义 Waypoint 时按渲染 Route 推导（`route.slice(1,-1)`）。 */
 function waypointsFromRoute(route: readonly { x: number; y: number }[] | undefined) {
   return route !== undefined && route.length > 2 ? route.slice(1, -1) : undefined;
@@ -706,6 +760,44 @@ test("saves a multi-bit circuit to a project file and reopens it with the same s
   assert.equal(after.isDirty.value, false);
   assert.equal(after.recentProjects.value.length, 1);
   assert.equal(after.recentProjects.value[0]?.displayName, "bus.circuit.json");
+});
+
+test("two Subcircuit occurrences keep independent DFlipFlop simulation state", { skip: engineAvailable() }, async (t) => {
+  const { EngineClient } = require_("../electron/engine-client.cjs") as {
+    EngineClient: new (enginePath: string) => ProtocolEngineClient;
+  };
+  const client = new EngineClient(enginePath);
+  t.after(() => client.close());
+
+  const directory = await mkdtemp(join(tmpdir(), "temporal-e2e-hierarchy-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const parentPath = join(directory, "parent.circuit.json");
+  const childPath = join(directory, "register.circuit.json");
+  await writeFile(parentPath, JSON.stringify(twoDffParentProject()), "utf8");
+  await writeFile(childPath, JSON.stringify(dffSubcircuitProject()), "utf8");
+
+  const restoreWindow = stubDesktopWindow(client);
+  t.after(restoreWindow);
+  const binding = useWorkspace();
+  await binding.bootstrap();
+  assert.equal(await binding.openProjectFromPath(parentPath), true);
+  // 第一拍把两个外部 clock 的已知 0 建立为边沿前值；X → 1 不算可靠上升沿。
+  await binding.step();
+
+  await binding.setInputBit("data-1", 0, "1");
+  await binding.setInputBit("clock-1", 0, "1");
+  assert.equal(binding.state.value.signals["u1:d"], "1");
+  assert.equal(binding.state.value.signals["u1:clock"], "1");
+  await binding.step();
+  assert.equal(binding.state.value.signals["u1:q"], "1");
+  assert.equal(binding.state.value.signals["u2:q"], "X", "未收到上升沿的第二个使用处保持未知");
+
+  await binding.setInputBit("clock-2", 0, "1");
+  await binding.step();
+  assert.equal(binding.state.value.signals["u1:q"], "1", "第二个使用处的上升沿不能污染第一个状态");
+  assert.equal(binding.state.value.signals["u2:q"], "0");
+  assert.equal(binding.state.value.signals["out-1:in"], "1");
+  assert.equal(binding.state.value.signals["out-2:in"], "0");
 });
 
 test("rebuilds the current document automatically after the real engine process is killed", { skip: engineAvailable() }, async (t) => {

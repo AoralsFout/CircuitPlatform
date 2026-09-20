@@ -45,6 +45,42 @@
         clock: [bit("out", "output")],
         d_flip_flop: [bit("d", "input"), bit("clock", "input"), bit("q", "output")],
       };
+      // 层次视觉状态使用真实项目加载路径：父文件含一个 Subcircuit，子文件提供 A/Y 接口。
+      // 这里仅提供夹具文本与桥接响应，不在视觉页实现解析或展平。
+      const hierarchyParent = {
+        version: 1,
+        circuit: {
+          components: [
+            { id: "root-input", kind: "input", displayName: "输入 A", position: { x: 72, y: 212 }, data: { value: "0" } },
+            {
+              id: "alu-instance", kind: "subcircuit", displayName: "ALU 子电路", position: { x: 320, y: 160 },
+              data: {
+                reference: "./child.circuit.json",
+                cachedPorts: [bit("A", "input"), bit("Y", "output")],
+                portOrder: ["A", "Y"],
+              },
+            },
+            { id: "root-output", kind: "output", displayName: "输出 Y", position: { x: 624, y: 212 } },
+          ],
+          connections: [
+            { id: "root-in", source: { component: "root-input", port: "out" }, target: { component: "alu-instance", port: "A" } },
+            { id: "root-out", source: { component: "alu-instance", port: "Y" }, target: { component: "root-output", port: "in" } },
+          ],
+        },
+      };
+      const hierarchyChild = {
+        version: 1,
+        circuit: {
+          components: [
+            { id: "child-input", kind: "input", displayName: "A", position: { x: 72, y: 140 }, ports: [bit("out", "output")] },
+            { id: "child-output", kind: "output", displayName: "Y", position: { x: 360, y: 140 }, ports: [bit("in", "input")] },
+          ],
+          connections: [
+            { id: "child-wire", source: { component: "child-input", port: "out" }, target: { component: "child-output", port: "in" } },
+          ],
+        },
+      };
+      const hierarchyState = state === "hierarchy-resolved" || state === "hierarchy-unresolved";
       const response = (value) => Promise.resolve(value);
       window.circuitPlatform = {
         checkEngine: () => response({ status: "ok", engine: "Visual test engine" }),
@@ -101,6 +137,15 @@
         reset: () => {
           tickStep = 0;
           return response({ type: "reset_done", requestId: "visual", status: "ok" });
+        },
+        pickOpenPath: () => response({ ok: true, path: "/visual/parent.circuit.json" }),
+        readProjectFile: (filePath) => {
+          if (!hierarchyState) return response({ ok: false, reason: "视觉夹具未启用层次项目" });
+          if (filePath.endsWith("child.circuit.json")) {
+            if (state === "hierarchy-unresolved") return response({ ok: false, reason: "找不到子电路文件", code: "PROJECT_FILE_NOT_FOUND" });
+            return response({ ok: true, content: JSON.stringify(hierarchyChild) });
+          }
+          return response({ ok: true, content: JSON.stringify(hierarchyParent) });
         },
       };
       await import("/src/main.ts");
@@ -232,6 +277,19 @@
         // 首启空状态（#40）本身就是画面：启动不再自动加载示例，其余状态先从空状态面板
         // 显式加载示例，再等电路出现在画布上。
         if (state === "first-start" || state === "first-start-recent") return;
+        if (state === "hierarchy-resolved" || state === "hierarchy-unresolved") {
+          // 通过真实的「打开」入口加载父 Project；桥接返回的子文件是否存在决定两种状态。
+          // 首启时顶栏文件按钮尚未启用，真实入口在空状态面板；从这里发起同一个 requestOpen。
+          click(await waitFor('.empty-state__actions button:first-child'));
+          await waitFor('[data-subcircuit-status]');
+          const subcircuit = document.querySelector('[data-subcircuit-status]');
+          click(subcircuit);
+          await settle(80);
+          click(inspectorTab());
+          await waitFor('.inspector-subcircuit');
+          await settle(80);
+          return;
+        }
         click(await waitFor('[title="加载示例电路"]'));
         await waitFor(".circuit-node");
         failAdds = state === "error";

@@ -198,6 +198,105 @@ test("deletes the selected component and keeps its visual connections dangling",
   assert.equal(JSON.stringify(result.snapshot).includes("engineId"), false);
 });
 
+test("replaces a flattened projection as one history frame and restores it with undo/redo", async () => {
+  const engine = new FakeEngine();
+  const session = createSession(engine);
+  const before = createAndDemoDocument();
+  const next = {
+    ...before,
+    components: [
+      ...before.components,
+      { id: "not-gate", kind: "not" as const, displayName: "NOT 门", position: { x: 620, y: 420 }, lifecycle: "active" as const, ports: defaultPortsFor("not") ?? [] },
+    ],
+  };
+  const flatComponents = before.components.map((component) => ({ id: component.id, kind: component.kind as ComponentKindName, ...(component.ports ? { ports: component.ports } : {}) }));
+  const input = {
+    document: next,
+    flatCircuit: { components: [...flatComponents, { id: "not-gate", kind: "not" as const, ports: defaultPortsFor("not") ?? [] }], connections: before.connections.map((connection) => ({ id: connection.id, source: { componentId: connection.source.componentId, port: connection.source.port }, target: { componentId: connection.target.componentId, port: connection.target.port } })) },
+    componentFlatIds: Object.fromEntries(next.components.map((component) => [component.id, [component.id]])),
+    connectionFlatIds: Object.fromEntries(before.connections.map((connection) => [connection.id, [connection.id]])),
+    forceReplaceOwner: "and-gate",
+    revision: "projection-2",
+  };
+
+  const replaced = await session.replaceProjection(input);
+  assert.equal(replaced.ok, true);
+  assert.equal(replaced.snapshot.canUndo, true);
+  assert.equal(replaced.snapshot.document.components.some((component) => component.id === "not-gate"), true);
+  assert.equal(engine.calls.filter((call) => call.startsWith("addComponent:")).length, 2);
+
+  const undone = await session.dispatch({ type: "undo" });
+  assert.equal(undone.ok, true);
+  assert.equal(undone.snapshot.document.components.some((component) => component.id === "not-gate"), false);
+  assert.equal(undone.snapshot.canRedo, true);
+
+  const redone = await session.dispatch({ type: "redo" });
+  assert.equal(redone.ok, true);
+  assert.equal(redone.snapshot.document.components.some((component) => component.id === "not-gate"), true);
+});
+
+test("failed flattened projection publishes compensated engine identities without changing the document", async () => {
+  const engine = new FakeEngine();
+  const updates: EditorBindings[] = [];
+  const session = createEditorSession({
+    document: createAndDemoDocument(),
+    bindings: { components: { "input-a": 1, "input-b": 2, "and-gate": 3, output: 4 }, connections: { "wire-a": 10, "wire-b": 11, "wire-output": 12 } },
+  }, engine, { onBindingsChanged: (bindings) => updates.push(bindings) });
+  const document = createAndDemoDocument();
+  const input = {
+    document: { ...document, components: [...document.components, { id: "bad", kind: "not" as const, displayName: "NOT", position: { x: 10, y: 10 }, lifecycle: "active" as const }] },
+    flatCircuit: { components: [...document.components.map((component) => ({ id: component.id, kind: component.kind as ComponentKindName })), { id: "bad", kind: "not" as const }], connections: [] },
+    componentFlatIds: Object.fromEntries([...document.components.map((component) => [component.id, [component.id]]), ["bad", ["bad"]]]),
+    connectionFlatIds: {},
+  };
+  engine.failNext("addComponent:not");
+  const result = await session.replaceProjection(input);
+  assert.equal(result.ok, false);
+  assert.equal(result.snapshot.document.components.some((component) => component.id === "bad"), false);
+  assert.equal(result.snapshot.canUndo, false);
+  assert.equal(updates.length, 2);
+  assert.deepEqual(updates.at(-1)?.connections, { "wire-a": 202, "wire-b": 201, "wire-output": 200 });
+
+  const callsBeforeDelete = engine.calls.length;
+  const deleted = await session.dispatch({ type: "delete-connection", connectionId: "wire-a" });
+  assert.equal(deleted.ok, true);
+  assert.deepEqual(engine.calls.slice(callsBeforeDelete), ["removeConnection:202"]);
+});
+
+test("rewrites Subcircuit references without engine work and keeps projection history metadata aligned", async () => {
+  const engine = new FakeEngine();
+  const session = createSession(engine);
+  const base = createAndDemoDocument();
+  const hierarchicalDocument = {
+    ...base,
+    components: base.components.map((component) => component.id === "input-a"
+      ? {
+        ...component,
+        kind: "subcircuit" as const,
+        data: { subcircuit: { reference: "old-child.circuit", cachedPorts: component.ports ?? [] } },
+      }
+      : component),
+  };
+  const projection = {
+    document: hierarchicalDocument,
+    flatCircuit: {
+      components: base.components.map((component) => ({ id: component.id, kind: component.kind as ComponentKindName, ...(component.ports ? { ports: component.ports } : {}) })),
+      connections: base.connections.map((connection) => ({ id: connection.id, source: { componentId: connection.source.componentId, port: connection.source.port }, target: { componentId: connection.target.componentId, port: connection.target.port } })),
+    },
+    componentFlatIds: Object.fromEntries(base.components.map((component) => [component.id, [component.id]])),
+    connectionFlatIds: Object.fromEntries(base.connections.map((connection) => [connection.id, [connection.id]])),
+  };
+  const replaced = await session.replaceProjection(projection);
+  assert.equal(replaced.ok, true);
+  const callsBeforeRewrite = [...engine.calls];
+  assert.equal(session.rewriteSubcircuitReferences({ "input-a": "new-child.circuit" }), true);
+  assert.equal(engine.calls.length, callsBeforeRewrite.length);
+  assert.equal(session.snapshot().document.components.find((component) => component.id === "input-a")?.data?.subcircuit?.reference, "new-child.circuit");
+  await session.dispatch({ type: "undo" });
+  const redone = await session.dispatch({ type: "redo" });
+  assert.equal(redone.snapshot.document.components.find((component) => component.id === "input-a")?.data?.subcircuit?.reference, "new-child.circuit");
+});
+
 test("restores the local model when component deletion fails", async () => {
   const engine = new FakeEngine();
   engine.failOn = "removeComponent:3";

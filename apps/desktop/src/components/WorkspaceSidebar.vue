@@ -3,6 +3,7 @@ import { ref } from "vue";
 import type { InputControl, RailPage } from "../composables/useEditorState";
 import type { ComponentDefinition } from "../canvas";
 import type { ComponentKindName } from "@circuit-platform/protocol";
+import type { EditorComponentKind } from "../editor/component.ts";
 import type { InputBit, InputKey } from "../workspace";
 import { toggledInputBit } from "../workspace";
 import { resolveInputBitKeyboardAction } from "../editor/keyboard";
@@ -13,7 +14,7 @@ const BIT_COLUMNS = 8;
 
 interface SidebarComponent {
   id: string;
-  kind: ComponentKindName;
+  kind: EditorComponentKind;
   displayName: string;
   selected: boolean;
 }
@@ -35,6 +36,7 @@ const emit = defineEmits<{
   selectComponent: [componentId: string];
   setInputBit: [key: InputKey, index: number, bit: InputBit];
   placeComponent: [kind: ComponentKindName, continuous: boolean];
+  selectSubcircuit: [];
   defaultWireColorChange: [color: WireColorId];
 }>();
 
@@ -101,7 +103,8 @@ function bitStateClass(bit: InputBit): string {
   return "input-bit--unknown";
 }
 
-function startComponentDrag(event: DragEvent, kind: ComponentKindName): void {
+function startComponentDrag(event: DragEvent, kind: EditorComponentKind): void {
+  if (kind === "subcircuit") return;
   if (!event.dataTransfer) return;
   event.dataTransfer.effectAllowed = "copy";
   event.dataTransfer.setData("application/x-circuit-component", kind);
@@ -116,7 +119,7 @@ function startComponentDrag(event: DragEvent, kind: ComponentKindName): void {
     <template v-if="activeRailPage === 'components'">
       <div class="sidebar-section-title"><span>元件库</span><span class="component-count">{{ componentDefinitions.length }}</span></div>
       <div class="component-list">
-        <button v-for="definition in componentDefinitions" :key="definition.kind" class="component-item" :class="{ 'component-item--disabled': !definition.available }" type="button" :draggable="definition.available" :disabled="!definition.available" :title="definition.disabledReason ?? `添加${definition.displayName}`" @dragstart="startComponentDrag($event, definition.kind)" @click="emit('placeComponent', definition.kind, $event.shiftKey)">
+        <button v-for="definition in componentDefinitions" :key="definition.kind" class="component-item" :class="{ 'component-item--disabled': !definition.available }" type="button" :draggable="definition.available && definition.kind !== 'subcircuit'" :disabled="!definition.available" :title="definition.disabledReason ?? `添加${definition.displayName}`" @dragstart="startComponentDrag($event, definition.kind)" @click="definition.kind === 'subcircuit' ? emit('selectSubcircuit') : emit('placeComponent', definition.kind, $event.shiftKey)">
           <span class="component-symbol">{{ definition.symbol }}</span><span><strong>{{ definition.displayName }}</strong><small>{{ definition.kind.toUpperCase() }}</small></span><span class="drag-hint">＋</span>
         </button>
       </div>

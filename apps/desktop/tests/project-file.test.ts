@@ -5,6 +5,7 @@ import { createAndDemoDocument } from "../src/editor/index.ts";
 import {
   PROJECT_FILE_VERSION,
   parseProjectFile,
+  rebaseProjectFileReferences,
   serializeProjectFile,
   type ProjectFileError,
   type ParsedProjectFile,
@@ -160,6 +161,91 @@ test("round-trips a data-driven document without losing or shifting any field", 
   assert.equal(parsed.version, PROJECT_FILE_VERSION);
 });
 
+test("round-trips a subcircuit reference, cached interface, and explicit order", () => {
+  const cachedPorts = [
+    { name: "Y", direction: "output" as const, width: 1 },
+    { name: "A", direction: "input" as const, width: 8 },
+  ];
+  const document: EditorDocument = {
+    components: [{
+      id: "u1",
+      kind: "subcircuit",
+      displayName: "算术子电路",
+      position: at(100, 80),
+      lifecycle: "active",
+      ports: cachedPorts,
+      data: { subcircuit: { reference: "./arith.circuit.json", cachedPorts, portOrder: ["Y", "A"] } },
+    }],
+    connections: [],
+  };
+
+  const file = serializeProjectFile({ document });
+  assert.deepEqual(file.circuit.components[0]?.data, {
+    reference: "./arith.circuit.json",
+    cachedPorts,
+    portOrder: ["Y", "A"],
+  });
+  const parsed = successOf(file);
+  assert.deepEqual(parsed.file, file);
+  assert.deepEqual(parsed.document.components[0]?.data?.subcircuit, {
+    reference: "./arith.circuit.json",
+    cachedPorts,
+    portOrder: ["Y", "A"],
+  });
+});
+
+test("rebases every subcircuit reference atomically for Save As", () => {
+  const file = {
+    version: 1,
+    circuit: {
+      components: [
+        {
+          id: "u1",
+          kind: "subcircuit" as const,
+          displayName: "子电路 1",
+          position: at(0, 0),
+          data: { reference: "../lib/child.circuit.json", cachedPorts: [{ name: "A", direction: "input" as const, width: 1 }] },
+        },
+      ],
+      connections: [],
+    },
+  };
+  const rebased = rebaseProjectFileReferences(file, "/repo/projects/root.circuit.json", "/archive/root.circuit.json", "posix");
+  assert.ok(rebased.ok);
+  assert.equal(rebased.value.circuit.components[0]?.data && "reference" in rebased.value.circuit.components[0].data
+    ? rebased.value.circuit.components[0].data.reference
+    : undefined, "../repo/lib/child.circuit.json");
+  assert.equal(file.circuit.components[0]?.data && "reference" in file.circuit.components[0].data
+    ? file.circuit.components[0].data.reference
+    : undefined, "../lib/child.circuit.json");
+
+  const mixed = {
+    ...file,
+    circuit: {
+      ...file.circuit,
+      components: [
+        ...file.circuit.components,
+        {
+          id: "u2",
+          kind: "subcircuit" as const,
+          displayName: "跨盘子电路",
+          position: at(20, 0),
+          data: { reference: "D:\\other\\child.circuit.json", cachedPorts: [] },
+        },
+      ],
+    },
+  };
+  const failed = rebaseProjectFileReferences(mixed, "C:\\work\\root.circuit.json", "C:\\archive\\root.circuit.json", "windows");
+  assert.equal(failed.ok, false);
+  if (!failed.ok) {
+    assert.equal(failed.error.code, "reference-rebase-cross-root");
+    assert.equal(failed.error.componentId, "u2");
+  }
+  assert.equal(mixed.circuit.components[0]?.data && "reference" in mixed.circuit.components[0].data
+    ? mixed.circuit.components[0].data.reference
+    : undefined, "../lib/child.circuit.json");
+});
+
 test("derives semantic waypoints from a render-only route, as the editor session does", () => {
   // 示例文档的连接只带渲染 Route 没有 Waypoint 投影；序列化按会话移动元件时的同一条
   // 规则取 Route 的中间点作 Waypoint，直连（两个端点）不产生 Waypoint。
@@ -312,7 +398,7 @@ test("reports malformed structure with specific reasons", () => {
 
   const cases: readonly [unknown, string][] = [
     [{ kind: "input", displayName: "A", position: { x: 0, y: 0 } }, "component-id-invalid"],
-    [{ id: "a", kind: "subcircuit", displayName: "A", position: { x: 0, y: 0 } }, "component-kind-unknown"],
+    [{ id: "a", kind: "future_gate", displayName: "A", position: { x: 0, y: 0 } }, "component-kind-unknown"],
     [{ id: "a", kind: "input", displayName: "A", position: { x: 0, y: "0" } }, "component-position-invalid"],
     [
       { id: "a", kind: "input", displayName: "A", position: { x: 0, y: 0 }, ports: [{ name: "out", direction: "output", width: 0 }] },

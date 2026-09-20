@@ -1,4 +1,13 @@
 import type { ComponentKindName, EngineResponse, PortSpec, Signal } from "@circuit-platform/protocol";
+import {
+  engineComponentIds,
+  engineConnectionIds,
+  type EditorComponentKind,
+  type EditorPortSource,
+  type EngineComponentBinding,
+  type EngineConnectionBinding,
+  type EnginePortRef,
+} from "../editor/index.ts";
 import { createEngineCallQueue, type EngineCallQueue } from "./engineQueue.ts";
 
 /** 输入设置项的稳定键；键是编辑器组件 ID，与引擎身份无关。 */
@@ -119,24 +128,33 @@ export interface CircuitDocument {
    * 端口清单是位宽的唯一权威来源。内置元件省略它，由引擎回退到内置定义并在响应里回传；
    * 前端只在数据驱动的元件上才自己生成清单，不内置一份无人校验的副本。
    */
-  components: readonly { id: string; kind: ComponentKindName; ports?: readonly PortSpec[] }[];
+  components: readonly { id: string; kind: EditorComponentKind; ports?: readonly PortSpec[]; flatId?: string }[];
   connections: readonly {
     id: string;
     source: { componentId: string; port: string };
     target: { componentId: string; port: string };
+    flatId?: string;
   }[];
+  /** 可选的层次投影来源；工作区仍只负责扁平 Circuit 的生命周期。 */
+  portSources?: Readonly<Partial<Record<string, Readonly<Partial<Record<string, EditorPortSource>>>>>>;
 }
 
 /** 编辑器向仿真工作区提供的通用运行时绑定，不依赖任何固定示例身份。 */
 export interface SimulationBindings {
-  components: Readonly<Partial<Record<string, number>>>;
-  componentKinds?: Readonly<Partial<Record<string, ComponentKindName>>>;
+  components: Readonly<Partial<Record<string, EngineComponentBinding>>>;
+  componentKinds?: Readonly<Partial<Record<string, EditorComponentKind>>>;
   /**
    * 每个元件由引擎回传的端口清单，键为编辑器元件 ID。
    * 运行时要读哪些端口由它推导，因此前端不需要再内置一份 kind → 端口名的副本。
    */
   ports?: Readonly<Partial<Record<string, readonly PortSpec[]>>>;
-  connections?: Readonly<Partial<Record<string, number>>>;
+  connections?: Readonly<Partial<Record<string, EngineConnectionBinding>>>;
+  /** 稳定扁平 ID 到引擎身份；局部 projection diff 据此保留未受影响对象。 */
+  flatComponents?: Readonly<Partial<Record<string, number>>>;
+  flatConnections?: Readonly<Partial<Record<string, number>>>;
+  componentFlatIds?: Readonly<Partial<Record<string, readonly string[]>>>;
+  connectionFlatIds?: Readonly<Partial<Record<string, readonly string[]>>>;
+  portSources?: Readonly<Partial<Record<string, Readonly<Partial<Record<string, EditorPortSource>>>>>>;
 }
 
 export interface CircuitLoadResult {
@@ -382,6 +400,10 @@ interface MutableState {
 
 interface RuntimeSignalBinding {
   key: string;
+  refs: readonly ResolvedPortRef[];
+}
+
+interface ResolvedPortRef {
   componentId: number;
   port: string;
 }
@@ -393,6 +415,8 @@ interface RuntimeInputBinding {
   port: string;
   /** 该端口的位宽；提交的值必须长成这样，否则引擎会以 invalid_width 拒绝。 */
   width: number;
+  /** 层次投影时一个外部输入可驱动多个扁平目标；普通输入只有一个目标。 */
+  targets: readonly ResolvedPortRef[];
 }
 
 interface RuntimeSimulationBindings {
@@ -414,7 +438,17 @@ function sameIdentityMap(
 ): boolean {
   const keys = Object.keys(left);
   if (keys.length !== Object.keys(right).length) return false;
-  return keys.every((key) => left[key] === right[key]);
+  return keys.every((key) => {
+    const a = left[key];
+    const b = right[key];
+    if (Array.isArray(a) || Array.isArray(b)) {
+      if (!Array.isArray(a) || !Array.isArray(b)) return false;
+      const aa = [...new Set(a)];
+      const bb = [...new Set(b)];
+      return aa.length === bb.length && aa.every((value, index) => value === bb[index]);
+    }
+    return a === b;
+  });
 }
 
 /**
@@ -465,7 +499,48 @@ function sameBindings(left: SimulationBindings | null, right: SimulationBindings
   return sameIdentityMap(left.components, right.components) &&
     sameIdentityMap(left.connections ?? {}, right.connections ?? {}) &&
     sameIdentityMap(left.componentKinds ?? {}, right.componentKinds ?? {}) &&
-    samePortLists(left.ports ?? {}, right.ports ?? {});
+    samePortLists(left.ports ?? {}, right.ports ?? {}) &&
+    sameIdentityMap(left.flatComponents ?? {}, right.flatComponents ?? {}) &&
+    sameIdentityMap(left.flatConnections ?? {}, right.flatConnections ?? {}) &&
+    sameStringArrayMap(left.componentFlatIds ?? {}, right.componentFlatIds ?? {}) &&
+    sameStringArrayMap(left.connectionFlatIds ?? {}, right.connectionFlatIds ?? {}) &&
+    samePortSources(left.portSources ?? {}, right.portSources ?? {});
+}
+
+function sameStringArrayMap(
+  left: Readonly<Record<string, readonly string[] | undefined>>,
+  right: Readonly<Record<string, readonly string[] | undefined>>,
+): boolean {
+  const keys = Object.keys(left);
+  if (keys.length !== Object.keys(right).length) return false;
+  return keys.every((key) => {
+    const a = left[key] ?? [];
+    const b = right[key] ?? [];
+    const aa = [...new Set(a)];
+    const bb = [...new Set(b)];
+    return aa.length === bb.length && aa.every((value, index) => value === bb[index]);
+  });
+}
+
+function samePortSources(
+  left: Readonly<Record<string, Readonly<Record<string, EditorPortSource | undefined>> | undefined>>,
+  right: Readonly<Record<string, Readonly<Record<string, EditorPortSource | undefined>> | undefined>>,
+): boolean {
+  const normalizeRef = (ref: EnginePortRef) => `${ref.componentId !== undefined ? `engine:${ref.componentId}` : `flat:${ref.flatId ?? ""}`}:${ref.port}`;
+  const normalize = (source: EditorPortSource | undefined): string => JSON.stringify({
+    inputTargets: source?.inputTargets?.map(normalizeRef),
+    outputSource: source?.outputSource ? normalizeRef(source.outputSource) : undefined,
+    outputSources: source?.outputSources?.map(normalizeRef),
+    readableRefs: source?.readableRefs?.map(normalizeRef),
+  });
+  const keys = Object.keys(left);
+  if (keys.length !== Object.keys(right).length) return false;
+  return keys.every((componentId) => {
+    const lp = left[componentId] ?? {};
+    const rp = right[componentId] ?? {};
+    const ports = Object.keys(lp);
+    return ports.length === Object.keys(rp).length && ports.every((port) => normalize(lp[port]) === normalize(rp[port]));
+  });
 }
 
 /** 信号读数的键空间：编辑器元件 ID 加端口名，画布、检查器与波形共用同一套键。 */
@@ -572,42 +647,76 @@ function createWorkspaceSnapshot(state: MutableState): WorkspaceSnapshot {
  */
 function runtimeBindingsFrom(bindings: SimulationBindings): RuntimeSimulationBindings | null {
   const components = Object.entries(bindings.components)
-    .filter((entry): entry is [string, number] => entry[1] !== undefined);
+    .filter((entry): entry is [string, EngineComponentBinding] => entry[1] !== undefined);
   if (components.length === 0) return null;
 
-  const kindOf = (id: string): ComponentKindName | undefined => bindings.componentKinds?.[id];
+  const kindOf = (id: string): EditorComponentKind | undefined => bindings.componentKinds?.[id];
   const portsOf = (id: string): readonly PortSpec[] => bindings.ports?.[id] ?? [];
   const portsFacing = (id: string, direction: PortSpec["direction"]) =>
     portsOf(id).filter((port) => port.direction === direction);
+  const sourceOf = (id: string, port: string): EditorPortSource | undefined => bindings.portSources?.[id]?.[port];
+  const refsFor = (componentId: number, port: string): readonly ResolvedPortRef[] => [{ componentId, port }];
+  const resolveRef = (ref: EnginePortRef): ResolvedPortRef | undefined => {
+    if (ref.componentId !== undefined) return { componentId: ref.componentId, port: ref.port };
+    if (ref.flatId === undefined) return undefined;
+    const componentId = bindings.flatComponents?.[ref.flatId];
+    return componentId === undefined ? undefined : { componentId, port: ref.port };
+  };
+  const resolveRefs = (refs: readonly EnginePortRef[] | undefined): readonly ResolvedPortRef[] =>
+    (refs ?? []).map(resolveRef).filter((ref): ref is ResolvedPortRef => ref !== undefined);
 
   const inputs = components
-    .filter(([id]) => kindOf(id) === "input")
-    .flatMap(([key, componentId]) =>
-      portsFacing(key, "output").map((port) => ({
-        key,
-        componentId,
-        port: port.name,
-        width: port.width,
-      })));
+    .filter(([id, binding]) => kindOf(id) === "input" && engineComponentIds(binding).length === 1)
+    .flatMap(([key, binding]) => {
+      const componentId = engineComponentIds(binding)[0];
+      if (componentId === undefined) return [];
+      return portsFacing(key, "output").map((port) => {
+        const targets = resolveRefs(sourceOf(key, port.name)?.inputTargets).length > 0
+          ? resolveRefs(sourceOf(key, port.name)?.inputTargets)
+          : refsFor(componentId, port.name);
+        return { key, componentId, port: port.name, width: port.width, targets };
+      });
+    });
 
-  const outputs = components.flatMap(([id, componentId]) => {
+  const outputs = components.flatMap(([id, binding]) => {
     if (kindOf(id) !== "output") return [];
-    return portsFacing(id, "input").map((port) => ({
-      key: signalKey(id, port.name),
-      componentId,
-      port: port.name,
-    }));
+    const componentId = engineComponentIds(binding)[0];
+    if (componentId === undefined) return [];
+    return portsFacing(id, "input").map((port) => {
+      const source = sourceOf(id, port.name);
+      return {
+        key: signalKey(id, port.name),
+        refs: resolveRefs(source?.readableRefs ?? source?.outputSources).length > 0
+          ? resolveRefs(source?.readableRefs ?? source?.outputSources)
+          : source?.outputSource && resolveRef(source.outputSource)
+            ? [resolveRef(source.outputSource)!]
+            : refsFor(componentId, port.name),
+      };
+    });
   });
 
   // 其余元件的读数来自它们自己的输出端口；Input 的值来自本次提交，不向引擎读。
-  const observedSignals = components.flatMap(([key, componentId]) => {
+  const observedSignals = components.flatMap(([key, binding]) => {
     const kind = kindOf(key);
     if (kind === undefined || kind === "input" || kind === "output") return [];
-    return portsFacing(key, "output").map((port) => ({
-      key: signalKey(key, port.name),
-      componentId,
-      port: port.name,
-    }));
+    const componentIds = engineComponentIds(binding);
+    // Subcircuit 的外部输入也属于可观察端口：它们的值来自 inputTargets（或显式 readableRefs），
+    // 否则顶层信号投影会把已连接的输入误显示为 X。普通平面元件仍只观察输出端口。
+    const observablePorts = kind === "subcircuit" ? portsOf(key) : portsFacing(key, "output");
+    return observablePorts.map((port) => {
+      const source = sourceOf(key, port.name);
+      const targetRefs = source?.inputTargets?.slice(0, 1);
+      return {
+        key: signalKey(key, port.name),
+        refs: resolveRefs(source?.readableRefs ?? source?.outputSources).length > 0
+          ? resolveRefs(source?.readableRefs ?? source?.outputSources)
+          : source?.outputSource && resolveRef(source.outputSource)
+            ? [resolveRef(source.outputSource)!]
+            : resolveRefs(targetRefs).length > 0
+              ? resolveRefs(targetRefs)
+            : componentIds.length > 0 ? refsFor(componentIds[0]!, port.name) : [],
+      };
+    }).filter((binding) => binding.refs.length > 0);
   });
 
   return { inputs, outputs, observedSignals };
@@ -804,25 +913,35 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
         value: coerceInputValue(nextInputValues[binding.key], binding.width),
       }));
       for (const { binding, value } of committedValues) {
-        expectResponse(await adapter.setInput(binding.componentId, value), "input_set");
+        for (const target of binding.targets) {
+          expectResponse(await adapter.setInput(target.componentId, value), "input_set");
+        }
       }
       expectResponse(await adapter.settle(), "settled");
 
       // 每个 Output 元件读取自己的接收端，不假设文档中只有一个 Output。
       const outputSignals: Record<string, Signal> = {};
       for (const binding of bindings.outputs) {
-        outputSignals[binding.key] = expectResponse(
-          await adapter.getSignal(binding.componentId, binding.port),
-          "signal_result",
-        ).value;
+        for (const ref of binding.refs) {
+          try {
+            outputSignals[binding.key] = expectResponse(await adapter.getSignal(ref.componentId, ref.port), "signal_result").value;
+            break;
+          } catch (error) {
+            if (ref === binding.refs[binding.refs.length - 1]) throw error;
+          }
+        }
       }
 
       const observedSignals: Record<string, Signal> = {};
       for (const binding of bindings.observedSignals) {
-        observedSignals[binding.key] = expectResponse(
-          await adapter.getSignal(binding.componentId, binding.port),
-          "signal_result",
-        ).value;
+        for (const ref of binding.refs) {
+          try {
+            observedSignals[binding.key] = expectResponse(await adapter.getSignal(ref.componentId, ref.port), "signal_result").value;
+            break;
+          } catch (error) {
+            if (ref === binding.refs[binding.refs.length - 1]) throw error;
+          }
+        }
       }
 
       commitInputValues(Object.fromEntries(committedValues.map(({ binding, value }) => [binding.key, value])));
@@ -868,14 +987,25 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
     const connections: Record<string, number> = {};
     const componentKinds: Record<string, ComponentKindName> = {};
     const ports: Record<string, readonly PortSpec[]> = {};
+    const flatComponents: Record<string, number> = {};
+    const flatConnections: Record<string, number> = {};
+    const componentFlatIds: Record<string, readonly string[]> = {};
+    const connectionFlatIds: Record<string, readonly string[]> = {};
     const createdComponentIds: number[] = [];
     const createdConnectionIds: number[] = [];
     try {
       for (const component of document.components) {
+        if (component.kind === "subcircuit") {
+          throw new Error(`层次元件 ${component.id} 尚未展平，不能直接推送到协议引擎。`);
+        }
         // 文档带了端口清单就一并送达（数据驱动的元件）；内置元件不带，由引擎回退到内置定义。
         const added = await addComponent(component.kind, component.ports);
         createdComponentIds.push(added.componentId);
         components[component.id] = added.componentId;
+        if (component.flatId !== undefined) {
+          flatComponents[component.flatId] = added.componentId;
+          componentFlatIds[component.id] = [component.flatId];
+        }
         componentKinds[component.id] = component.kind;
         ports[component.id] = added.ports;
       }
@@ -888,8 +1018,20 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
         const id = await addConnection(source, connection.source.port, target, connection.target.port);
         createdConnectionIds.push(id);
         connections[connection.id] = id;
+        if (connection.flatId !== undefined) {
+          flatConnections[connection.flatId] = id;
+          connectionFlatIds[connection.id] = [connection.flatId];
+        }
       }
-      const bindings: SimulationBindings = { components, connections, componentKinds, ports };
+      const bindings: SimulationBindings = {
+        components,
+        connections,
+        componentKinds,
+        ports,
+        ...(Object.keys(flatComponents).length > 0 ? { flatComponents, componentFlatIds } : {}),
+        ...(Object.keys(flatConnections).length > 0 ? { flatConnections, connectionFlatIds } : {}),
+        ...(document.portSources ? { portSources: document.portSources } : {}),
+      };
       const runtimeBindings = runtimeBindingsFrom(bindings);
       state.runtimeBindings = runtimeBindings;
       state.lastBindings = bindings;
@@ -961,15 +1103,11 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
    * @param bindings 打开前那份电路的引擎绑定。
    */
   async function removePreviousCircuit(bindings: SimulationBindings): Promise<void> {
-    const connectionIds = Object.values(bindings.connections ?? {}).filter(
-      (id): id is number => id !== undefined,
-    );
+    const connectionIds = [...new Set(Object.values(bindings.connections ?? {}).flatMap((binding) => engineConnectionIds(binding)))];
     for (const connectionId of connectionIds.reverse()) {
       try { await adapter.removeConnection(connectionId); } catch { /* 尽力而为，不阻塞打开。 */ }
     }
-    const componentIds = Object.values(bindings.components).filter(
-      (id): id is number => id !== undefined,
-    );
+    const componentIds = [...new Set(Object.values(bindings.components).flatMap((binding) => engineComponentIds(binding)))];
     for (const componentId of componentIds.reverse()) {
       try { await adapter.removeComponent(componentId); } catch { /* 尽力而为，不阻塞打开。 */ }
     }
@@ -1088,8 +1226,13 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
       const readBindings = (candidates: readonly RuntimeSignalBinding[]): Record<string, Signal> => {
         const values: Record<string, Signal> = {};
         for (const binding of candidates) {
-          const value = enginePorts.get(signalKey(String(binding.componentId), binding.port));
-          if (value !== undefined) values[binding.key] = value;
+          for (const ref of binding.refs) {
+            const value = enginePorts.get(signalKey(String(ref.componentId), ref.port));
+            if (value !== undefined) {
+              values[binding.key] = value;
+              break;
+            }
+          }
         }
         return values;
       };

@@ -12,7 +12,7 @@
 - Phase 4：时序逻辑，已完成（五个交付切片全部落地，逐条记录见本文件 `### Phase 4` 的「已交付」各节；已并入 `main`，merge commit `957ebce`，PR #25）；
 - Phase 4.5：多位 Port 与总线，已完成（七个交付切片全部落地，端到端回归与截图基准由 issue #32 收口；逐条记录见本文件 `### Phase 4.5` 的「已交付」各节，已知限制见其中「已交付（切片 7）」一节）；
 - Phase 5：波形和持久化，已完成（六个交付切片全部落地，规格 #34，票 #35–#42，逐条记录见本文件 `### Phase 5` 的「已交付」各节）；
-- Phase 5.5：层次化电路，未开始；
+- Phase 5.5：层次化电路，已完成（按引用组合、递归展平、手动重载、历史事务、持久化与真实引擎回归已落地）；
 - Phase 5.6：多文档与下钻，未开始；
 - Phase 6：工程化和发布，未开始。
 
@@ -363,6 +363,8 @@ issue #20 接上了 `tick` 的第 ④ 步：
 ### Phase 5.5：层次化电路
 
 阶段目标是把一个已保存的 Project 作为 Subcircuit 放入另一份 Circuit 中复用，术语见 `CONTEXT.md`，设计取舍见 [ADR 0014](decisions/0014-subcircuit-by-reference-flattened-simulation.md)。依赖 Phase 4（子 Project 内允许 DFlipFlop）、Phase 4.5（多位 Port）和 Phase 5（项目文件）。Phase 4.5 之后端口清单包含位宽，展平时按位宽对齐。
+
+实现见 [ADR 0022](decisions/0022-hierarchy-flattening-projection.md)：递归读取通过纯 TypeScript reader seam 注入，失败子树采用局部投影原子合并，扁平身份使用 occurrence path 保证多实例稳定；编辑器以单历史帧局部替换投影，真实引擎回归覆盖多实例 DFlipFlop 状态隔离。
 
 核心规则：
 

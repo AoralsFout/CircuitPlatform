@@ -32,6 +32,7 @@ export interface CanvasController {
   componentDefinitions: readonly ComponentDefinition[];
   recentComponentKinds: readonly ComponentKindName[];
   addComponent: (kind: ComponentKindName, center: Point, altKey: boolean, continuous?: boolean) => Promise<boolean>;
+  selectSubcircuit?: (center: Point) => Promise<boolean> | void;
   rememberComponentKind: (kind: ComponentKindName) => void;
   duplicateComponent: (componentId: string) => Promise<boolean>;
   deleteComponent: (componentId: string) => Promise<void>;
@@ -183,6 +184,12 @@ function segmentPath(points: readonly { x: number; y: number }[], index: number)
 
 function nodeStyle(node: CanvasNode): Record<string, string> {
   return { left: `${node.position.x}px`, top: `${node.position.y}px`, width: `${node.size.width}px`, height: `${node.size.height}px` };
+}
+
+function subcircuitStatusLabel(status: "resolved" | "resolving" | "unresolved"): string {
+  if (status === "resolved") return "已解析";
+  if (status === "resolving") return "解析中";
+  return "未解析";
 }
 
 function focusByOffset(delta: number): void {
@@ -469,10 +476,21 @@ async function selectComponentFromMenu(kind: ComponentKindName): Promise<void> {
   closeComponentMenu();
 }
 
+async function selectSubcircuitFromMenu(): Promise<void> {
+  const menu = componentMenu.value;
+  if (!menu || props.interaction.connectionDraft) {
+    closeComponentMenu();
+    return;
+  }
+  await props.controller.selectSubcircuit?.(menu.worldPoint);
+  closeComponentMenu();
+}
+
 function dragKind(event: DragEvent): ComponentKindName | null {
   const raw = event.dataTransfer?.getData("application/x-circuit-component") || event.dataTransfer?.getData("text/plain");
   if (!raw) return null;
-  return props.controller.componentDefinitions.find((definition) => definition.kind === raw && definition.available)?.kind ?? null;
+  const definition = props.controller.componentDefinitions.find((candidate) => candidate.kind === raw && candidate.available);
+  return definition && definition.kind !== "subcircuit" ? definition.kind : null;
 }
 
 function onDragOver(event: DragEvent): void {
@@ -991,8 +1009,9 @@ watch(() => props.scene.wires, async () => {
           </template>
           <path v-if="interaction.connectionDraft" class="signal-wire signal-wire--draft" :d="pathFor(interaction.connectionDraft)" />
         </svg>
-        <article v-for="node in scene.nodes" :key="node.id" v-memo="[node, interaction.focusedId, interaction.draggingComponentId, hoveredConnectionTarget]" class="circuit-node" :class="{ 'circuit-node--selected': node.selected, 'circuit-node--focused': interaction.focusedId === node.id, 'circuit-node--dragging': interaction.draggingComponentId === node.id }" :style="nodeStyle(node)" role="button" tabindex="0" data-canvas-focus data-focus-kind="component" :data-focus-id="node.id" :data-selected="node.selected ? 'true' : 'false'" :aria-label="`选择${node.kind.toUpperCase()} 元件`" @focus="emit('focusChange', node.id)" @pointerdown.stop="onNodePointerDown($event, node)" @click="onNodeClick(node.id)">
-          <strong>{{ node.kind.toUpperCase() }}</strong>
+        <article v-for="node in scene.nodes" :key="node.id" v-memo="[node, interaction.focusedId, interaction.draggingComponentId, hoveredConnectionTarget]" class="circuit-node" :class="{ 'circuit-node--selected': node.selected, 'circuit-node--focused': interaction.focusedId === node.id, 'circuit-node--dragging': interaction.draggingComponentId === node.id }" :style="nodeStyle(node)" role="button" tabindex="0" data-canvas-focus data-focus-kind="component" :data-focus-id="node.id" :data-selected="node.selected ? 'true' : 'false'" :data-subcircuit-status="node.subcircuit?.status" :aria-label="node.subcircuit ? `${node.displayName}，${subcircuitStatusLabel(node.subcircuit.status)}${node.subcircuit.diagnostic ? `，${node.subcircuit.diagnostic}` : ''}` : `选择${node.kind.toUpperCase()} 元件`" @focus="emit('focusChange', node.id)" @pointerdown.stop="onNodePointerDown($event, node)" @click="onNodeClick(node.id)">
+          <template v-if="!node.subcircuit"><strong>{{ node.kind.toUpperCase() }}</strong></template>
+          <template v-else><strong>{{ node.displayName }}</strong></template>
           <span v-for="port in node.ports" :key="port.id" class="node-port" :class="[port.direction === 'input' ? 'node-port--left' : 'node-port--right', signalStateClass(port.signal), { 'node-port--dangling': port.dangling, 'node-port--connection-target': isHoveredConnectionTarget(node.id, port.id) }]" :style="{ top: `${port.offset.y}px` }" :data-port-id="port.id" :data-node-id="node.id" :data-signal="port.signal" :data-dangling="port.dangling ? 'true' : 'false'" :data-focus-id="`port:${node.id}:${port.id}`" data-focus-kind="port" data-canvas-focus role="button" tabindex="0" :aria-label="`${port.direction === 'input' ? '输入' : '输出'}端口 ${port.label}，信号 ${port.signal}${port.dangling ? '，悬空' : ''}`" @focus="emit('focusChange', `port:${node.id}:${port.id}`)" @pointerdown.stop="onPortPointerDown($event, node, port)" @pointerup.stop="onPortPointerUp($event, node, port)" @click.stop="onPortClick($event)"><span class="node-port__anchor" aria-hidden="true"></span><span class="node-port__label">{{ port.label }}</span></span>
         </article>
         <article v-if="interaction.pendingPlacement" class="circuit-node circuit-node--pending" :class="{ 'circuit-node--error': interaction.pendingPlacement.error }" :style="{ left: `${interaction.pendingPlacement.position.x}px`, top: `${interaction.pendingPlacement.position.y}px`, width: `${interaction.pendingPlacement.size.width}px`, height: `${interaction.pendingPlacement.size.height}px` }" role="status" :aria-label="`${interaction.pendingPlacement.error ? '放置失败' : '正在放置'} ${interaction.pendingPlacement.kind} 元件`">
@@ -1009,6 +1028,7 @@ watch(() => props.scene.wires, async () => {
         :definitions="controller.componentDefinitions"
         :recent-kinds="controller.recentComponentKinds"
         @select="selectComponentFromMenu"
+        @select-subcircuit="selectSubcircuitFromMenu"
         @close="closeComponentMenu"
       />
       <div

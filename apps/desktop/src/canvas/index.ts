@@ -1,4 +1,5 @@
 import type { ComponentKindName, PortSpec, Signal } from "@circuit-platform/protocol";
+import type { EditorComponentKind } from "../editor/component.ts";
 import type {
   EditorComponent,
   EditorConnection,
@@ -53,8 +54,8 @@ export const PORT_LABEL_INSET = 24;
 export type ComponentSizing = "fixed" | "by-port-count";
 
 export interface ComponentDefinition {
-  kind: ComponentKindName;
-  category: "input-output" | "logic" | "sequential" | "bus";
+  kind: EditorComponentKind;
+  category: "input-output" | "logic" | "sequential" | "bus" | "subcircuit";
   sortOrder: number;
   symbol: string;
   displayName: string;
@@ -209,14 +210,14 @@ export function circuitPortLabel(label: string, port: Pick<PortSpec, "width" | "
  * @returns 提供排序、查找和搜索能力的不可变定义注册表。
  */
 export class ComponentDefinitionRegistry {
-  private readonly definitions: ReadonlyMap<ComponentKindName, ComponentDefinition>;
+  private readonly definitions: ReadonlyMap<EditorComponentKind, ComponentDefinition>;
 
   public constructor(definitions: readonly ComponentDefinition[]) {
     this.definitions = new Map(definitions.map((definition) => [definition.kind, freezeDefinition(definition)]));
   }
 
   /** 返回一种元件的展示定义；未知类型由调用者决定如何降级。 */
-  public get(kind: ComponentKindName): ComponentDefinition | undefined {
+  public get(kind: EditorComponentKind): ComponentDefinition | undefined {
     return this.definitions.get(kind);
   }
 
@@ -374,6 +375,20 @@ export const DEFAULT_COMPONENT_DEFINITIONS: readonly ComponentDefinition[] = [
     disabledReason: null,
     searchAliases: ["merger", "合线", "总线", "bus"],
   },
+  {
+    kind: "subcircuit",
+    category: "subcircuit",
+    sortOrder: 140,
+    symbol: "▣",
+    displayName: "子电路",
+    description: "引用一份已保存的 Project，并以左进右出的接口呈现。",
+    size,
+    sizing: "by-port-count",
+    portLayout: noPortLayout,
+    available: true,
+    disabledReason: null,
+    searchAliases: ["subcircuit", "子电路", "层次", "hierarchy"],
+  },
 ];
 
 /** 创建默认元件定义注册表。返回新实例以避免调用方共享可变集合。 */
@@ -411,14 +426,23 @@ export interface CanvasPort {
 
 export interface CanvasNode {
   id: string;
-  kind: ComponentKindName;
+  kind: EditorComponentKind;
   displayName: string;
   symbol: string;
   description: string;
+  /** Subcircuit 的 UI 投影；普通 Component 不带此字段。 */
+  subcircuit?: SubcircuitCanvasState;
   position: Point;
   size: { width: number; height: number };
   ports: readonly CanvasPort[];
   selected: boolean;
+}
+
+/** Subcircuit 在当前父文档中的可展示解析状态。 */
+export interface SubcircuitCanvasState {
+  relativePath: string;
+  status: "resolved" | "resolving" | "unresolved";
+  diagnostic: string | null;
 }
 
 export interface CanvasWireEndpoint {
@@ -468,7 +492,7 @@ export interface InteractionState {
   connectionDraftError?: string | null;
   /** Wire Route 拖动时的临时预览；释放后才进入 EditorSession 历史。 */
   routeEditPreview?: { connectionId: string; route: readonly Point[] } | null;
-  pendingPlacement?: { kind: ComponentKindName; position: Point; size: { width: number; height: number }; error?: string | null } | null;
+  pendingPlacement?: { kind: EditorComponentKind; position: Point; size: { width: number; height: number }; error?: string | null } | null;
   emptyState?: { title: string; message: string };
 }
 
@@ -518,7 +542,8 @@ export function portLayoutOf(
   definition: ComponentDefinition,
   portName: string,
 ): PortLayout | undefined {
-  const ports = component.ports ?? [];
+  const subcircuitData = component.data?.subcircuit;
+  const ports = component.ports ?? subcircuitData?.cachedPorts ?? [];
   const port = ports.find((candidate) => candidate.name === portName);
   if (!port) return undefined;
   const sameSide = ports.filter((candidate) => candidate.direction === port.direction);
@@ -644,7 +669,8 @@ function projectPorts(
   simulationSnapshot: SimulationSnapshot,
   geometry: ComponentGeometry,
 ): CanvasPort[] {
-  const ports = component.ports ?? [];
+  const subcircuitData = component.data?.subcircuit;
+  const ports = component.ports ?? subcircuitData?.cachedPorts ?? [];
   const sideCounts: Record<PortDirection, number> = { input: 0, output: 0 };
   for (const port of ports) sideCounts[port.direction] += 1;
 
@@ -726,13 +752,23 @@ export function projectCanvasScene(
     const nodePosition = previewPositions?.[component.id] ?? component.position;
     // 尺寸与端口偏移必须来自同一份几何：端口数量由数据决定的元件高度是按端口算出来的，
     // 盒子与端口分别算就会让端口画到盒子外面。
-    const geometry = componentGeometryFor(definition, component.ports ?? []);
+    const subcircuitData = component.kind === "subcircuit" ? component.data?.subcircuit : undefined;
+    const ports = component.ports ?? subcircuitData?.cachedPorts ?? [];
+    const geometry = componentGeometryFor(definition, ports);
+    const subcircuit: SubcircuitCanvasState | undefined = subcircuitData
+      ? {
+        relativePath: subcircuitData.reference,
+        status: subcircuitData.status ?? (subcircuitData.diagnostic ? "unresolved" : "resolved"),
+        diagnostic: subcircuitData.diagnostic?.message ?? null,
+      }
+      : undefined;
     return {
       id: component.id,
       kind: component.kind,
       displayName: component.displayName || definition.displayName,
       symbol: definition.symbol,
       description: definition.description,
+      ...(subcircuit ? { subcircuit: { ...subcircuit } } : {}),
       position: { ...nodePosition },
       size: { ...geometry.size },
       // 端口清单来自编辑器文档，也就是引擎回传的那一份；展示定义只决定画在哪、显示成什么。

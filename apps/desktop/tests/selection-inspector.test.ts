@@ -202,3 +202,29 @@ test("inspector projects read-only Component ports and Wire endpoints", () => {
     });
   }
 });
+
+test("inspector projects subcircuit reference and resolution diagnostics without internals", () => {
+  const current = scene();
+  current.nodes = [{
+    ...current.nodes[0]!,
+    id: "child-1",
+    kind: "subcircuit",
+    displayName: "alu.cp",
+    subcircuit: {
+      relativePath: "blocks/alu.cp",
+      status: "unresolved",
+      diagnostic: "找不到子电路文件",
+    },
+    ports: current.nodes[0]!.ports.map((port) => ({ ...port, id: port.id === "in1" ? "in" : "out" })),
+  }];
+  const model = createInspectorModel(current, { kind: "component", id: "child-1" }, createComponentDefinitionRegistry());
+  assert.equal(model?.kind, "component");
+  if (model?.kind !== "component") return;
+  assert.deepEqual(model.subcircuit, {
+    relativePath: "blocks/alu.cp",
+    status: "unresolved",
+    diagnostic: "找不到子电路文件",
+  });
+  assert.equal(model.ports.length, 2);
+  assert.equal("components" in model, false);
+});

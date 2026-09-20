@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
+import type { ComponentKindName } from "@circuit-platform/protocol";
 import { createCanvasSceneProjector, createComponentDefinitionRegistry, isDenseCanvasScene } from "../src/canvas/index.ts";
 import { createAndDemoDocument, type EditorDocument, type EditorSnapshot } from "../src/editor/index.ts";
 import { portsForAddComponent } from "./fake-ports.ts";
@@ -11,7 +15,7 @@ function documentWithPorts(): EditorDocument {
     ...document,
     components: document.components.map((component) => ({
       ...component,
-      ports: portsForAddComponent(component.kind),
+      ports: portsForAddComponent(component.kind as ComponentKindName),
     })),
   };
 }
@@ -58,4 +62,17 @@ test("dense-scene fallback is only a visual-density signal", () => {
     bounds: { min: { x: 0, y: 0 }, max: { x: 0, y: 0 } },
   } as never;
   assert.equal(isDenseCanvasScene(scene), true);
+});
+
+test("performance benchmark reports flattened hierarchy scale separately from visible shells", async () => {
+  const desktopRoot = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+  const benchmark = await readFile(join(desktopRoot, "benchmark.html"), "utf8");
+  const runner = await readFile(join(desktopRoot, "scripts", "performance-benchmark.mjs"), "utf8");
+  assert.match(benchmark, /flattenedComponents/);
+  assert.match(benchmark, /flattenedWires/);
+  assert.match(benchmark, /visibleComponents/);
+  assert.match(benchmark, /visibleWires/);
+  assert.match(runner, /--flattened-components=/);
+  assert.match(runner, /--flattened-wires=/);
+  assert.match(runner, /flattenedObjects/);
 });

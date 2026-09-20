@@ -4,6 +4,9 @@ import {
   currentPathPlatform,
   normalizeProjectPath,
   projectPathIdentity,
+  projectDirectory,
+  relativeProjectReference,
+  resolveProjectReference,
   sameProjectPath,
 } from "../src/project-file/paths.ts";
 
@@ -109,4 +112,30 @@ test("normalization is idempotent", () => {
     const once = normalizeProjectPath(input, options);
     assert.equal(normalizeProjectPath(once, options), once);
   }
+});
+
+test("derives project directories and resolves references lexically", () => {
+  assert.equal(projectDirectory("C:\\proj\\root.circuit.json", win), "C:\\proj");
+  assert.equal(projectDirectory("/home/u/root.circuit.json", posix), "/home/u");
+  assert.equal(
+    resolveProjectReference("..\\lib\\child.circuit.json", "C:\\proj\\root.circuit.json", "windows"),
+    "C:\\lib\\child.circuit.json",
+  );
+  assert.equal(
+    resolveProjectReference("../lib/child.circuit.json", "/home/u/proj/root.circuit.json", "posix"),
+    "/home/u/lib/child.circuit.json",
+  );
+});
+
+test("computes portable relative references and rejects different Windows roots", () => {
+  assert.equal(
+    relativeProjectReference("C:\\lib\\child.circuit.json", "C:\\proj\\root.circuit.json", "windows"),
+    "..\\lib\\child.circuit.json",
+  );
+  assert.equal(
+    relativeProjectReference("/home/u/lib/child.circuit.json", "/home/u/proj/root.circuit.json", "posix"),
+    "../lib/child.circuit.json",
+  );
+  assert.equal(relativeProjectReference("D:\\lib\\child.circuit.json", "C:\\proj\\root.circuit.json", "windows"), null);
+  assert.equal(relativeProjectReference("/home/u/proj/other.circuit.json", "/home/u/proj/root.circuit.json", "posix"), "other.circuit.json");
 });

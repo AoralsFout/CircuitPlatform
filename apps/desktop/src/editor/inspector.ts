@@ -1,6 +1,6 @@
 import type { Signal } from "@circuit-platform/protocol";
-import type { ComponentDefinitionRegistry, CanvasNode, CanvasScene, CanvasWire } from "../canvas";
-import { branchBitRanges, formatBitRangeList, isDataDrivenKind } from "./bus-ports.ts";
+import type { ComponentDefinitionRegistry, CanvasNode, CanvasScene, CanvasWire, SubcircuitCanvasState } from "../canvas";
+import { branchBitRanges, formatBitRangeList } from "./bus-ports.ts";
 import type { EditorSelection } from "./index";
 
 export interface InspectorPort {
@@ -63,6 +63,8 @@ export interface ComponentInspector {
    * 这是结构问题而不是错误，因此不进入 error 字段。
    */
   hint: string | null;
+  /** 子电路的引用与解析状态；不展开内部对象。 */
+  subcircuit?: SubcircuitCanvasState;
 }
 
 export interface WireInspector {
@@ -116,7 +118,7 @@ function widthAttributes(node: CanvasNode): WidthAttribute[] {
  * 不改变总线有多宽，而覆盖规则要求两者同时自洽。
  */
 function bitRangeAttributes(node: CanvasNode): BitRangeAttribute[] {
-  if (!isDataDrivenKind(node.kind)) return [];
+  if (node.kind !== "splitter" && node.kind !== "merger") return [];
   const host = node.ports.find((port) => !port.bitRange);
   const branches = branchBitRanges(node.ports);
   if (!host || branches.length === 0) return [];
@@ -171,6 +173,7 @@ export function createInspectorModel(scene: CanvasScene, selection: EditorSelect
       ports,
       attributes: [...widthAttributes(node), ...bitRangeAttributes(node)],
       hint: structuralHint(ports),
+      ...(node.subcircuit ? { subcircuit: { ...node.subcircuit } } : {}),
     };
   }
   const wire = scene.wires.find((candidate) => candidate.id === selection.id);

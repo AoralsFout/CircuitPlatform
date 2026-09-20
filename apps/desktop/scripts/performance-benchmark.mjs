@@ -43,6 +43,9 @@ const noFail = process.argv.includes("--no-fail");
 // 验收规模是 500 / 1000；这两个参数只为定位成本随规模的变化，不改变验收口径。
 const components = process.argv.find((value) => value.startsWith("--components="))?.slice(13) ?? "500";
 const wires = process.argv.find((value) => value.startsWith("--wires="))?.slice(8) ?? "1000";
+// 层次电路的画布只渲染可见 Subcircuit 外壳，但验收规模按展平后的引擎对象计算。
+const flattenedComponents = process.argv.find((value) => value.startsWith("--flattened-components="))?.slice(23) ?? components;
+const flattenedWires = process.argv.find((value) => value.startsWith("--flattened-wires="))?.slice(18) ?? wires;
 // 端口位宽默认 1，既有基线因此逐像素不变；`--width=8` 用来量多位电路的成本。
 const width = process.argv.find((value) => value.startsWith("--width="))?.slice(8) ?? "1";
 const port = 4176 + MODES.indexOf(mode);
@@ -52,7 +55,7 @@ const electron = process.platform === "win32"
   ? resolve(root, "node_modules", "electron", "dist", "electron.exe")
   : resolve(root, "node_modules", ".bin", "electron");
 const runner = resolve(root, "scripts", "performance-benchmark-runner.cjs");
-const url = `http://127.0.0.1:${port}/benchmark.html?components=${components}&wires=${wires}&mode=${mode}&width=${width}`;
+const url = `http://127.0.0.1:${port}/benchmark.html?components=${components}&wires=${wires}&flattenedComponents=${flattenedComponents}&flattenedWires=${flattenedWires}&mode=${mode}&width=${width}`;
 const child = spawn(electron, [runner, `--url=${url}`, `--mode=${mode}`, `--duration=${duration}`], { cwd: root, stdio: ["ignore", "pipe", "inherit"] });
 let stdout = "";
 child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
@@ -67,6 +70,10 @@ const result = {
   viewport: "1920x1080",
   components: Number(components),
   wires: Number(wires),
+  flattenedComponents: Number(flattenedComponents),
+  flattenedWires: Number(flattenedWires),
+  // Explicitly report the acceptance scale so a visible-shell run cannot be mistaken for a flat run.
+  flattenedObjects: Number(flattenedComponents) + Number(flattenedWires),
   // 端口位宽：1 是既有验收口径，8 是多位电路的成本对照。
   portWidth: Number(width),
   mode,

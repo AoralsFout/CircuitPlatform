@@ -27,6 +27,10 @@
   const mode = params.get("mode") || "pan";
   const count = Number(params.get("components") || 500);
   const wireCount = Number(params.get("wires") || 1000);
+  // Hierarchical circuits render only their visible shells, but the acceptance budget is stated
+  // against the flattened engine workload. Keep both scales explicit in benchmark observations.
+  const flattenedComponents = Number(params.get("flattenedComponents") || count);
+  const flattenedWires = Number(params.get("flattenedWires") || wireCount);
   const registry = createComponentDefinitionRegistry();
   const projector = createCanvasSceneProjector(registry);
 
@@ -157,6 +161,10 @@
   window.__benchmarkState = () => ({
     sceneNodes: scene.value.nodes.length,
     sceneWires: scene.value.wires.length,
+    visibleComponents: count,
+    visibleWires: wireCount,
+    flattenedComponents,
+    flattenedWires,
     elements: document.querySelectorAll("*").length,
     animated: document.querySelectorAll("animate").length,
     viewport: { x: viewport.value.x, y: viewport.value.y },

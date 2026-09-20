@@ -63,6 +63,39 @@ test("registry exposes display metadata without carrying a port list", () => {
   assert.match(registry.get("d_flip_flop")?.description ?? "", /上升沿/);
 });
 
+test("unresolved subcircuits render cached ports and projected status", () => {
+  const cachedPorts: PortSpec[] = [
+    { name: "in", direction: "input", width: 4 },
+    { name: "out", direction: "output", width: 4 },
+  ];
+  const scene = projectCanvasScene({
+    document: {
+      components: [{
+        id: "child-1", kind: "subcircuit", displayName: "alu.cp", position: { x: 10, y: 20 }, lifecycle: "active",
+        data: {
+          subcircuit: {
+            reference: "blocks/alu.cp",
+            cachedPorts,
+            status: "unresolved",
+            diagnostic: { code: "missing-file", message: "找不到子电路文件" },
+          },
+        },
+      }],
+      connections: [],
+    },
+    selection: { kind: "component", id: "child-1" },
+    operation: "idle", canUndo: false, canRedo: false, confirmation: null, error: null,
+  }, { signals: {} }, createComponentDefinitionRegistry());
+
+  const node = scene.nodes[0]!;
+  assert.equal(node.displayName, "alu.cp");
+  assert.equal(node.subcircuit?.relativePath, "blocks/alu.cp");
+  assert.equal(node.subcircuit?.status, "unresolved");
+  assert.equal(node.subcircuit?.diagnostic, "找不到子电路文件");
+  assert.deepEqual(node.ports.map((port) => port.id), ["in", "out"]);
+  assert.deepEqual(node.ports.map((port) => port.width), [4, 4]);
+});
+
 /** 展示布局按引擎端口名索引，因此 `clock` 这个端口名在两边必须一致。 */
 test("d flip-flop looks up its layout by the engine clock port name", () => {
   const registry = createComponentDefinitionRegistry();

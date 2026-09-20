@@ -318,7 +318,7 @@ function withBuiltInPorts(document: EditorDocument): EditorDocument {
     ...document,
     components: document.components.map((component) => ({
       ...component,
-      ports: component.ports ?? portsForAddComponent(component.kind),
+      ports: component.ports ?? portsForAddComponent(component.kind as ComponentKindName),
     })),
   };
 }
@@ -371,6 +371,43 @@ test("creates and runs the example circuit through the generic document path", a
     "getSignal",
     "getSignal",
   ]);
+});
+
+test("projects grouped bindings through port sources and drives only their flat input targets", async () => {
+  const engine = new FakeEngine();
+  const workspace = createWorkspace(engine);
+  await workspace.checkEngine();
+  const input = await engine.addComponent("input");
+  const gate = await engine.addComponent("and");
+  assert.equal(input.type, "component_added");
+  assert.equal(gate.type, "component_added");
+  const inputId = input.type === "component_added" ? input.componentId : 0;
+  const gateId = gate.type === "component_added" ? gate.componentId : 0;
+
+  workspace.rebindSimulation({
+    components: { source: [inputId, inputId], nested: [gateId] },
+    componentKinds: { source: "input", nested: "subcircuit" },
+    ports: {
+      source: [{ name: "out", direction: "output", width: 1 }],
+      nested: [
+        { name: "in", direction: "input", width: 1 },
+        { name: "out", direction: "output", width: 1 },
+      ],
+    },
+    flatComponents: { "source/out": inputId, "nested/out": gateId },
+    componentFlatIds: { source: ["source/out", "source/out"], nested: ["nested/out"] },
+    portSources: {
+      source: { out: { inputTargets: [{ componentId: inputId, port: "out" }, { componentId: gateId, port: "in1" }] } },
+      nested: {
+        in: { inputTargets: [{ flatId: "source/out", port: "out" }] },
+        out: { readableRefs: [{ flatId: "nested/out", port: "out" }] },
+      },
+    },
+  });
+  await workspace.refreshReadings();
+  assert.deepEqual(engine.calls.filter((call) => call.type === "setInput").map((call) => call.componentId), [inputId, gateId]);
+  assert.equal(workspace.snapshot().signals["nested:in"], "1");
+  assert.ok(workspace.snapshot().signals["nested:out"] !== undefined);
 });
 
 test("turns an engine error response into visible workspace error state", async () => {

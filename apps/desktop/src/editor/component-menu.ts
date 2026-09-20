@@ -7,6 +7,7 @@ export const COMPONENT_MENU_CATEGORIES = [
   { id: "logic", label: "逻辑门" },
   { id: "sequential", label: "时序逻辑" },
   { id: "bus", label: "总线" },
+  { id: "subcircuit", label: "子电路" },
 ] as const;
 
 export type ComponentMenuCategory = (typeof COMPONENT_MENU_CATEGORIES)[number]["id"];
@@ -142,7 +143,7 @@ export function readRecentComponentKinds(
     const value: unknown = JSON.parse(storage.getItem(key) ?? "[]");
     if (!Array.isArray(value)) return [];
     const known = new Set(definitions.map((definition) => definition.kind));
-    return value.filter((kind): kind is ComponentKindName => typeof kind === "string" && known.has(kind as ComponentKindName)).slice(0, 5);
+    return value.filter((kind): kind is ComponentKindName => typeof kind === "string" && kind !== "subcircuit" && known.has(kind as ComponentKindName)).slice(0, 5);
   } catch {
     return [];
   }

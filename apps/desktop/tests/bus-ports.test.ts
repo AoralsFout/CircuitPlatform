@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { PortSpec } from "@circuit-platform/protocol";
+import type { ComponentKindName, PortSpec } from "@circuit-platform/protocol";
 import { componentGeometryFor, createComponentDefinitionRegistry } from "../src/canvas/index.ts";
 import {
   branchBitRanges,
@@ -87,7 +87,7 @@ test("the geometry of a data driven component grows with its port count", () => 
 test("built in components keep their fixed size and the generic pitch", () => {
   for (const definition of registry.list()) {
     if (definition.sizing === "by-port-count") continue;
-    const geometry = componentGeometryFor(definition, BUILT_IN_PORTS[definition.kind]);
+    const geometry = componentGeometryFor(definition, BUILT_IN_PORTS[definition.kind as ComponentKindName]);
     assert.deepEqual(geometry.size, definition.size, definition.kind);
     assert.equal(geometry.pitch, 24, definition.kind);
   }

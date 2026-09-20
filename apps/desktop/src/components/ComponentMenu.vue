@@ -6,6 +6,7 @@ import {
 } from "../editor/component-menu";
 import type { ComponentDefinition } from "../canvas";
 import type { ComponentKindName } from "@circuit-platform/protocol";
+import type { EditorComponentKind } from "../editor/component.ts";
 
 const props = defineProps<{
   definitions: readonly ComponentDefinition[];
@@ -14,6 +15,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   select: [kind: ComponentKindName];
+  selectSubcircuit: [];
   close: [];
 }>();
 
@@ -46,9 +48,13 @@ function moveActive(delta: number): void {
   }
 }
 
-function select(kind: ComponentKindName): void {
+function select(kind: EditorComponentKind): void {
   const definition = props.definitions.find((item) => item.kind === kind);
   if (!definition?.available) return;
+  if (kind === "subcircuit") {
+    emit("selectSubcircuit");
+    return;
+  }
   emit("select", kind);
 }
 

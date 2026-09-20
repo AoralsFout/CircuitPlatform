@@ -40,6 +40,7 @@ const emit = defineEmits<{
   toggleDetails: [];
   setPortWidth: [componentId: string, portName: string, width: number];
   setBitRanges: [componentId: string, ranges: readonly BitRange[]];
+  reloadSubcircuit: [componentId: string];
 }>();
 
 /**
@@ -71,6 +72,12 @@ function onBitRangesChange(attribute: BitRangeAttribute, event: Event): void {
   if (props.inspector?.kind !== "component") return;
   if (!ranges) return;
   emit("setBitRanges", props.inspector.id, ranges);
+}
+
+function subcircuitStatusLabel(status: "resolved" | "resolving" | "unresolved"): string {
+  if (status === "resolved") return "已解析";
+  if (status === "resolving") return "解析中";
+  return "未解析";
 }
 
 // 记录按信号键索引，行的键直接用来取值；某个信号在记录这一点时还不存在就是未知。
@@ -108,6 +115,11 @@ const waveformRange = computed(() => {
         <div class="bottom-inspector-heading"><div><span class="eyebrow">COMPONENT</span><strong>{{ inspector.displayName }}</strong></div><span class="inspector-kind">{{ inspector.type }}</span></div>
         <div class="inspector-copy"><p>{{ inspector.behavior }}</p><span>类型：{{ inspector.type }}</span></div>
         <p v-if="inspector.hint" class="inspector-hint">{{ inspector.hint }}</p>
+        <div v-if="inspector.subcircuit" class="inspector-subcircuit" aria-label="子电路状态">
+          <div class="inspector-details"><span>引用：{{ inspector.subcircuit.relativePath }}</span><span role="status">状态：{{ subcircuitStatusLabel(inspector.subcircuit.status) }}</span></div>
+          <p v-if="inspector.subcircuit.diagnostic" class="inspector-hint" role="alert">{{ inspector.subcircuit.diagnostic }}</p>
+          <button type="button" :disabled="inspector.subcircuit.status === 'resolving'" :aria-label="`重新加载子电路 ${inspector.subcircuit.relativePath}`" @click="emit('reloadSubcircuit', inspector.id)">重新加载子电路</button>
+        </div>
         <div class="inspector-value"><span>当前信号</span><strong :class="signalStateClass(inspector.signal)">{{ inspector.signal }}</strong></div>
         <div v-if="inspector.attributes.length > 0" class="inspector-attributes" aria-label="可编辑属性">
           <label v-for="attribute in inspector.attributes" :key="attribute.id" class="inspector-attribute">
