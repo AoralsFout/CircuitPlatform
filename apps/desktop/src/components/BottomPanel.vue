@@ -103,10 +103,10 @@ const waveformRange = computed(() => {
 <template>
   <section class="bottom-panel" :aria-expanded="isExpanded" aria-label="仿真结果面板">
     <p v-if="operationError" class="bottom-error" role="alert">{{ operationError }}</p>
-    <div class="bottom-tabs">
-      <button type="button" :class="{ 'bottom-tab--active': bottomTab === 'inspector' }" @click="emit('selectTab', 'inspector')">检查器</button>
-      <button type="button" :class="{ 'bottom-tab--active': bottomTab === 'outputs' }" @click="emit('selectTab', 'outputs')">输出 <span class="tab-count">{{ outputs.length }}</span></button>
-      <button type="button" :class="{ 'bottom-tab--active': bottomTab === 'waveform' }" :disabled="!waveform.length" @click="emit('selectTab', 'waveform')">波形 <span class="tab-count">{{ waveform.length }}</span></button>
+    <div class="bottom-tabs" role="tablist" aria-label="仿真结果视图">
+      <button type="button" role="tab" :aria-selected="bottomTab === 'inspector'" :class="{ 'bottom-tab--active': bottomTab === 'inspector' }" @click="emit('selectTab', 'inspector')">检查器</button>
+      <button type="button" role="tab" :aria-selected="bottomTab === 'outputs'" :class="{ 'bottom-tab--active': bottomTab === 'outputs' }" @click="emit('selectTab', 'outputs')">输出 <span class="tab-count">{{ outputs.length }}</span></button>
+      <button type="button" role="tab" :aria-selected="bottomTab === 'waveform'" :class="{ 'bottom-tab--active': bottomTab === 'waveform' }" :disabled="!waveform.length" @click="emit('selectTab', 'waveform')">波形 <span class="tab-count">{{ waveform.length }}</span></button>
       <span class="bottom-tabs__spacer" aria-hidden="true"></span>
       <button class="bottom-panel-toggle" type="button" :aria-expanded="isExpanded" :aria-label="isExpanded ? '收起仿真结果面板' : '展开仿真结果面板'" :title="isExpanded ? '收起仿真结果面板' : '展开仿真结果面板'" @click="emit('togglePanel')"><span aria-hidden="true">{{ isExpanded ? '⌄' : '⌃' }}</span></button>
     </div>
@@ -117,8 +117,8 @@ const waveformRange = computed(() => {
         <p v-if="inspector.hint" class="inspector-hint">{{ inspector.hint }}</p>
         <div v-if="inspector.subcircuit" class="inspector-subcircuit" aria-label="子电路状态">
           <div class="inspector-details"><span>引用：{{ inspector.subcircuit.relativePath }}</span><span role="status">状态：{{ subcircuitStatusLabel(inspector.subcircuit.status) }}</span></div>
-          <p v-if="inspector.subcircuit.diagnostic" class="inspector-hint" role="alert">{{ inspector.subcircuit.diagnostic }}</p>
-          <button type="button" :disabled="inspector.subcircuit.status === 'resolving'" :aria-label="`重新加载子电路 ${inspector.subcircuit.relativePath}`" @click="emit('reloadSubcircuit', inspector.id)">重新加载子电路</button>
+          <p v-if="inspector.subcircuit.diagnostic" :id="`subcircuit-diagnostic-${inspector.id}`" class="inspector-hint" role="alert">{{ inspector.subcircuit.diagnostic }}</p>
+          <button type="button" :disabled="inspector.subcircuit.status === 'resolving'" :aria-describedby="inspector.subcircuit.diagnostic ? `subcircuit-diagnostic-${inspector.id}` : undefined" :aria-label="`重新加载子电路 ${inspector.subcircuit.relativePath}`" @click="emit('reloadSubcircuit', inspector.id)">重新加载子电路</button>
         </div>
         <div class="inspector-value"><span>当前信号</span><strong :class="signalStateClass(inspector.signal)">{{ inspector.signal }}</strong></div>
         <div v-if="inspector.attributes.length > 0" class="inspector-attributes" aria-label="可编辑属性">

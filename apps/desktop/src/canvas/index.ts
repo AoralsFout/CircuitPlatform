@@ -9,7 +9,7 @@ import type {
   Point,
 } from "../editor";
 import { createDefaultOrthogonalRoute, routeFromWaypoints } from "../editor/route.ts";
-import { isProjectedDangling, hasWidthMismatch } from "../editor/port-width.ts";
+import { isProjectedDangling, hasWidthMismatch, portOf } from "../editor/port-width.ts";
 import { DEFAULT_WIRE_COLOR, isWireColorId, type WireColorId } from "../editor/wire-appearance.ts";
 import { NODE_GRID_SIZE } from "./drag.ts";
 
@@ -607,17 +607,42 @@ export function rebuildLoadedDocumentGeometry(
   return {
     components: document.components,
     connections: document.connections.map((connection) => {
-      const source = connectedEndpointPoint(connection.source, components, registry);
-      const target = connectedEndpointPoint(connection.target, components, registry);
+      const danglingEndpoints = danglingEndpointsFor(connection, components);
+      const source = danglingEndpoints.includes("source")
+        ? { ...connection.source.point }
+        : connectedEndpointPoint(connection.source, components, registry);
+      const target = danglingEndpoints.includes("target")
+        ? { ...connection.target.point }
+        : connectedEndpointPoint(connection.target, components, registry);
       const waypoints = connection.waypoints ?? [];
       return {
         ...connection,
         source: { ...connection.source, point: source },
         target: { ...connection.target, point: target },
         route: routeBetween(source, target, waypoints),
+        danglingEndpoints,
       };
     }),
   };
+}
+
+/** 打开/重载后重新核对连接端点；改名、删除、方向变化和位宽变化都继续保留原记录。 */
+function danglingEndpointsFor(
+  connection: EditorConnection,
+  components: ReadonlyMap<string, EditorComponent>,
+): readonly EditorEndpointSide[] {
+  const source = portOf(components.get(connection.source.componentId), connection.source.port);
+  const target = portOf(components.get(connection.target.componentId), connection.target.port);
+  const sourceKnown = components.get(connection.source.componentId)?.ports !== undefined;
+  const targetKnown = components.get(connection.target.componentId)?.ports !== undefined;
+  const dangling = new Set<EditorEndpointSide>();
+  if (sourceKnown && (source === undefined || source.direction !== "output")) dangling.add("source");
+  if (targetKnown && (target === undefined || target.direction !== "input")) dangling.add("target");
+  if (source !== undefined && target !== undefined && source.width !== target.width) {
+    dangling.add("source");
+    dangling.add("target");
+  }
+  return [...dangling];
 }
 
 function previewEndpoint(

@@ -6,6 +6,8 @@ import test from "node:test";
 import type { ComponentKindName } from "@circuit-platform/protocol";
 import { createCanvasSceneProjector, createComponentDefinitionRegistry, isDenseCanvasScene } from "../src/canvas/index.ts";
 import { createAndDemoDocument, type EditorDocument, type EditorSnapshot } from "../src/editor/index.ts";
+import { flattenProjectHierarchy } from "../src/project-file/hierarchy.ts";
+import { createHierarchyPerformanceFixture } from "../src/project-file/performance-fixture.ts";
 import { portsForAddComponent } from "./fake-ports.ts";
 
 /** 给示例文档补上引擎回传的端口清单：没有清单就画不出端口，性能断言也就无从谈起。 */
@@ -64,15 +66,39 @@ test("dense-scene fallback is only a visual-density signal", () => {
   assert.equal(isDenseCanvasScene(scene), true);
 });
 
-test("performance benchmark reports flattened hierarchy scale separately from visible shells", async () => {
+test("performance benchmark asserts the production hierarchy fixture before rendering", async () => {
   const desktopRoot = join(fileURLToPath(new URL(".", import.meta.url)), "..");
   const benchmark = await readFile(join(desktopRoot, "benchmark.html"), "utf8");
   const runner = await readFile(join(desktopRoot, "scripts", "performance-benchmark.mjs"), "utf8");
+  assert.match(benchmark, /flattenProjectHierarchy/);
+  assert.match(benchmark, /createHierarchyPerformanceFixture/);
+  assert.match(benchmark, /hierarchyFixture/);
   assert.match(benchmark, /flattenedComponents/);
   assert.match(benchmark, /flattenedWires/);
   assert.match(benchmark, /visibleComponents/);
   assert.match(benchmark, /visibleWires/);
-  assert.match(runner, /--flattened-components=/);
-  assert.match(runner, /--flattened-wires=/);
+  assert.match(runner, /hierarchyFixture/);
   assert.match(runner, /flattenedObjects/);
+});
+
+test("hierarchy performance fixture reaches the production flattener at 500/1000 scale", async () => {
+  const fixture = createHierarchyPerformanceFixture();
+  const flattened = await flattenProjectHierarchy({
+    rootIdentity: fixture.rootIdentity,
+    root: fixture.root,
+    platform: "posix",
+    reader: {
+      read: async (identity) => {
+        const value = fixture.files.get(identity);
+        return value === undefined
+          ? { ok: false, code: "project-read-failed", message: `性能夹具缺少 Project：${identity}` }
+          : { ok: true, value };
+      },
+    },
+  });
+  assert.deepEqual(flattened.diagnostics, []);
+  assert.equal(flattened.circuit.components.length, 500);
+  assert.equal(flattened.circuit.connections.length, 1000);
+  assert.ok(flattened.circuit.components.some((component) => component.id === "wrapper/core/n0"));
+  assert.ok(flattened.circuit.connections.some((connection) => connection.id === "source-to-wrapper"));
 });

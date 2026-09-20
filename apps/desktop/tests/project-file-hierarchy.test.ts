@@ -103,6 +103,67 @@ test("rejects duplicate interface labels and reports a cycle", async () => {
   assert.equal(duplicateResult.diagnostics.some((item) => item.code === "interface-duplicate-label"), true);
 });
 
+test("reports stable diagnostic categories for every recoverable interface failure", async () => {
+  const validChild: ProjectFileData = {
+    version: 1,
+    circuit: { components: [input("in", "A", 0), output("out", "Y", 20)], connections: [] },
+  };
+  const emptyLabel: ProjectFileData = {
+    version: 1,
+    circuit: { components: [input("in", "", 0), output("out", "Y", 20)], connections: [] },
+  };
+  const root = (portOrder?: readonly string[]): ProjectFileData => ({
+    version: 1,
+    circuit: {
+      components: [sub("u", "child.circuit.json", [port("A", "input"), port("Y", "output")], portOrder)],
+      connections: [],
+    },
+  });
+  const cases: readonly {
+    name: string;
+    expectedCode: string;
+    project: ProjectFileData;
+    reader: HierarchyProjectReader;
+  }[] = [
+    {
+      name: "读取异常",
+      expectedCode: "project-read-failed",
+      project: root(),
+      reader: { async read() { throw new Error("读取失败"); } },
+    },
+    {
+      name: "非法项目",
+      expectedCode: "project-file-invalid",
+      project: root(),
+      reader: { async read() { return { ok: false, code: "project-file-invalid", message: "项目文件校验失败。" }; } },
+    },
+    {
+      name: "空标签",
+      expectedCode: "interface-empty-label",
+      project: root(),
+      reader: readerOf({ "/circuits/child.circuit.json": emptyLabel }),
+    },
+    {
+      name: "非法显式顺序",
+      expectedCode: "explicit-port-order-invalid",
+      project: root(["A", "missing"]),
+      reader: readerOf({ "/circuits/child.circuit.json": validChild }),
+    },
+  ];
+
+  for (const item of cases) {
+    const result = await flattenProjectHierarchy({
+      rootIdentity: "/circuits/parent.circuit.json",
+      root: item.project,
+      platform: "posix",
+      reader: item.reader,
+    });
+    assert.equal(result.document.components[0]?.data?.subcircuit?.status, "unresolved", item.name);
+    assert.equal(result.diagnostics[0]?.code, item.expectedCode, item.name);
+    assert.match(result.diagnostics[0]?.message ?? "", /[\u4e00-\u9fff]/, `${item.name} 必须带中文原因`);
+  }
+});
+
 test("allows Clock in the root but rejects a Clock-bearing child Project", async () => {
   const childWithClock: ProjectFileData = {
     version: 1,
@@ -190,10 +251,11 @@ test("resolves nested references relative to each containing Project", async () 
   const grandchild: ProjectFileData = {
     version: 1,
     circuit: {
-      components: [input("in", "A", 0), { id: "gate", kind: "not", displayName: "非门", position: { x: 40, y: 0 }, ports: [port("in", "input"), port("out", "output")] }, output("out", "Y", 0)],
+      components: [input("in", "A", 0), { id: "gate", kind: "not", displayName: "非门", position: { x: 40, y: 0 }, ports: [port("in", "input"), port("out", "output")] }, { id: "gate2", kind: "not", displayName: "非门 2", position: { x: 70, y: 0 }, ports: [port("in", "input"), port("out", "output")] }, output("out", "Y", 0)],
       connections: [
         { id: "in", source: { component: "in", port: "out" }, target: { component: "gate", port: "in" } },
-        { id: "out", source: { component: "gate", port: "out" }, target: { component: "out", port: "in" } },
+        { id: "mid", source: { component: "gate", port: "out" }, target: { component: "gate2", port: "in" } },
+        { id: "out", source: { component: "gate2", port: "out" }, target: { component: "out", port: "in" } },
       ],
     },
   };
@@ -206,8 +268,8 @@ test("resolves nested references relative to each containing Project", async () 
         output("out", "Y", 0),
       ],
       connections: [
-        { id: "in", source: { component: "in", port: "out" }, target: { component: "g1", port: "A" } },
         { id: "out", source: { component: "g1", port: "Y" }, target: { component: "out", port: "in" } },
+        { id: "in", source: { component: "in", port: "out" }, target: { component: "g1", port: "A" } },
       ],
     },
   };
@@ -231,9 +293,68 @@ test("resolves nested references relative to each containing Project", async () 
     }),
   });
   assert.deepEqual(result.diagnostics, []);
-  assert.deepEqual(result.circuit.components.map((entry) => entry.id), ["src", "u1/g1/gate", "sink"]);
+  assert.deepEqual(result.circuit.components.map((entry) => entry.id), ["src", "u1/g1/gate", "u1/g1/gate2", "sink"]);
   assert.equal(result.circuit.connections.some((entry) => entry.source.componentId === "src" && entry.target.componentId === "u1/g1/gate"), true);
-  assert.equal(result.circuit.connections.some((entry) => entry.source.componentId === "u1/g1/gate" && entry.target.componentId === "sink"), true);
+  assert.equal(result.circuit.connections.some((entry) => entry.source.componentId === "u1/g1/gate2" && entry.target.componentId === "sink"), true);
+  assert.deepEqual(result.sources.components.u1, ["u1/g1/gate", "u1/g1/gate2"]);
+  assert.deepEqual(result.sources.ownedConnections.u1, ["u1/g1/mid"]);
+});
+
+test("splices multi-level boundary passthrough and preserves parent fan-out", async () => {
+  const grandchild: ProjectFileData = {
+    version: 1,
+    circuit: {
+      components: [input("in", "A", 0), output("out", "Y", 0)],
+      connections: [{ id: "through", source: { component: "in", port: "out" }, target: { component: "out", port: "in" } }],
+    },
+  };
+  const child: ProjectFileData = {
+    version: 1,
+    circuit: {
+      components: [
+        input("in", "A", 0),
+        sub("g1", "grandchild.circuit.json", [port("A", "input"), port("Y", "output")]),
+        output("out", "Y", 0),
+      ],
+      connections: [
+        { id: "in", source: { component: "in", port: "out" }, target: { component: "g1", port: "A" } },
+        { id: "out", source: { component: "g1", port: "Y" }, target: { component: "out", port: "in" } },
+      ],
+    },
+  };
+  const root: ProjectFileData = {
+    version: 1,
+    circuit: {
+      components: [
+        input("src", "SRC", 0),
+        sub("u1", "child.circuit.json", [port("A", "input"), port("Y", "output")]),
+        output("sink1", "SINK1", 0),
+        output("sink2", "SINK2", 40),
+      ],
+      connections: [
+        { id: "out1", source: { component: "u1", port: "Y" }, target: { component: "sink1", port: "in" } },
+        { id: "out2", source: { component: "u1", port: "Y" }, target: { component: "sink2", port: "in" } },
+        { id: "in", source: { component: "src", port: "out" }, target: { component: "u1", port: "A" } },
+      ],
+    },
+  };
+  const result = await flattenProjectHierarchy({
+    rootIdentity: "/circuits/root.circuit.json",
+    root,
+    platform: "posix",
+    reader: readerOf({
+      "/circuits/child.circuit.json": child,
+      "/circuits/grandchild.circuit.json": grandchild,
+    }),
+  });
+  assert.deepEqual(result.diagnostics, []);
+  assert.deepEqual(result.circuit.components.map((entry) => entry.id), ["src", "sink1", "sink2"]);
+  assert.deepEqual(
+    result.circuit.connections.map((entry) => [entry.source.componentId, entry.target.componentId]),
+    [["src", "sink1"], ["src", "sink2"]],
+  );
+  assert.deepEqual(result.sources.ports.u1?.A?.outputSources, [{ componentId: "src", port: "out" }]);
+  assert.deepEqual(result.sources.ports.u1?.Y?.outputSources, [{ componentId: "src", port: "out" }]);
 });
 
 test("does not merge partial flat output when a nested branch fails", async () => {

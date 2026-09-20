@@ -1,10 +1,10 @@
 # 画布性能基准
 
-性能基准独立于 `pnpm verify`，用于检查真实 Vue `CircuitCanvas` 在目标规模下的交互帧耗时。脚本启动 Vite 与 Electron，挂载真实组件，构造 1920×1080、500 个 Component 和 1,000 条 Wire 的文档，并通过 DOM PointerEvent 连续驱动交互。
+性能基准独立于 `pnpm verify`，用于检查真实 Vue `CircuitCanvas` 在目标规模下的交互帧耗时。脚本启动 Vite 与 Electron，挂载真实组件，先读取三层 Project 夹具并调用生产 `flattenProjectHierarchy`，再把得到的 500 个 Component / 1,000 条 Connection flat Circuit 投影到画布，并通过 DOM PointerEvent 连续驱动交互。
 
 ## 测量口径
 
-场景走 `useEditorState` 的同一条路径：`EditorSnapshot` + 交互预览 → `createCanvasSceneProjector` → `CircuitCanvas`。交互状态由真实 DOM 事件产生，基准不直接改写场景几何。
+场景走生产层次解析和 `useEditorState` 使用的同一条画布路径：`ProjectFileData` → `flattenProjectHierarchy` → `EditorSnapshot` + 交互预览 → `createCanvasSceneProjector` → `CircuitCanvas`。夹具的解析诊断、flat 计数和端点映射都在页面启动时断言；交互状态由真实 DOM 事件产生，基准不直接改写场景几何。
 
 每个动画帧只推进一步交互，并把该帧「状态更新 → Vue 完成渲染」的耗时记为一个样本。样本因此覆盖投影器的几何重算与 DOM patch，而不只是事件处理器本身；拖动、布线与 Route 编辑的指针位移由各自的 RAF 合并器折叠到一帧内，与真实交互一致。
 
@@ -32,11 +32,15 @@ pnpm --filter @circuit-platform/desktop performance:benchmark --mode=route
 
 输出 JSON 中的 `p95FrameMs` 必须不超过 `20`，且 `interacted` 必须为 `true`。`frameP50Ms` / `frameP95Ms` 是诊断字段，**不参与 `pass` 判定**：基准固定使用软件渲染（`disable-gpu`），绝对帧间隔不可跨环境比较。`interacted` 由基准自检得出：每种模式都要求可观察的交互证据（视口移动、预览出现、草稿点数、折点预览），只测到空转的基准会直接失败，而不是给出漂亮的数字。基准失败时命令返回非零状态；本地排查可加 `--no-fail` 只输出数据。
 
-`--components=` 与 `--wires=` 可改变规模，只用于定位成本随规模的变化，验收口径固定为 500 / 1,000。`--width=` 改变合成文档里端口的位置数，默认为 1（既有基线口径），`--width=8` 用来量多位电路的成本。输出中的 `portWidth` 回报本次用的位宽，`domElements` 与 `smilAnimations` 用于成本定位。
+`--components=` 与 `--wires=` 可改变期望规模；层次夹具当前固定为 500 / 1,000，传入其他数值会让基准失败，避免把不同规模误标为验收结果。`--width=` 改变画布投影里的端口位宽，默认为 1（既有基线口径），`--width=8` 用来量多位电路的成本。输出中的 `hierarchyFixture`、`flattenedComponents`、`flattenedWires` 是真实层次路径的断言字段；`portWidth`、`domElements` 与 `smilAnimations` 用于成本定位。
+
+## 层次夹具
+
+`src/project-file/performance-fixture.ts` 生成根 → wrapper → core 三层 Project。core 内有 498 个普通 Component 和 998 条内部 Connection，根层的两条跨层边界连接经生产递归展平后得到精确的 500 / 1,000 规模。`benchmark.html` 不再直接构造平面元件或连线；它用内存 `HierarchyProjectReader` 读取同一夹具，要求零诊断后才挂载 Canvas。`tests/performance.test.ts` 也会对这条生产展平路径做 500 / 1,000 计数断言。
 
 ## 端口清单的来源（Phase 4.5 的一次修复）
 
-基准页要自己造 500 元件 / 1000 连线的合成文档，而它**不连引擎**，端口清单因此必须有个本地来源。
+基准页不启动引擎，但它读取真实层次 Project 夹具并在递归展平后绘制 flat Circuit；端口清单因此仍需要一个本地引擎替身来源。
 
 Phase 4.5 里 `ComponentDefinition` 去掉了 `ports`（端口清单改由引擎回传，展示定义只保留元数据，`963e77d`），但那次改动漏了 `benchmark.html`——它仍在读 `definition.ports`。后果不是「跑得慢」，而是**五种模式全部挂死**：`undefined.find(...)` 抛 TypeError 让模块脚本在构造连线时中断，`window.__benchmarkReady` 永不置上，`performance-benchmark-runner.cjs` 一直等下去，命令既不报错也不打印。本基准不在 `pnpm verify` 里，所以合并时没有任何一步会碰它。
 
@@ -46,7 +50,7 @@ Phase 4.5 里 `ComponentDefinition` 去掉了 `ports`（端口清单改由引擎
 
 ## 多位电路的成本（`--width=`）
 
-端口位宽默认 1，既有基线因此逐像素不变。`--width=8` 把合成文档里每个端口都变成 8 位总线，用来回答「多位电路的帧耗时是否仍满足 Phase 3 的预算」：位区间标注（`out[7:0]`）与二进制信号文本（`1010`）比 1 位端口更长，这是唯一随位宽变化的渲染成本——线路外观不随位宽改变（ADR 0013）。
+端口位宽默认 1，既有基线因此逐像素不变。`--width=8` 把展平后的画布端口投影成 8 位总线，用来回答「多位电路的帧耗时是否仍满足 Phase 3 的预算」：位区间标注（`out[7:0]`）与二进制信号文本（`1010`）比 1 位端口更长，这是唯一随位宽变化的渲染成本——线路外观不随位宽改变（ADR 0013）。
 
 ```powershell
 pnpm --filter @circuit-platform/desktop performance:benchmark --mode=wire --width=8
@@ -56,7 +60,7 @@ pnpm --filter @circuit-platform/desktop performance:benchmark --mode=wire --widt
 
 ## 当前结果
 
-2026-09-18 在本工作区执行（Windows，Node 24，500 Component / 1,000 Wire，5 秒）：
+历史平面基线（2026-09-18，Windows，Node 24，500 Component / 1,000 Wire，5 秒；用于与此前 Phase 4 结果对照）：
 
 | 交互 | P95 | 帧间隔 P50 | 帧间隔 P95 | DOM 元素 | SMIL 动画 | 结果 |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
@@ -144,6 +148,39 @@ Component 拖动与 Route 拖动的帧间隔 P50 仍是 ~60–71ms，而平移�
 关键实验是让指针原地不动：此时场景完全不变化、DOM 写入为零，帧间隔仍有 **58.4ms**。也就是说这个下限既不属于渲染，也不属于投影的重建与复用，而是「每帧调用一次投影 + 触发一次 Vue 重渲染」这一循环本身的成本。它随总元素数近似线性缩放（50/100 → 7.7ms，200/400 → 27.7ms，500/1,000 → 74.5ms）。
 
 在归因清楚之前不建议继续优化这一项：验收口径的 P95 已大幅达标，且这两个模式的渲染本就不在采样窗口内。若要继续排查，下一步应当先用 Chromium trace（而非 JS profile）确认这 58ms 落在哪个阶段。
+
+## Phase 5.5 层次规模验收
+
+Phase 5.5 的性能规模按**展平后的引擎对象**计算。固定验收口径仍是 `flattenedComponents=500`、`flattenedWires=1000`，视口为 `1920×1080`；真实交互的 `p95FrameMs` 必须不超过 `20ms`，并且 `interacted` 必须为 `true`。当前 Canvas 直接渲染这份递归展平结果，因此 `components` / `wires` 与 `flattenedComponents` / `flattenedWires` 必须同时为 500 / 1,000，并由 runner 一起断言，不能用顶层外壳数代替展平规模。
+
+当前基准默认运行三层真实 Project 夹具；其余四种模式只需替换 `--mode`。参数代表本次层次展平后必须得到的规模，传入非 `500` / `1000` 会直接失败：
+
+```powershell
+pnpm --filter @circuit-platform/desktop performance:benchmark --mode=pan --components=500 --wires=1000
+# --mode 依次替换为 drag、place、wire、route
+```
+
+`benchmark.html` 会在挂载 Canvas 前断言 `hierarchyFixture=true`、零层次诊断和精确的 `flattenedComponents=500` / `flattenedWires=1000`；runner 还把这三个条件纳入 `pass`。因此性能结果来自「Project 读取 → 生产递归展平 → Canvas 投影 → 真实 DOM PointerEvent」的完整画布路径。真实引擎完整推送结果见本文“文档推送时延（Phase 5 #42）”，命令为：
+
+```powershell
+pnpm --filter @circuit-platform/desktop test:temporal-e2e
+```
+
+2026-09-20 在 Windows 10.0.29671.1000、Node.js 24.19.0、Electron 38.8.6 上，`temporal-e2e.test.ts` 使用真实三层 Project 文件，经递归展平后逐次核对引擎收到的对象数确为 `500 Component / 1,000 Connection`。用同一命令独立复测两轮：第一轮三次“读取父子文件 → 展平 → 完整推送 → 首次稳定求值”耗时为 `2728 / 2819 / 2721 ms`，均值 `2756 ms`；最终标准复审轮为 `3413 / 3094 / 3059 ms`，均值 `3189 ms`。两轮所有样本都满足 `≤ 6000 ms` 预算；两组数据同时保留以呈现共享开发环境中的波动。复现命令：
+
+```powershell
+pnpm --filter @circuit-platform/desktop test:temporal-e2e
+```
+
+画布五种交互由正式 `benchmark.html` 验收；它渲染递归展平后的 500 个 flat Component 和 1,000 条 flat Connection，并同时携带 `hierarchyFixture=true`。五种模式的本轮实测结果见下表，只有全部 `interacted=true`、`hierarchyFixture=true` 且 `p95FrameMs≤20` 时才算通过。
+
+| 模式 | Canvas Component | Canvas Connection | 展平 Component | 展平 Connection | P95 | hierarchyFixture | interacted |
+| --- | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| pan | 500 | 1000 | 500 | 1000 | 0.2 ms | true | true |
+| drag | 500 | 1000 | 500 | 1000 | 0.3 ms | true | true |
+| place | 500 | 1000 | 500 | 1000 | 1.9 ms | true | true |
+| wire | 500 | 1000 | 500 | 1000 | 0.3 ms | true | true |
+| route | 500 | 1000 | 500 | 1000 | 0.2 ms | true | true |
 
 ## 文档推送时延（Phase 5 #42）
 

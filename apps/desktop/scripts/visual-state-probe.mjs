@@ -59,6 +59,10 @@ const COLLECT = `(async () => {
   }));
   const unsavedDialog = document.querySelector('.confirmation-dialog[role="alertdialog"]');
   const emptyState = document.querySelector(".empty-state");
+  const hierarchyInspector = document.querySelector(".inspector-subcircuit");
+  const hierarchyStatus = hierarchyInspector?.querySelector('[role="status"]');
+  const hierarchyDiagnostic = hierarchyInspector?.querySelector('[role="alert"]');
+  const hierarchyReload = hierarchyInspector?.querySelector("button");
   const recentItems = [...document.querySelectorAll(".recent-projects-item")].map((item) => ({
     name: text(item.querySelector(".recent-projects-name")),
   }));
@@ -87,6 +91,16 @@ const COLLECT = `(async () => {
       : {
           title: text(unsavedDialog.querySelector("h2")),
           confirmText: text(unsavedDialog.querySelector("button.dialog-button--danger")),
+        },
+    hierarchy: hierarchyInspector === null
+      ? null
+      : {
+          status: text(hierarchyStatus),
+          diagnostic: text(hierarchyDiagnostic),
+          reloadLabel: hierarchyReload?.getAttribute("aria-label") ?? null,
+          reloadDisabled: hierarchyReload?.hasAttribute("disabled") ?? false,
+          diagnosticId: hierarchyDiagnostic?.id ?? null,
+          reloadDescription: hierarchyReload?.getAttribute("aria-describedby") ?? null,
         },
   };
 })()`;
@@ -190,6 +204,19 @@ const expectations = {
     check(failures, facts.emptyState?.recentItems === 2, `最近项目列表应有 2 条，实际是 ${facts.emptyState?.recentItems}`);
     check(failures, facts.emptyState?.recentFirst === "八位加法器.circuit.json", `最近使用的一项应排在最前，实际是 ${facts.emptyState?.recentFirst}`);
   },
+  "hierarchy-resolved": (facts, failures) => {
+    check(failures, facts.hierarchy?.status === "状态：已解析", `已解析子电路状态不符：${facts.hierarchy?.status}`);
+    check(failures, facts.hierarchy?.diagnostic === null, "已解析子电路不应显示诊断告警");
+    check(failures, facts.hierarchy?.reloadLabel === "重新加载子电路 ./child.circuit.json", `重载按钮可访问名称不符：${facts.hierarchy?.reloadLabel}`);
+    check(failures, facts.hierarchy?.reloadDisabled === false, "已解析子电路的重载按钮不应被禁用");
+  },
+  "hierarchy-unresolved": (facts, failures) => {
+    check(failures, facts.hierarchy?.status === "状态：未解析", `未解析子电路状态不符：${facts.hierarchy?.status}`);
+    check(failures, typeof facts.hierarchy?.diagnostic === "string" && facts.hierarchy.diagnostic.includes("找不到"), `未解析子电路诊断不符：${facts.hierarchy?.diagnostic}`);
+    check(failures, facts.hierarchy?.reloadLabel === "重新加载子电路 ./child.circuit.json", `重载按钮可访问名称不符：${facts.hierarchy?.reloadLabel}`);
+    check(failures, facts.hierarchy?.reloadDisabled === false, "未解析子电路仍应允许键盘重载");
+    check(failures, facts.hierarchy?.diagnosticId === facts.hierarchy?.reloadDescription, "重载命令未通过 aria-describedby 关联诊断");
+  },
   "bus-canvas": (facts, failures) => {
     check(failures, facts.nodeKinds.includes("SPLITTER"), "画布上没有拆线器");
     check(failures, facts.nodeKinds.includes("MERGER"), "画布上没有合线器");
@@ -292,7 +319,8 @@ async function main() {
   app.disableHardwareAcceleration();
   app.commandLine.appendSwitch("disable-gpu");
   app.commandLine.appendSwitch("no-sandbox");
-  const vite = await createServer({ root: desktopRoot, server: { host: "127.0.0.1", port, strictPort: true } });
+  // 探针需要在一个稳定页面上连续执行状态；共享工作区的编辑不能触发 HMR 把页面重置到半成品。
+  const vite = await createServer({ root: desktopRoot, server: { host: "127.0.0.1", port, strictPort: true, hmr: false } });
   try {
     await vite.listen();
     const baseUrl = `http://127.0.0.1:${port}`;

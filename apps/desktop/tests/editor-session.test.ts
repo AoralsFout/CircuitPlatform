@@ -295,6 +295,22 @@ test("rewrites Subcircuit references without engine work and keeps projection hi
   await session.dispatch({ type: "undo" });
   const redone = await session.dispatch({ type: "redo" });
   assert.equal(redone.snapshot.document.components.find((component) => component.id === "input-a")?.data?.subcircuit?.reference, "new-child.circuit");
+
+  const requested = await session.dispatch({ type: "request-clear" });
+  assert.equal(requested.ok, true);
+  assert.equal(requested.snapshot.operation, "idle");
+  assert.deepEqual(requested.snapshot.confirmation, {
+    type: "clear-document",
+    componentCount: 4,
+    connectionCount: 3,
+  });
+  const rejected = await session.dispatch({ type: "confirm-clear" });
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.error.code, "hierarchy_projection_required");
+  assert.equal(rejected.snapshot.operation, "idle");
+  const continued = await session.dispatch({ type: "select", selection: { kind: "component", id: "input-b" } });
+  assert.equal(continued.ok, true);
+  assert.deepEqual(continued.snapshot.selection, { kind: "component", id: "input-b" });
 });
 
 test("restores the local model when component deletion fails", async () => {

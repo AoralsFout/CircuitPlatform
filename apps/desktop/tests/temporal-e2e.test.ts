@@ -670,6 +670,99 @@ function twoDffParentProject(): ProjectFileData {
   };
 }
 
+/** 8 位 XOR ALU 的最内层 Project：边界 A/B → 拆线器 → 八个 XOR → 合线器 → 边界 Y。 */
+function xorCoreProject(): ProjectFileData {
+  const inputPort = [{ name: "out", direction: "output", width: 8 }] as const;
+  const outputPort = [{ name: "in", direction: "input", width: 8 }] as const;
+  return {
+    version: 1,
+    circuit: {
+      components: [
+        { id: "a", kind: "input", displayName: "A", position: { x: 0, y: 0 }, ports: inputPort },
+        { id: "b", kind: "input", displayName: "B", position: { x: 0, y: 120 }, ports: inputPort },
+        { id: "split-a", kind: "splitter", displayName: "Split A", position: { x: 180, y: 0 }, ports: defaultPortsFor("splitter")! },
+        { id: "split-b", kind: "splitter", displayName: "Split B", position: { x: 180, y: 120 }, ports: defaultPortsFor("splitter")! },
+        ...Array.from({ length: 8 }, (_, index) => ({
+          id: `xor${index}`,
+          kind: "xor" as const,
+          displayName: `XOR ${index}`,
+          position: { x: 400, y: index * 60 },
+        })),
+        { id: "merge", kind: "merger", displayName: "Merge Y", position: { x: 620, y: 120 }, ports: defaultPortsFor("merger")! },
+        { id: "y", kind: "output", displayName: "Y", position: { x: 840, y: 120 }, ports: outputPort },
+      ],
+      connections: [
+        { id: "a-to-split", source: { component: "a", port: "out" }, target: { component: "split-a", port: "in" } },
+        { id: "b-to-split", source: { component: "b", port: "out" }, target: { component: "split-b", port: "in" } },
+        ...Array.from({ length: 8 }, (_, index) => [
+          { id: `a-${index}`, source: { component: "split-a", port: `out${index}` }, target: { component: `xor${index}`, port: "in1" } },
+          { id: `b-${index}`, source: { component: "split-b", port: `out${index}` }, target: { component: `xor${index}`, port: "in2" } },
+          { id: `y-${index}`, source: { component: `xor${index}`, port: "out" }, target: { component: "merge", port: `in${index}` } },
+        ]).flat(),
+        { id: "merge-to-y", source: { component: "merge", port: "out" }, target: { component: "y", port: "in" } },
+      ],
+    },
+  };
+}
+
+const xorInterfacePorts = [
+  { name: "A", direction: "input", width: 8 },
+  { name: "B", direction: "input", width: 8 },
+  { name: "Y", direction: "output", width: 8 },
+] as const;
+
+/** 一层包装 Project：只暴露 core 的三个边界 Port，确保外层仍按引用展平。 */
+function xorWrapperProject(): ProjectFileData {
+  const inputPort = [{ name: "out", direction: "output", width: 8 }] as const;
+  const outputPort = [{ name: "in", direction: "input", width: 8 }] as const;
+  return {
+    version: 1,
+    circuit: {
+      components: [
+        { id: "a", kind: "input", displayName: "A", position: { x: 0, y: 0 }, ports: inputPort },
+        { id: "b", kind: "input", displayName: "B", position: { x: 0, y: 120 }, ports: inputPort },
+        { id: "core", kind: "subcircuit", displayName: "xor-core.circuit.json", position: { x: 240, y: 60 }, data: { reference: ".\\xor-core.circuit.json", cachedPorts: xorInterfacePorts } },
+        { id: "y", kind: "output", displayName: "Y", position: { x: 520, y: 60 }, ports: outputPort },
+      ],
+      connections: [
+        { id: "a-to-core", source: { component: "a", port: "out" }, target: { component: "core", port: "A" } },
+        { id: "b-to-core", source: { component: "b", port: "out" }, target: { component: "core", port: "B" } },
+        { id: "core-to-y", source: { component: "core", port: "Y" }, target: { component: "y", port: "in" } },
+      ],
+    },
+  };
+}
+
+/** 顶层重复使用同一份 wrapper 两次；每个使用处拥有独立的扁平信号链。 */
+function xorTopProject(): ProjectFileData {
+  const inputPort = [{ name: "out", direction: "output", width: 8 }] as const;
+  const outputPort = [{ name: "in", direction: "input", width: 8 }] as const;
+  const wrapperData = { reference: ".\\xor-wrapper.circuit.json", cachedPorts: xorInterfacePorts } as const;
+  return {
+    version: 1,
+    circuit: {
+      components: [
+        { id: "a1", kind: "input", displayName: "A1", position: { x: 0, y: 0 }, ports: inputPort, data: { value: "11110000" } },
+        { id: "b1", kind: "input", displayName: "B1", position: { x: 0, y: 80 }, ports: inputPort, data: { value: "00001111" } },
+        { id: "alu1", kind: "subcircuit", displayName: "xor-wrapper.circuit.json", position: { x: 280, y: 40 }, data: wrapperData },
+        { id: "y1", kind: "output", displayName: "Y1", position: { x: 560, y: 40 }, ports: outputPort },
+        { id: "a2", kind: "input", displayName: "A2", position: { x: 0, y: 240 }, ports: inputPort, data: { value: "10101010" } },
+        { id: "b2", kind: "input", displayName: "B2", position: { x: 0, y: 320 }, ports: inputPort, data: { value: "00000000" } },
+        { id: "alu2", kind: "subcircuit", displayName: "xor-wrapper.circuit.json", position: { x: 280, y: 280 }, data: wrapperData },
+        { id: "y2", kind: "output", displayName: "Y2", position: { x: 560, y: 280 }, ports: outputPort },
+      ],
+      connections: [
+        { id: "a1-to-alu", source: { component: "a1", port: "out" }, target: { component: "alu1", port: "A" } },
+        { id: "b1-to-alu", source: { component: "b1", port: "out" }, target: { component: "alu1", port: "B" } },
+        { id: "alu1-to-y", source: { component: "alu1", port: "Y" }, target: { component: "y1", port: "in" } },
+        { id: "a2-to-alu", source: { component: "a2", port: "out" }, target: { component: "alu2", port: "A" } },
+        { id: "b2-to-alu", source: { component: "b2", port: "out" }, target: { component: "alu2", port: "B" } },
+        { id: "alu2-to-y", source: { component: "alu2", port: "Y" }, target: { component: "y2", port: "in" } },
+      ],
+    },
+  };
+}
+
 /** 与 `serializeProjectFile` 内部同一条回退：没有语义 Waypoint 时按渲染 Route 推导（`route.slice(1,-1)`）。 */
 function waypointsFromRoute(route: readonly { x: number; y: number }[] | undefined) {
   return route !== undefined && route.length > 2 ? route.slice(1, -1) : undefined;
@@ -798,6 +891,109 @@ test("two Subcircuit occurrences keep independent DFlipFlop simulation state", {
   assert.equal(binding.state.value.signals["u2:q"], "0");
   assert.equal(binding.state.value.signals["out-1:in"], "1");
   assert.equal(binding.state.value.signals["out-2:in"], "0");
+
+  // 删除并撤销只重建目标 occurrence：目标触发器回到 X，兄弟的引擎身份和已采样状态保持。
+  await binding.deleteComponent("u1");
+  assert.equal(binding.editorState.value?.document.components.some((component) => component.id === "u1"), false);
+  assert.equal(binding.state.value.signals["u2:q"], "0");
+  await binding.undo();
+  assert.equal(binding.editorState.value?.document.components.some((component) => component.id === "u1"), true);
+  assert.equal(binding.state.value.signals["u1:q"], "X");
+  assert.equal(binding.state.value.signals["u2:q"], "0", "撤销重建目标不能清空兄弟使用处的 DFlipFlop");
+});
+
+test("flattens a real two-level 8-bit XOR ALU twice with independent outputs", { skip: engineAvailable() }, async (t) => {
+  const { EngineClient } = require_("../electron/engine-client.cjs") as {
+    EngineClient: new (enginePath: string) => ProtocolEngineClient;
+  };
+  const client = new EngineClient(enginePath);
+  t.after(() => client.close());
+
+  const directory = await mkdtemp(join(tmpdir(), "temporal-e2e-xor-hierarchy-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const topPath = join(directory, "xor-top.circuit.json");
+  const wrapperPath = join(directory, "xor-wrapper.circuit.json");
+  const corePath = join(directory, "xor-core.circuit.json");
+  await writeFile(topPath, JSON.stringify(xorTopProject()), "utf8");
+  await writeFile(wrapperPath, JSON.stringify(xorWrapperProject()), "utf8");
+  await writeFile(corePath, JSON.stringify(xorCoreProject()), "utf8");
+
+  const restoreWindow = stubDesktopWindow(client);
+  t.after(restoreWindow);
+  const binding = useWorkspace();
+  await binding.bootstrap();
+  assert.equal(await binding.openProjectFromPath(topPath), true, `真实层次 XOR Project 必须能打开：${binding.openError.value ?? "未知错误"}`);
+  assert.equal(binding.state.value.simulationStep, 0, "打开后的首次稳定求值不能偷走 Tick");
+  assert.equal(binding.state.value.signals["y1:in"], "11111111");
+  assert.equal(binding.state.value.signals["y2:in"], "10101010");
+
+  // 两个 wrapper 都引用同一份 core 文件；改变第一组输入只允许第一条扁平信号链变化。
+  await binding.setInputBit("a1", 0, "0");
+  assert.equal(binding.state.value.signals["y1:in"], "01111111");
+  assert.equal(binding.state.value.signals["y2:in"], "10101010", "第二个使用处的输出不能被第一组输入污染");
+  assert.equal(binding.editorState.value?.document.components.filter((component) => component.kind === "subcircuit").length, 2);
+});
+
+test("recovers a hierarchy from the adopted in-memory snapshot, then reloads only the selected DFlipFlop", { skip: engineAvailable() }, async (t) => {
+  const { EngineClient } = require_("../electron/engine-client.cjs") as {
+    EngineClient: new (enginePath: string) => ProtocolEngineClient;
+  };
+  const client = new EngineClient(enginePath);
+  t.after(() => client.close());
+
+  const directory = await mkdtemp(join(tmpdir(), "temporal-e2e-hierarchy-reload-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const parentPath = join(directory, "parent.circuit.json");
+  const childPath = join(directory, "register.circuit.json");
+  await writeFile(parentPath, JSON.stringify(twoDffParentProject()), "utf8");
+  await writeFile(childPath, JSON.stringify(dffSubcircuitProject()), "utf8");
+
+  const restoreWindow = stubDesktopWindow(client);
+  t.after(restoreWindow);
+  const binding = useWorkspace();
+  await binding.bootstrap();
+  assert.equal(await binding.openProjectFromPath(parentPath), true);
+
+  // 先让两个使用处都建立 0 的前值，再分别采样 1；后续断言可区分「目标重置」和「兄弟状态保持」。
+  await binding.step();
+  await binding.setInputBit("data-1", 0, "1");
+  await binding.setInputBit("clock-1", 0, "1");
+  await binding.step();
+  await binding.setInputBit("data-2", 0, "1");
+  await binding.setInputBit("clock-2", 0, "1");
+  await binding.step();
+  assert.equal(binding.state.value.signals["u1:q"], "1");
+  assert.equal(binding.state.value.signals["u2:q"], "1");
+
+  // 磁盘版本断开 d→FF。没有显式 reload 时，这个变化不应影响已采用的内存 Project 图。
+  const changedChild = dffSubcircuitProject();
+  changedChild.circuit.connections = changedChild.circuit.connections.filter((connection) => connection.id !== "d-to-ff");
+  await writeFile(childPath, JSON.stringify(changedChild), "utf8");
+  client.engine?.kill();
+  for (let attempt = 0; attempt < 100 && client.engine !== null; attempt += 1) await drain();
+  await binding.step();
+  for (let attempt = 0; attempt < 1000 && !(binding.state.value.engineState === "ready" && binding.state.value.simulationStep === 0); attempt += 1) {
+    await drain();
+  }
+  assert.equal(binding.state.value.engineState, "ready");
+  // 恢复后先把 clock 拉回 0，再用旧的 adopted snapshot 触发真正上升沿；若错误重读磁盘，q 会保持 X。
+  await binding.setInputBit("clock-1", 0, "0");
+  await binding.step();
+  await binding.setInputBit("clock-1", 0, "1");
+  await binding.step();
+  assert.equal(binding.state.value.signals["u1:q"], "1", "引擎重启恢复必须继续使用内存中已采用的旧 child 快照");
+  // 恢复会清空整个新引擎的时序状态；在 reload 前重新只给两个使用处建立同样的已知状态。
+  await binding.setInputBit("clock-2", 0, "0");
+  await binding.step();
+  await binding.setInputBit("clock-2", 0, "1");
+  await binding.step();
+  assert.equal(binding.state.value.signals["u2:q"], "1");
+
+  // 显式 reload 只刷新 u1 的 child occurrence；u2 仍保留旧结构与刚才已经采样的状态。
+  assert.equal(await binding.reloadSubcircuit("u1"), true, "显式 reload 应该能采用磁盘上的 child 变化");
+  assert.equal(binding.state.value.signals["u1:q"], "X", "reload 目标 DFlipFlop 必须重置");
+  assert.equal(binding.state.value.signals["u2:q"], "1", "reload 一个使用处不能重置兄弟使用处的 DFlipFlop");
+  assert.equal(binding.state.value.signals["out-2:in"], "1", "兄弟使用处的外部输出必须保持");
 });
 
 test("rebuilds the current document automatically after the real engine process is killed", { skip: engineAvailable() }, async (t) => {
@@ -890,40 +1086,93 @@ test("rebuilds the current document automatically after the real engine process 
 const PUSH_BUDGET_RUNS = 3;
 const PUSH_BUDGET_MS = 6000;
 
-function pushBudgetDocument(): CircuitDocument {
+/** 预算最内层：两层 Subcircuit 展平后，根 Project 的两个边界元件加上这里的 498 个普通元件，
+ * 正好形成 500 个真实引擎 Component；998 条 merger 输入线加两条边界链路正好 1,000 条 Connection。 */
+function hierarchyBudgetCoreProject(): ProjectFileData {
   const mergerPorts = defaultPortsFor("merger") ?? [];
-  const notCount = 374;
+  const notCount = 373;
   const mergerCount = 125;
-  if (1 + notCount + mergerCount !== 500) throw new Error("推送预算文档的元件数必须恰好是 500");
-  if (mergerCount * 8 !== 1000) throw new Error("推送预算文档的连线数必须恰好是 1,000");
-
-  // 驱动源按连线序号在 1 个 Input 与 374 个 NOT 的输出之间轮转：NOT 的输入悬空不影响推送成本，
-  // 它们的输出端口照常参与求值与读数刷新。
-  const sources = ["src:out", ...Array.from({ length: notCount }, (_, index) => `n${index}:out`)];
+  if (notCount + mergerCount !== 498) throw new Error("预算子 Project 的普通元件数必须是 498");
+  if (mergerCount * 8 - 2 !== 998) throw new Error("预算内部 merger 连线数必须是 998");
+  const sources = Array.from({ length: notCount }, (_, index) => `n${index}:out`);
+  const inputPort = [{ name: "out", direction: "output", width: 1 }] as const;
+  const outputPort = [{ name: "in", direction: "input", width: 1 }] as const;
   return {
-    components: [
-      { id: "src", kind: "input" },
-      ...Array.from({ length: notCount }, (_, index) => ({ id: `n${index}`, kind: "not" as const })),
-      ...Array.from({ length: mergerCount }, (_, index) => ({ id: `m${index}`, kind: "merger" as const, ports: mergerPorts })),
-    ],
-    connections: Array.from({ length: mergerCount }, (_, mergerIndex) =>
-      Array.from({ length: 8 }, (_, branchIndex) => {
-        const index = mergerIndex * 8 + branchIndex;
-        const [sourceComponentId, sourcePort] = sources[index % sources.length]!.split(":");
-        return {
-          id: `wire-${index}`,
-          source: { componentId: sourceComponentId!, port: sourcePort! },
-          target: { componentId: `m${mergerIndex}`, port: `in${branchIndex}` },
-        };
-      })).flat(),
+    version: 1,
+    circuit: {
+      components: [
+        { id: "source", kind: "input", displayName: "IN", position: { x: 0, y: 0 }, ports: inputPort },
+        ...Array.from({ length: notCount }, (_, index) => ({ id: `n${index}`, kind: "not" as const, displayName: `NOT ${index}`, position: { x: 120, y: index * 20 } })),
+        ...Array.from({ length: mergerCount }, (_, index) => ({ id: `m${index}`, kind: "merger" as const, displayName: `MERGE ${index}`, position: { x: 360, y: index * 20 }, ports: mergerPorts })),
+        { id: "sink", kind: "output", displayName: "OUT", position: { x: 600, y: 0 }, ports: outputPort },
+      ],
+      connections: [
+        { id: "source-to-not", source: { component: "source", port: "out" }, target: { component: "n0", port: "in" } },
+        ...Array.from({ length: mergerCount }, (_, mergerIndex) =>
+          Array.from({ length: 8 }, (_, branchIndex) => {
+            const index = mergerIndex * 8 + branchIndex;
+            const [sourceComponentId, sourcePort] = sources[index % sources.length]!.split(":");
+            return { id: `wire-${index}`, source: { component: sourceComponentId!, port: sourcePort! }, target: { component: `m${mergerIndex}`, port: `in${branchIndex}` } };
+          })).flat().slice(0, 998),
+        { id: "not-to-sink", source: { component: "n0", port: "out" }, target: { component: "sink", port: "in" } },
+      ],
+    },
   };
 }
 
-test("pushes 500 components and 1,000 connections within the six-second budget", { skip: engineAvailable() }, async (t) => {
+const budgetInterfacePorts = [
+  { name: "IN", direction: "input", width: 1 },
+  { name: "OUT", direction: "output", width: 1 },
+] as const;
+
+function hierarchyBudgetWrapperProject(): ProjectFileData {
+  const port = [{ name: "out", direction: "output", width: 1 }] as const;
+  const outputPort = [{ name: "in", direction: "input", width: 1 }] as const;
+  return {
+    version: 1,
+    circuit: {
+      components: [
+        { id: "source", kind: "input", displayName: "IN", position: { x: 0, y: 0 }, ports: port },
+        { id: "core", kind: "subcircuit", displayName: "budget-core.circuit.json", position: { x: 160, y: 0 }, data: { reference: ".\\budget-core.circuit.json", cachedPorts: budgetInterfacePorts } },
+        { id: "sink", kind: "output", displayName: "OUT", position: { x: 320, y: 0 }, ports: outputPort },
+      ],
+      connections: [
+        { id: "source-to-core", source: { component: "source", port: "out" }, target: { component: "core", port: "IN" } },
+        { id: "core-to-sink", source: { component: "core", port: "OUT" }, target: { component: "sink", port: "in" } },
+      ],
+    },
+  };
+}
+
+function hierarchyBudgetRootProject(): ProjectFileData {
+  const port = [{ name: "out", direction: "output", width: 1 }] as const;
+  const outputPort = [{ name: "in", direction: "input", width: 1 }] as const;
+  return {
+    version: 1,
+    circuit: {
+      components: [
+        { id: "source", kind: "input", displayName: "IN", position: { x: 0, y: 0 }, ports: port, data: { value: "1" } },
+        { id: "wrapper", kind: "subcircuit", displayName: "budget-wrapper.circuit.json", position: { x: 160, y: 0 }, data: { reference: ".\\budget-wrapper.circuit.json", cachedPorts: budgetInterfacePorts } },
+        { id: "sink", kind: "output", displayName: "OUT", position: { x: 320, y: 0 }, ports: outputPort },
+      ],
+      connections: [
+        { id: "source-to-wrapper", source: { component: "source", port: "out" }, target: { component: "wrapper", port: "IN" } },
+        { id: "wrapper-to-sink", source: { component: "wrapper", port: "OUT" }, target: { component: "sink", port: "in" } },
+      ],
+    },
+  };
+}
+
+test("flattens and pushes a real hierarchical 500-component/1,000-connection Project within the six-second budget", { skip: engineAvailable() }, async (t) => {
   const { EngineClient } = require_("../electron/engine-client.cjs") as {
     EngineClient: new (enginePath: string) => ProtocolEngineClient;
   };
-  const document = pushBudgetDocument();
+  const directory = await mkdtemp(join(tmpdir(), "temporal-e2e-hierarchy-budget-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const rootPath = join(directory, "budget-root.circuit.json");
+  await writeFile(rootPath, JSON.stringify(hierarchyBudgetRootProject()), "utf8");
+  await writeFile(join(directory, "budget-wrapper.circuit.json"), JSON.stringify(hierarchyBudgetWrapperProject()), "utf8");
+  await writeFile(join(directory, "budget-core.circuit.json"), JSON.stringify(hierarchyBudgetCoreProject()), "utf8");
   const durations: number[] = [];
 
   for (let run = 0; run < PUSH_BUDGET_RUNS; run += 1) {
@@ -931,23 +1180,34 @@ test("pushes 500 components and 1,000 connections within the six-second budget",
     // 复用旧进程会让前一份电路的残留结构进入测量口径。
     const client = new EngineClient(enginePath);
     t.after(() => client.close());
-    const workspace = createWorkspace(createEngineAdapter(client));
-    await workspace.checkEngine();
+    let componentAdds = 0;
+    let connectionAdds = 0;
+    const request = client.request.bind(client);
+    client.request = async (message) => {
+      if (message.type === "add_component") componentAdds += 1;
+      if (message.type === "add_connection") connectionAdds += 1;
+      return request(message);
+    };
+    const restoreWindow = stubDesktopWindow(client);
+    t.after(restoreWindow);
+    const binding = useWorkspace();
+    await binding.bootstrap();
 
     const startedAt = performance.now();
-    const loaded = await workspace.loadCircuit(document);
+    const loaded = await binding.openProjectFromPath(rootPath);
     const elapsed = performance.now() - startedAt;
     durations.push(elapsed);
 
-    assert.notEqual(loaded.bindings, null, `第 ${run + 1} 次推送被引擎拒绝`);
-    assert.equal(Object.keys(loaded.bindings?.components ?? {}).length, 500);
-    assert.equal(Object.keys(loaded.bindings?.connections ?? {}).length, 1000);
-    assert.equal(loaded.snapshot.simulationStep, 0, "加载后的首次求值不是一次推进");
+    assert.equal(loaded, true, `第 ${run + 1} 次层次 Project 推送被拒绝：${binding.openError.value ?? "未知错误"}`);
+    assert.equal(componentAdds, 500, `第 ${run + 1} 次应真实推送 500 个扁平 Component`);
+    assert.equal(connectionAdds, 1000, `第 ${run + 1} 次应真实推送 1,000 条扁平 Connection`);
+    assert.equal(binding.state.value.simulationStep, 0, "加载后的首次求值不是一次推进");
+    assert.equal(binding.state.value.signals["sink:in"], "0", "预算 Project 的可观测输出来自 source→NOT 的实际稳定链");
   }
 
   const mean = durations.reduce((sum, value) => sum + value, 0) / durations.length;
   await t.diagnostic(
-    `500 元件 / 1,000 连线完整推送实测：${durations.map((value) => value.toFixed(0)).join(" / ")} ms（均值 ${mean.toFixed(0)} ms）`,
+    `真实层次 Project 展平后 500 元件 / 1,000 连线（含首次求值）实测：${durations.map((value) => value.toFixed(0)).join(" / ")} ms（均值 ${mean.toFixed(0)} ms）`,
   );
   assert.ok(
     mean <= PUSH_BUDGET_MS,

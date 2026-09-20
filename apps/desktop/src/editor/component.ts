@@ -10,6 +10,8 @@ export type SubcircuitStatus = "resolved" | "unresolved" | "resolving";
 export interface SubcircuitDiagnostic {
   code: string;
   message: string;
+  /** 触发诊断的可见 Subcircuit ID；解析器无法归属到组件时省略。 */
+  componentId?: string;
   /** 从顶层 Project 到失败目标的可展示引用链。 */
   chain?: readonly string[];
 }

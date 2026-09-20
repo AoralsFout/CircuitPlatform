@@ -62,7 +62,8 @@ async function main() {
   const port = 4175;
   app.disableHardwareAcceleration();
   // 使用正式 Vite/Vue 配置，截图页面挂载真实 App 与 CircuitCanvas。
-  const vite = await createServer({ root: desktopRoot, server: { host: "127.0.0.1", port, strictPort: true } });
+  // 截图期间关闭 HMR：共享工作区里其他任务的编辑不应重载当前状态，留下半准备的画面。
+  const vite = await createServer({ root: desktopRoot, server: { host: "127.0.0.1", port, strictPort: true, hmr: false } });
   try {
     await vite.listen();
     await waitForServer(`http://127.0.0.1:${port}/visual-regression.html`);

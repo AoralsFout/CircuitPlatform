@@ -206,6 +206,19 @@ export interface EditorBindings {
   portSources?: Readonly<Partial<Record<EditorComponentId, Readonly<Partial<Record<string, EditorPortSource>>>>>>;
 }
 
+/** 编辑器会话内部可变的绑定副本；外部快照仍通过 EditorBindings 保持只读。 */
+type MutableEditorBindings = {
+  components: Partial<Record<EditorComponentId, EngineComponentBinding>>;
+  connections: Partial<Record<EditorConnectionId, EngineConnectionBinding>>;
+  flatComponents?: Partial<Record<string, EngineComponentId>>;
+  flatConnections?: Partial<Record<string, EngineConnectionId>>;
+  componentFlatIds?: Partial<Record<EditorComponentId, readonly string[]>>;
+  connectionFlatIds?: Partial<Record<EditorConnectionId, readonly string[]>>;
+  componentKinds?: Partial<Record<EditorComponentId, EditorComponentKind>>;
+  ports?: Partial<Record<EditorComponentId, readonly PortSpec[]>>;
+  portSources?: Partial<Record<EditorComponentId, Partial<Record<string, EditorPortSource>>>>;
+};
+
 /** 展平器交给编辑器事务层的引擎平面；每个 id 都是稳定的扁平字符串身份。 */
 export interface EditorFlatCircuit {
   components: readonly {
@@ -549,6 +562,12 @@ const confirmationPendingError: EngineError = {
   retryable: false,
 };
 
+const hierarchyProjectionRequiredError: EngineError = {
+  code: "hierarchy_projection_required",
+  message: "层次化文档必须通过工作区投影事务修改。",
+  retryable: false,
+};
+
 const recoveryError = (message: string): EngineError => ({
   code: "editor_recovery_required",
   message,
@@ -589,9 +608,10 @@ function cloneVisibleDocument(document: MutableDocument): EditorDocument {
         ...(connection.route ? { route: connection.route.map((point) => ({ ...point })) } : {}),
         ...(connection.waypoints ? { waypoints: connection.waypoints.map((point) => ({ ...point })) } : {}),
         danglingEndpoints: [
+          ...connection.danglingEndpoints,
           ...(!isAttached(connection.source.componentId) ? ["source" as const] : []),
           ...(!isAttached(connection.target.componentId) ? ["target" as const] : []),
-        ],
+        ].filter((side, index, sides): side is EditorEndpointSide => sides.indexOf(side) === index),
       })),
   };
 }
@@ -686,8 +706,10 @@ export function singleEngineConnectionId(binding: EngineConnectionBinding | unde
 }
 
 /** 历史/协议路径只接受可直接放置的普通 ComponentKindName。 */
-function protocolKind(kind: EditorComponentKind): ComponentKindName {
-  return kind as ComponentKindName;
+function protocolKind(kind: ComponentKindName): ComponentKindName;
+function protocolKind(kind: EditorComponentKind): ComponentKindName | null;
+function protocolKind(kind: EditorComponentKind): ComponentKindName | null {
+  return kind === "subcircuit" ? null : kind;
 }
 
 function cloneBindings(bindings: EditorBindings): EditorBindings {
@@ -881,7 +903,7 @@ export function createEditorSession(
   const document = toMutableDocument(initial.document);
   // 历史命令只覆盖普通平面元件；层次组绑定由 Workspace 投影层消费。
   // 这里保留完整绑定形状，避免普通命令路径被迫了解层次投影的内部身份。
-  const bindings: any = cloneBindings(initial.bindings);
+  const bindings: MutableEditorBindings = cloneBindings(initial.bindings);
   let lastProjection: EditorProjectionInput | null = initial.projection ? cloneProjectionInput(initial.projection) : null;
   /**
    * 引擎代数：每次整体采纳新绑定（引擎进程被更换）时递增。
@@ -1002,7 +1024,9 @@ export function createEditorSession(
       .flatMap((component) => {
         const ids: readonly string[] = bindings.componentFlatIds?.[component.id] ?? [component.id];
         componentFlatIds[component.id] = [...ids];
-        return ids.map((id) => ({ id, kind: protocolKind(component.kind), ...(component.ports ? { ports: clonePorts(component.ports) } : {}) }));
+        const kind = protocolKind(component.kind);
+        if (kind === null) return [];
+        return ids.map((id) => ({ id, kind, ...(component.ports ? { ports: clonePorts(component.ports) } : {}) }));
       });
     const connectionFlatIds: Record<string, readonly string[]> = {};
     const flatConnections: EditorFlatCircuit["connections"] = [...document.connections.values()]
@@ -1065,14 +1089,20 @@ export function createEditorSession(
     const newComponents = new Map(target.flatCircuit.components.map((component) => [component.id, component]));
     const oldConnections = new Map(before.flatCircuit.connections.map((connection) => [connection.id, connection]));
     const newConnections = new Map(target.flatCircuit.connections.map((connection) => [connection.id, connection]));
-    const oldComponentIds: Record<string, number> = { ...(bindings.flatComponents ?? {}) };
+    const oldComponentIds: Record<string, number> = {};
+    for (const [flatId, id] of Object.entries(bindings.flatComponents ?? {})) {
+      if (id !== undefined) oldComponentIds[flatId] = id;
+    }
     for (const [editorId, flatIds] of Object.entries(before.componentFlatIds)) {
       for (const [index, flatId] of (flatIds ?? []).entries()) {
         const id = (bindings.components[editorId] !== undefined ? engineComponentIds(bindings.components[editorId])[index] : undefined);
         if (id !== undefined) oldComponentIds[flatId] = id;
       }
     }
-    const oldConnectionIds: Record<string, number> = { ...(bindings.flatConnections ?? {}) };
+    const oldConnectionIds: Record<string, number> = {};
+    for (const [flatId, id] of Object.entries(bindings.flatConnections ?? {})) {
+      if (id !== undefined) oldConnectionIds[flatId] = id;
+    }
     for (const [editorId, flatIds] of Object.entries(before.connectionFlatIds)) {
       for (const [index, flatId] of (flatIds ?? []).entries()) {
         const id = (bindings.connections[editorId] !== undefined ? engineConnectionIds(bindings.connections[editorId])[index] : undefined);
@@ -1425,6 +1455,8 @@ export function createEditorSession(
   function makeDeleteComponentFrame(componentId: EditorComponentId): DeleteComponentFrame | null {
     const component = requireComponent(componentId);
     if (!component) return null;
+    const kind = protocolKind(component.kind);
+    if (kind === null) return null;
     const connectionPlans = [...document.connections.values()]
       .filter(
         (connection) =>
@@ -1442,7 +1474,7 @@ export function createEditorSession(
       type: "delete-component",
       componentId,
       selectionBefore: selection ? { ...selection } : null,
-      kind: protocolKind(component.kind),
+      kind,
       ports: clonePorts(component.ports),
       danglingConnectionIds: connectionPlans
         .flatMap((connection) => engineConnectionIds(bindings.connections[connection.id])),
@@ -1452,9 +1484,13 @@ export function createEditorSession(
   }
 
   function makeClearDocumentFrame(): ClearDocumentFrame | null {
-    const components = [...document.components.values()]
-      .filter((component) => component.lifecycle === "active")
-      .map((component) => ({ id: component.id, kind: protocolKind(component.kind), ports: clonePorts(component.ports) }));
+    const components: ClearDocumentFrame["components"] = [];
+    for (const component of document.components.values()) {
+      if (component.lifecycle !== "active") continue;
+      const kind = protocolKind(component.kind);
+      if (kind === null) return null;
+      components.push({ id: component.id, kind, ports: clonePorts(component.ports) });
+    }
     const connections = [...document.connections.values()]
       .filter((connection) => connection.lifecycle === "visible")
       .map((connection) => ({
@@ -1535,8 +1571,8 @@ export function createEditorSession(
     for (const connection of removedConnections) {
       delete bindings.connections[connection.id];
       if (!connection.wasLive) continue;
-      const sourceComponentId = bindings.components[connection.source.componentId];
-      const targetComponentId = bindings.components[connection.target.componentId];
+      const sourceComponentId = singleEngineComponentId(bindings.components[connection.source.componentId]);
+      const targetComponentId = singleEngineComponentId(bindings.components[connection.target.componentId]);
       if (sourceComponentId === undefined || targetComponentId === undefined) {
         return recoveryError("清空补偿所需的连接端点没有有效引擎绑定。");
       }
@@ -1556,7 +1592,7 @@ export function createEditorSession(
   }
 
   async function deleteComponent(frame: DeleteComponentFrame): Promise<CommandResult> {
-    const componentEngineId = bindings.components[frame.componentId];
+    const componentEngineId = singleEngineComponentId(bindings.components[frame.componentId]);
     if (componentEngineId === undefined) return fail(recoveryError("选中的元件没有有效引擎绑定。"));
     setComponentDeleted(document, frame.componentId);
     publish();
@@ -1656,7 +1692,7 @@ export function createEditorSession(
   ): Promise<CommandResult> {
     const component = requireComponent(componentId);
     if (!component) return fail(noSelectionError);
-    const engineId = bindings.components[componentId];
+    const engineId = singleEngineComponentId(bindings.components[componentId]);
     if (engineId === undefined) return fail(recoveryError("改位宽所需的元件没有有效引擎绑定。"));
 
     const portsBefore = clonePorts(component.ports);
@@ -1682,7 +1718,7 @@ export function createEditorSession(
   async function applyPortWidthFrame(frame: SetPortWidthFrame, useAfter: boolean): Promise<CommandResult> {
     const component = document.components.get(frame.componentId);
     if (!component) return fail(recoveryError("改位宽所需的元件不存在。"));
-    const engineId = bindings.components[frame.componentId];
+    const engineId = singleEngineComponentId(bindings.components[frame.componentId]);
     if (engineId === undefined) return fail(recoveryError("改位宽所需的元件没有有效引擎绑定。"));
 
     const target = useAfter ? frame.portsAfter : frame.portsBefore;
@@ -1726,14 +1762,16 @@ export function createEditorSession(
   async function duplicateComponent(componentId: EditorComponentId): Promise<CommandResult> {
     const source = requireComponent(componentId);
     if (!source) return fail(noSelectionError);
-    const identity = nextComponentIdentity(protocolKind(source.kind));
+    const kind = protocolKind(source.kind);
+    if (kind === null) return fail(hierarchyProjectionRequiredError);
+    const identity = nextComponentIdentity(kind);
     const position = { x: source.position.x + 32, y: source.position.y + 32 };
-    const added = await call(() => engine.addComponent(protocolKind(source.kind), source.ports));
+    const added = await call(() => engine.addComponent(kind, source.ports));
     if (!added.ok) return fail(added.error);
 
     const component: EditorComponent = {
       id: identity.id,
-      kind: protocolKind(source.kind),
+      kind,
       displayName: identity.displayName,
       position,
       lifecycle: "active",
@@ -1745,7 +1783,7 @@ export function createEditorSession(
     undoStack.push({
       type: "add-component",
       componentId: component.id,
-      kind: protocolKind(component.kind),
+      kind,
       displayName: component.displayName,
       position: { ...position },
       ports: clonePorts(component.ports),
@@ -1759,7 +1797,7 @@ export function createEditorSession(
   async function undoAddComponent(frame: AddComponentFrame): Promise<CommandResult> {
     const component = document.components.get(frame.componentId);
     if (!component || component.lifecycle !== "active") return fail(recoveryError("撤销所需的元件不存在。"));
-    const engineId = bindings.components[frame.componentId];
+    const engineId = singleEngineComponentId(bindings.components[frame.componentId]);
     if (engineId === undefined) return fail(recoveryError("撤销所需的元件没有有效引擎绑定。"));
     component.lifecycle = "deleted";
     publish();
@@ -1921,8 +1959,8 @@ export function createEditorSession(
   }
 
   async function createConnection(frame: CreateConnectionFrame): Promise<CommandResult> {
-    const sourceEngineId = bindings.components[frame.source.componentId];
-    const targetEngineId = bindings.components[frame.target.componentId];
+    const sourceEngineId = singleEngineComponentId(bindings.components[frame.source.componentId]);
+    const targetEngineId = singleEngineComponentId(bindings.components[frame.target.componentId]);
     if (sourceEngineId === undefined || targetEngineId === undefined) {
       return fail({ code: "component_not_found", message: "连接端点没有有效引擎绑定。", retryable: true });
     }
@@ -1966,6 +2004,7 @@ export function createEditorSession(
     if (waypoints) connection.waypoints = waypoints.map((point) => ({ ...point }));
     else delete connection.waypoints;
     connection.lifecycle = "visible";
+    connection.danglingEndpoints = [];
     delete connection.hiddenReason;
   }
 
@@ -1982,13 +2021,13 @@ export function createEditorSession(
     const currentWasLive = currentIsNew || frame.oldWasLive;
     const currentSource = currentIsNew ? frame.source : frame.oldSource;
     const currentTarget = currentIsNew ? frame.target : frame.oldTarget;
-    const currentEngineId = bindings.connections[frame.connectionId];
-    const currentSourceId = bindings.components[currentSource.componentId];
-    const currentTargetId = bindings.components[currentTarget.componentId];
+    const currentEngineId = singleEngineConnectionId(bindings.connections[frame.connectionId]);
+    const currentSourceId = singleEngineComponentId(bindings.components[currentSource.componentId]);
+    const currentTargetId = singleEngineComponentId(bindings.components[currentTarget.componentId]);
     const desiredSource = currentIsNew ? frame.oldSource : frame.source;
     const desiredTarget = currentIsNew ? frame.oldTarget : frame.target;
-    const desiredSourceId = bindings.components[desiredSource.componentId];
-    const desiredTargetId = bindings.components[desiredTarget.componentId];
+    const desiredSourceId = singleEngineComponentId(bindings.components[desiredSource.componentId]);
+    const desiredTargetId = singleEngineComponentId(bindings.components[desiredTarget.componentId]);
     const oldBinding = currentEngineId;
 
     // 当前有效连接必须先解绑，才能满足引擎的单输入规则；Wire 的编辑器投影不隐藏。
@@ -2066,7 +2105,7 @@ export function createEditorSession(
 
   async function undoCreateConnection(frame: CreateConnectionFrame): Promise<CommandResult> {
     const connection = document.connections.get(frame.connectionId);
-    const engineId = bindings.connections[frame.connectionId];
+    const engineId = singleEngineConnectionId(bindings.connections[frame.connectionId]);
     if (!connection || connection.lifecycle !== "visible" || engineId === undefined) {
       return fail(recoveryError("撤销所需的连接不存在或没有有效引擎绑定。"));
     }
@@ -2092,8 +2131,8 @@ export function createEditorSession(
   async function redoCreateConnection(frame: CreateConnectionFrame, remainingRedo: readonly HistoryFrame[]): Promise<CommandResult> {
     const connection = document.connections.get(frame.connectionId);
     if (!connection) return fail(recoveryError("重做所需的连接不存在。"));
-    const sourceEngineId = bindings.components[frame.source.componentId];
-    const targetEngineId = bindings.components[frame.target.componentId];
+    const sourceEngineId = singleEngineComponentId(bindings.components[frame.source.componentId]);
+    const targetEngineId = singleEngineComponentId(bindings.components[frame.target.componentId]);
     if (sourceEngineId === undefined || targetEngineId === undefined) return fail(recoveryError("重做所需的连接端点没有有效引擎绑定。"));
     const added = await call(() => engine.addConnection({ sourceComponentId: sourceEngineId, sourcePort: frame.source.port, targetComponentId: targetEngineId, targetPort: frame.target.port }));
     if (!added.ok) return fail(added.error);
@@ -2112,7 +2151,7 @@ export function createEditorSession(
   async function deleteConnection(frame: DeleteConnectionFrame): Promise<CommandResult> {
     const connection = document.connections.get(frame.connectionId);
     if (!connection || connection.lifecycle === "deleted") return fail(noSelectionError);
-    const connectionEngineId = bindings.connections[frame.connectionId];
+    const connectionEngineId = singleEngineConnectionId(bindings.connections[frame.connectionId]);
     const wasLive = isLiveConnection(connection);
     connection.lifecycle = "hidden";
     connection.hiddenReason = "pending-operation";
@@ -2161,7 +2200,7 @@ export function createEditorSession(
 
     for (const connection of frame.connections) {
       if (!connection.wasLive) continue;
-      const engineId = bindings.connections[connection.id];
+      const engineId = singleEngineConnectionId(bindings.connections[connection.id]);
       if (engineId === undefined) continue;
       const removed = await call(() => engine.removeConnection(engineId));
       if (!removed.ok && !isAlreadyAbsent(removed.error)) {
@@ -2175,7 +2214,7 @@ export function createEditorSession(
     }
 
     for (const component of frame.components) {
-      const engineId = bindings.components[component.id];
+      const engineId = singleEngineComponentId(bindings.components[component.id]);
       if (engineId === undefined) {
         const compensationError = await compensateClearFailure(frame, removedComponents, removedConnections);
         return compensationError
@@ -2218,11 +2257,11 @@ export function createEditorSession(
       const sourceComponentId =
         connection.source.componentId === frame.componentId
           ? newComponentId
-          : bindings.components[connection.source.componentId];
+          : singleEngineComponentId(bindings.components[connection.source.componentId]);
       const targetComponentId =
         connection.target.componentId === frame.componentId
           ? newComponentId
-          : bindings.components[connection.target.componentId];
+          : singleEngineComponentId(bindings.components[connection.target.componentId]);
       if (sourceComponentId === undefined || targetComponentId === undefined) {
         const compensationError = await compensateNewComponent(newComponentId, newConnectionIds);
         return compensationError
@@ -2292,8 +2331,8 @@ export function createEditorSession(
       publishBindings();
       return { ok: true, snapshot: finishOperation() };
     }
-    const sourceComponentId = bindings.components[frame.source.componentId];
-    const targetComponentId = bindings.components[frame.target.componentId];
+    const sourceComponentId = singleEngineComponentId(bindings.components[frame.source.componentId]);
+    const targetComponentId = singleEngineComponentId(bindings.components[frame.target.componentId]);
     if (sourceComponentId === undefined || targetComponentId === undefined) {
       return fail(recoveryError("撤销所需的连接端点没有有效引擎绑定。"));
     }
@@ -2534,8 +2573,8 @@ export function createEditorSession(
     for (const connection of frame.connections) {
       if (!connection.wasLive) continue;
       delete bindings.connections[connection.id];
-      const sourceComponentId = bindings.components[connection.source.componentId];
-      const targetComponentId = bindings.components[connection.target.componentId];
+      const sourceComponentId = singleEngineComponentId(bindings.components[connection.source.componentId]);
+      const targetComponentId = singleEngineComponentId(bindings.components[connection.target.componentId]);
       if (sourceComponentId === undefined || targetComponentId === undefined) {
         const compensationError = await rollback();
         return compensationError
@@ -2738,12 +2777,15 @@ export function createEditorSession(
       return createConnection(frame);
     }
     if (command.type === "request-clear") {
-      const frame = makeClearDocumentFrame();
-      if (!frame) return fail(nothingToClearError);
+      const componentCount = [...document.components.values()]
+        .filter((component) => component.lifecycle === "active").length;
+      const connectionCount = [...document.connections.values()]
+        .filter((connection) => connection.lifecycle === "visible").length;
+      if (componentCount === 0 && connectionCount === 0) return fail(nothingToClearError);
       confirmation = {
         type: "clear-document",
-        componentCount: frame.components.length,
-        connectionCount: frame.connections.length,
+        componentCount,
+        connectionCount,
       };
       return { ok: true, snapshot: finishOperation() };
     }
@@ -2770,6 +2812,11 @@ export function createEditorSession(
     }
     if (command.type === "confirm-clear") {
       if (!confirmation) return fail(confirmationRequiredError);
+      if ([...document.components.values()].some((component) =>
+        component.lifecycle === "active" && component.kind === "subcircuit")) {
+        confirmation = null;
+        return fail(hierarchyProjectionRequiredError);
+      }
       const frame = makeClearDocumentFrame();
       confirmation = null;
       if (!frame) return fail(nothingToClearError);

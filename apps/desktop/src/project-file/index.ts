@@ -520,7 +520,7 @@ export function parseProjectFile(raw: unknown): ProjectFileParseResult {
   }
 
   if (errors.length > 0) return { ok: false, errors };
-  const document = { components, connections } as unknown as EditorDocument;
+  const document: EditorDocument = { components, connections };
   return {
     ok: true,
     value: {

@@ -18,6 +18,8 @@
   import { createConnectionDraft, connectionDraftRoute, reduceConnectionDraft } from "/src/editor/connection-draft.ts";
   import { positionFromPlacementCenter } from "/src/editor/placement.ts";
   import { createDefaultOrthogonalRoute } from "/src/editor/route.ts";
+  import { flattenProjectHierarchy } from "/src/project-file/hierarchy.ts";
+  import { createHierarchyPerformanceFixture } from "/src/project-file/performance-fixture.ts";
   // 这一页不连引擎，端口清单必须有个本地来源。它扮演的就是引擎，因此用的正是假引擎那份内置
   // 定义——前端源码里不该再有第二份，端口清单的唯一权威来源是引擎（ADR 0020）。
   // 本页不进入生产构建（`vite build` 只出 index.html），因此引入测试夹不会把 tests/ 带进产品。
@@ -25,12 +27,8 @@
 
   const params = new URLSearchParams(location.search);
   const mode = params.get("mode") || "pan";
-  const count = Number(params.get("components") || 500);
-  const wireCount = Number(params.get("wires") || 1000);
-  // Hierarchical circuits render only their visible shells, but the acceptance budget is stated
-  // against the flattened engine workload. Keep both scales explicit in benchmark observations.
-  const flattenedComponents = Number(params.get("flattenedComponents") || count);
-  const flattenedWires = Number(params.get("flattenedWires") || wireCount);
+  const expectedComponents = Number(params.get("components") || 500);
+  const expectedWires = Number(params.get("wires") || 1000);
   const registry = createComponentDefinitionRegistry();
   const projector = createCanvasSceneProjector(registry);
 
@@ -41,18 +39,40 @@
   const portsForKind = (kind) =>
     busWidth > 1 ? BUILT_IN_PORTS[kind].map((port) => ({ ...port, width: busWidth })) : BUILT_IN_PORTS[kind];
 
-  const kinds = ["input", "and", "or", "not", "output"];
-  const components = Array.from({ length: count }, (_, index) => {
-    const kind = kinds[index % kinds.length];
+  // 基准必须先走生产层次展平器，再将其 flat Circuit 投影到 Canvas；这里不接受合成平面数组。
+  const fixture = createHierarchyPerformanceFixture();
+  const hierarchy = await flattenProjectHierarchy({
+    rootIdentity: fixture.rootIdentity,
+    root: fixture.root,
+    platform: "posix",
+    reader: {
+      read: async (identity) => {
+        const value = fixture.files.get(identity);
+        return value === undefined
+          ? { ok: false, code: "project-read-failed", message: `性能夹具缺少 Project：${identity}` }
+          : { ok: true, value };
+      },
+    },
+  });
+  const flattenedComponents = hierarchy.circuit.components.length;
+  const flattenedWires = hierarchy.circuit.connections.length;
+  if (hierarchy.diagnostics.length > 0) throw new Error(`层次性能夹具解析失败：${hierarchy.diagnostics[0].message}`);
+  if (flattenedComponents !== expectedComponents || flattenedWires !== expectedWires) {
+    throw new Error(`层次性能夹具规模错误：${flattenedComponents}/${flattenedWires}，预期 ${expectedComponents}/${expectedWires}`);
+  }
+  const count = flattenedComponents;
+  const wireCount = flattenedWires;
+  const components = hierarchy.circuit.components.map((component, index) => {
+    const kind = component.kind;
     return {
-      id: `component-${index}`,
+      id: component.id,
       kind,
-      displayName: `Component ${index + 1}`,
+      displayName: component.id,
       position: { x: 32 + (index % 25) * 74, y: 32 + Math.floor(index / 25) * 58 },
       lifecycle: "active",
       // 端口清单不再来自展示定义：展示定义只有元数据，端口由引擎回传（ADR 0020）。这一页
       // 不连引擎，因此由它自己的引擎替身给出，与真实引擎的回退规则同源。
-      ports: portsForKind(kind),
+      ports: component.ports ?? portsForKind(kind),
     };
   });
   /**
@@ -69,21 +89,23 @@
   };
   const portPoint = (component, direction) => {
     const ports = component.ports;
-    // 优先取该方向的端口；没有时退回第一个，与既有的合成文档取值口径一致。
+    // 优先取该方向的端口；没有时退回第一个，保持展平夹具端点几何的稳定性。
     const port = ports.find((candidate) => candidate.direction === direction) ?? ports[0];
     const side = ports.filter((candidate) => candidate.direction === port.direction);
     const offset = portOffsetFor(component, port, side);
     return { port, point: { x: component.position.x + offset.x, y: component.position.y + offset.y } };
   };
-  const connections = Array.from({ length: wireCount }, (_, index) => {
-    const source = components[index % count];
-    const target = components[(index + 1 + index % 23) % count];
+  const componentsById = new Map(components.map((component) => [component.id, component]));
+  const connections = hierarchy.circuit.connections.map((connection) => {
+    const source = componentsById.get(connection.source.componentId);
+    const target = componentsById.get(connection.target.componentId);
+    if (source === undefined || target === undefined) throw new Error(`层次性能夹具端点缺失：${connection.id}`);
     const from = portPoint(source, "output");
     const to = portPoint(target, "input");
     return {
-      id: `connection-${index}`,
-      source: { componentId: source.id, port: from.port.name, point: from.point },
-      target: { componentId: target.id, port: to.port.name, point: to.point },
+      id: connection.id,
+      source: { componentId: source.id, port: connection.source.port, point: from.point },
+      target: { componentId: target.id, port: connection.target.port, point: to.point },
       lifecycle: "visible",
       danglingEndpoints: [],
       route: createDefaultOrthogonalRoute(from.point, to.point),
@@ -93,7 +115,7 @@
   // route 模式需要一条已选中且带折点的 Wire，Canvas 才会渲染折点手柄。
   const snapshot = ref({
     document: { components, connections },
-    selection: mode === "route" ? { kind: "connection", id: "connection-0" } : null,
+    selection: mode === "route" ? { kind: "connection", id: connections[0]?.id ?? "" } : null,
     operation: "idle",
     canUndo: false,
     canRedo: false,
@@ -165,6 +187,8 @@
     visibleWires: wireCount,
     flattenedComponents,
     flattenedWires,
+    hierarchyFixture: true,
+    hierarchyDiagnostics: hierarchy.diagnostics.length,
     elements: document.querySelectorAll("*").length,
     animated: document.querySelectorAll("animate").length,
     viewport: { x: viewport.value.x, y: viewport.value.y },

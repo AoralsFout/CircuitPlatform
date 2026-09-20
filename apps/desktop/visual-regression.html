@@ -280,13 +280,16 @@
         if (state === "hierarchy-resolved" || state === "hierarchy-unresolved") {
           // 通过真实的「打开」入口加载父 Project；桥接返回的子文件是否存在决定两种状态。
           // 首启时顶栏文件按钮尚未启用，真实入口在空状态面板；从这里发起同一个 requestOpen。
-          click(await waitFor('.empty-state__actions button:first-child'));
-          await waitFor('[data-subcircuit-status]');
-          const subcircuit = document.querySelector('[data-subcircuit-status]');
-          click(subcircuit);
+          const openProjectButton = await waitFor('.empty-state__actions button:first-child');
+          if (!openProjectButton) throw new Error("层次视觉夹具未找到打开 Project 入口");
+          click(openProjectButton);
+          const hierarchyNode = await waitFor('[data-subcircuit-status]');
+          if (!hierarchyNode) throw new Error("层次视觉夹具未完成父 Project 打开");
+          click(hierarchyNode);
           await settle(80);
           click(inspectorTab());
-          await waitFor('.inspector-subcircuit');
+          const hierarchyInspector = await waitFor('.inspector-subcircuit');
+          if (!hierarchyInspector) throw new Error("层次视觉夹具未打开子电路检查器");
           await settle(80);
           return;
         }

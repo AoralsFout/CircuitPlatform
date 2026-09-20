@@ -561,6 +561,10 @@ button:disabled { cursor: not-allowed; }
   .bottom-content--inspector, .bottom-content--properties { gap: 10px; }
   .bottom-content--inspector .inspector-copy, .bottom-content--inspector .inspector-port-list { display: none; }
   .bottom-content--inspector .inspector-value { width: 120px; }
+  .bottom-content--inspector .inspector-subcircuit { display: grid; min-width: 190px; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 10px; align-items: start; }
+  .bottom-content--inspector .inspector-subcircuit .inspector-details { grid-column: 1 / -1; margin-top: 0; }
+  .bottom-content--inspector .inspector-subcircuit .inspector-hint { grid-column: 1; margin: 0; }
+  .bottom-content--inspector .inspector-subcircuit > button { grid-column: 2; grid-row: 2; align-self: start; white-space: nowrap; }
   .bottom-content--outputs { grid-template-columns: minmax(0, 1fr); }
   .bottom-content--outputs .bottom-engine { display: none; }
   .output-readout { min-width: 170px; }
@@ -574,10 +578,12 @@ button:disabled { cursor: not-allowed; }
 
 @media (max-height: 600px) {
   .app-shell { min-height: 360px; }
-  .editor-main { grid-template-rows: 40px minmax(0, 1fr) 116px; }
+  .editor-main { grid-template-rows: 40px minmax(0, 1fr) 140px; }
   .editor-canvas-wrap { padding-block: 6px; }
   .canvas-info, .canvas-legend { display: none; }
   .circuit-canvas { min-height: 180px; }
+  .bottom-content { overflow: auto; }
+  .bottom-content--inspector { align-items: flex-start; }
 }
 
 :root[data-motion="reduced"] *, :root[data-motion="reduced"] *::before, :root[data-motion="reduced"] *::after { scroll-behavior: auto !important; animation: none !important; transition: none !important; }

@@ -195,7 +195,7 @@ function startComponentDrag(event: DragEvent, kind: EditorComponentKind): void {
     <template v-else>
       <div class="sidebar-section-title"><span>当前电路</span><span class="component-count">{{ componentCount }}</span></div>
       <div class="layer-list">
-        <button v-for="component in components" :key="component.id" type="button" :class="{ 'layer-item--active': component.id === selectedComponentId }" @click="emit('selectComponent', component.id)"><span class="layer-dot" :class="{ 'layer-dot--output': component.kind === 'output', 'layer-dot--gate': component.kind !== 'input' && component.kind !== 'output' }"></span>{{ component.displayName }} <small>{{ component.kind.toUpperCase() }}</small></button>
+        <button v-for="component in components" :key="component.id" type="button" :class="{ 'layer-item--active': component.id === selectedComponentId }" :aria-pressed="component.id === selectedComponentId" @click="emit('selectComponent', component.id)"><span class="layer-dot" :class="{ 'layer-dot--output': component.kind === 'output', 'layer-dot--gate': component.kind !== 'input' && component.kind !== 'output' }"></span>{{ component.displayName }} <small>{{ component.kind.toUpperCase() }}</small></button>
       </div>
     </template>
   </aside>

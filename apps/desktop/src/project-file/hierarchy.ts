@@ -1,12 +1,18 @@
 import type { ComponentKindName, PortSpec } from "@circuit-platform/protocol";
-import type { EditorComponentData, EditorComponentKind, SubcircuitComponentData, SubcircuitDiagnostic, SubcircuitStatus } from "../editor/component.ts";
+import type { SubcircuitComponentData, SubcircuitDiagnostic } from "../editor/component.ts";
 import type { EditorComponent, EditorConnection, EditorDocument, Point } from "../editor/index.ts";
 import type { ProjectFileComponent, ProjectFileData } from "./index.ts";
 import { projectPathIdentity, resolveProjectReference, type PathPlatform } from "./paths.ts";
 
 /** 供层次解析模块使用的最小子 Project 读取器；实现可以接文件、内存图或测试夹具。 */
 export interface HierarchyProjectReader {
-  read(identity: string): Promise<
+  /**
+   * 读取某个使用处采用的子 Project。
+   * @param identity 已按目标平台规范化的 Project 身份。
+   * @param occurrencePath 从根文档到该使用处的稳定 Editor Component ID 路径；同一文件的不同路径必须可返回不同快照。
+   * @returns 已校验的 v1 项目数据，或包含稳定机器类别和中文原因的读取失败；抛出异常也会由展平器转换为失败诊断。
+   */
+  read(identity: string, occurrencePath?: readonly string[]): Promise<
     | { ok: true; value: ProjectFileData }
     | { ok: false; code: string; message: string }
   >;
@@ -77,6 +83,7 @@ interface ProjectInterface {
 interface OccurrenceProjection {
   inputs: Map<string, readonly FlatEndpoint[]>;
   outputs: Map<string, readonly SourceExpression[]>;
+  inputAliases: Map<string, readonly SourceExpression[]>;
   components: string[];
   connections: string[];
 }
@@ -137,7 +144,7 @@ export async function flattenProjectHierarchy(input: FlattenProjectInput): Promi
     visibleSubcircuits: {},
     diagnostics: [],
   };
-  await flattenOccurrence(input.root, rootIdentity, [], [], false, undefined, output, input.reader, platform);
+  await flattenOccurrence(input.root, rootIdentity, [], [], false, [], output, input.reader, platform);
   const rootDocument = documentForProject(input.root, output);
 
   return {
@@ -158,31 +165,30 @@ function documentForProject(project: ProjectFileData, output: MutableOutput): Ed
     const component = editorComponentFor(entry);
     const resolved = output.visibleSubcircuits[entry.id];
     if (resolved !== undefined) {
-      return { ...component, ports: clonePorts(resolved.cachedPorts), data: { subcircuit: resolved } } as unknown as EditorComponent;
+      return { ...component, ports: clonePorts(resolved.cachedPorts), data: { subcircuit: resolved } };
     }
     if (entry.kind === "subcircuit") {
       const data = subcircuitDataOf(entry);
-      if (data !== undefined) return { ...component, ports: clonePorts(data.cachedPorts), data: { subcircuit: { ...data, status: "unresolved" as SubcircuitStatus } } } as unknown as EditorComponent;
+      if (data !== undefined) return { ...component, ports: clonePorts(data.cachedPorts), data: { subcircuit: { ...data, status: "unresolved" as const } } };
     }
     return component;
   });
   const connections = project.circuit.connections.map((entry) => editorConnectionFor(entry));
-  // EditorComponent 的层次字段由 editor/component.ts 定义；旧 EditorDocument 类型将在
-  // #45 接入编辑器侧 kind 时自然收窄，这里保持当前分支可独立测试。
-  return { components, connections } as unknown as EditorDocument;
+  // 可见根文档保留 Subcircuit；扁平内部对象只存在于投影结果及其来源映射中。
+  return { components, connections };
 }
 
 function editorComponentFor(entry: ProjectFileComponent): EditorComponent {
   const data = subcircuitDataOf(entry);
   return {
     id: entry.id,
-    kind: entry.kind as EditorComponent["kind"],
+    kind: entry.kind,
     displayName: entry.displayName,
     position: { ...entry.position },
     lifecycle: "active",
     ...(entry.ports !== undefined ? { ports: clonePorts(entry.ports) } : {}),
     ...(data !== undefined ? { data: { subcircuit: data } } : {}),
-  } as unknown as EditorComponent;
+  };
 }
 
 function editorConnectionFor(entry: ProjectFileData["circuit"]["connections"][number]): EditorConnection {
@@ -204,7 +210,7 @@ async function flattenOccurrence(
   occurrencePath: readonly string[],
   stack: readonly string[],
   omitBoundary: boolean,
-  ownerId: string | undefined,
+  ownerIds: readonly string[],
   output: MutableOutput,
   reader: HierarchyProjectReader,
   platform: PathPlatform | undefined,
@@ -212,11 +218,12 @@ async function flattenOccurrence(
   const interfaceResult = omitBoundary
     ? await interfaceFor(project, identity, undefined, stack, output, reader, platform)
     : null;
-  const projection: OccurrenceProjection = { inputs: new Map(), outputs: new Map(), components: [], connections: [] };
+  const projection: OccurrenceProjection = { inputs: new Map(), outputs: new Map(), inputAliases: new Map(), components: [], connections: [] };
   const componentById = new Map(project.circuit.components.map((component) => [component.id, component]));
   const endpointSource = new Map<string, SourceExpression[]>();
   const endpointTarget = new Map<string, FlatEndpoint[]>();
   const boundaryOutputNames = new Map<string, string>();
+  const boundaryInputNames = new Map<string, string>();
 
   for (const component of project.circuit.components) {
     if (component.kind === "subcircuit") {
@@ -229,7 +236,7 @@ async function flattenOccurrence(
         updateVisibleSubcircuit(output, component.id, unresolvedData(data, diagnostic));
         continue;
       }
-      const childResult = await readChild(reader, childKey);
+      const childResult = await readChild(reader, childKey, [...occurrencePath, component.id]);
       if (!childResult.ok) {
         const diagnostic = diagnosticFor(childResult.code, childResult.message, childKey, component.id, [...stack, identity, childKey]);
         output.diagnostics.push(diagnostic);
@@ -257,7 +264,7 @@ async function flattenOccurrence(
         [...occurrencePath, component.id],
         [...stack, identity],
         true,
-        component.id,
+        [...ownerIds, component.id],
         childOutput,
         reader,
         platform,
@@ -273,32 +280,36 @@ async function flattenOccurrence(
         reference: data?.reference ?? "",
         cachedPorts: childInterface.ports,
         ...(data?.portOrder !== undefined ? { portOrder: [...data.portOrder] } : {}),
-        status: "resolved" as SubcircuitStatus,
+        status: "resolved",
         targetIdentity: childKey,
       };
       // 子树已写入全局 Circuit；此处只为父连接建立边界 Endpoint 映射。
       endpointSource.set(component.id, []);
       for (const [port, sources] of child.outputs) {
-        // 允许子电路直接把 Input 透传到 Output：边界上的 input expression
-        // 在当前 occurrence 中收敛为同一组内部目标，父层即可继续生成真实 flat wire。
-        const resolvedSources = sources.flatMap((source) => source.kind === "flat"
-          ? [source]
-          : (child.inputs.get(source.port) ?? []).map((endpoint) => ({ kind: "flat" as const, endpoint })));
-        endpointSource.set(`${component.id}:${port}`, resolvedSources);
+        // 允许子电路直接把 Input 透传到 Output：保留边界 Input 表达式，
+        // 由当前层的连接别名把它收敛到实际 flat endpoint，而不是误把 Input 目标当作输出源。
+        const resolvedSources = sources.flatMap((source) => resolveAliasedSources(child, source));
+        const qualifiedSources = resolvedSources.map((source) => source.kind === "input"
+          ? { kind: "input" as const, port: `${component.id}:${source.port}` }
+          : source);
+        endpointSource.set(`${component.id}:${port}`, qualifiedSources);
         if (occurrencePath.length === 0) {
           const portMap = output.portSources[component.id] ??= {};
           portMap[port] = {
-            outputSources: resolvedSources
+            outputSources: qualifiedSources
             .filter((source): source is { kind: "flat"; endpoint: FlatEndpoint } => source.kind === "flat")
             .map((source) => ({ ...source.endpoint })),
           };
         }
       }
-      for (const [port, targets] of child.inputs) {
-        endpointTarget.set(`${component.id}:${port}`, [...targets]);
+      for (const port of childInterface.ports.filter((item) => item.direction === "input")) {
+        const targets = child.inputs.get(port.name) ?? [];
+        const boundaryKey = `${component.id}:${port.name}`;
+        endpointTarget.set(boundaryKey, [...targets]);
+        boundaryInputNames.set(boundaryKey, boundaryKey);
         if (occurrencePath.length === 0) {
           const portMap = output.portSources[component.id] ??= {};
-          portMap[port] = { inputTargets: targets.map((target) => ({ ...target })) };
+          if (targets.length > 0) portMap[port.name] = { inputTargets: targets.map((target) => ({ ...target })) };
         }
       }
       // 将采用的解析状态写回顶层可见文档（仅顶层 Component 需要展示）。
@@ -309,10 +320,10 @@ async function flattenOccurrence(
     const isBoundary = omitBoundary && (component.kind === "input" || component.kind === "output");
     const flatId = flatIdFor(occurrencePath, component.id);
     if (!isBoundary) {
-      output.components.push({ id: flatId, kind: component.kind as ComponentKindName, ...(component.ports ? { ports: clonePorts(component.ports) } : {}) });
+      output.components.push({ id: flatId, kind: component.kind, ...(component.ports ? { ports: clonePorts(component.ports) } : {}) });
       projection.components.push(flatId);
       if (occurrencePath.length === 0) addSource(output.componentSources, component.id, flatId);
-      if (ownerId !== undefined) addSource(output.componentSources, ownerId, flatId);
+      for (const ownerId of ownerIds) addSource(output.componentSources, ownerId, flatId);
       const ports = component.ports ?? [];
       for (const port of ports) {
         const endpoint = { componentId: flatId, port: port.name };
@@ -328,6 +339,18 @@ async function flattenOccurrence(
         endpointTarget.set(component.id, []);
         const externalName = [...(interfaceResult?.componentByPort.entries() ?? [])].find(([, id]) => id === component.id)?.[0];
         boundaryOutputNames.set(component.id, externalName ?? component.displayName);
+      }
+    }
+  }
+
+  // 先收集所有嵌套边界输入的来源别名，使连接遍历顺序不会影响多层直通的结果。
+  for (const connection of project.circuit.connections) {
+    const sources = resolveConnectionSources(connection.source.component, connection.source.port, endpointSource, endpointTarget);
+    const targets = resolveConnectionTargets(connection.target.component, connection.target.port, endpointSource, endpointTarget, boundaryOutputNames, boundaryInputNames);
+    for (const source of sources) {
+      for (const target of targets) {
+        if (target.kind !== "input") continue;
+        if (source.kind === "flat" || source.kind === "input") addSourceExpression(projection.inputAliases, target.port, source);
       }
     }
   }
@@ -362,12 +385,18 @@ async function flattenOccurrence(
         port: connection.target.port,
       }]);
     }
-    const sources = resolveConnectionSources(connection.source.component, connection.source.port, endpointSource, endpointTarget);
-    const targets = resolveConnectionTargets(connection.target.component, connection.target.port, endpointSource, endpointTarget, boundaryOutputNames);
+    const sources = resolveConnectionSources(connection.source.component, connection.source.port, endpointSource, endpointTarget)
+      .flatMap((source) => resolveAliasedSources(projection, source));
+    const targets = resolveConnectionTargets(connection.target.component, connection.target.port, endpointSource, endpointTarget, boundaryOutputNames, boundaryInputNames);
     for (const source of sources) {
       for (const target of targets) {
         if (source.kind === "input" && target.kind === "flat") {
           addInputTarget(projection.inputs, source.port, target.endpoint);
+          continue;
+        }
+        if (target.kind === "input") {
+          // 当前连接只声明了嵌套边界的输入来源；预扫描已将别名写入 projection，
+          // 这里不生成虚假的 flat wire，等待其真实源表达式参与后续传播。
           continue;
         }
         if (source.kind === "flat" && target.kind === "output") {
@@ -381,14 +410,44 @@ async function flattenOccurrence(
         if (source.kind !== "flat" || target.kind !== "flat") continue;
         // 与 Component 一样，子树连接使用 occurrence path 前缀；否则两个实例中
         // 同名的内部连接会靠遍历顺序获得 `#1`，实例增删后身份就不稳定。
-        const flatConnectionId = addFlatConnection(output, flatIdFor(occurrencePath, connection.id), source.endpoint, target.endpoint, ownerId);
+        const flatConnectionId = addFlatConnection(output, flatIdFor(occurrencePath, connection.id), source.endpoint, target.endpoint, ownerIds);
         projection.connections.push(flatConnectionId);
         if (occurrencePath.length === 0) addSource(output.connectionSources, connection.id, flatConnectionId);
-        if (ownerId !== undefined) addSource(output.ownedConnections, ownerId, flatConnectionId);
+        for (const ownerId of ownerIds) addSource(output.ownedConnections, ownerId, flatConnectionId);
+      }
+    }
+  }
+  if (occurrencePath.length === 0) {
+    for (const [componentId, data] of Object.entries(output.visibleSubcircuits)) {
+      const portMap = output.portSources[componentId] ??= {};
+      for (const port of data.cachedPorts) {
+        const sourceExpressions = port.direction === "output"
+          ? (endpointSource.get(`${componentId}:${port.name}`) ?? [])
+          : (projection.inputAliases.get(`${componentId}:${port.name}`) ?? []);
+        const outputSources = uniqueFlatEndpoints(
+          sourceExpressions.flatMap((source) => resolveAliasedSources(projection, source)),
+        );
+        if (outputSources.length > 0) {
+          portMap[port.name] = { ...portMap[port.name], outputSources };
+        }
       }
     }
   }
   return projection;
+}
+
+/** 把可读来源收敛为稳定且无重复的扁平端点，供纯边界直通 Port 显示信号。 */
+function uniqueFlatEndpoints(sources: readonly SourceExpression[]): FlatEndpoint[] {
+  const seen = new Set<string>();
+  const result: FlatEndpoint[] = [];
+  for (const source of sources) {
+    if (source.kind !== "flat") continue;
+    const key = `${source.endpoint.componentId}\u0000${source.endpoint.port}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push({ ...source.endpoint });
+  }
+  return result;
 }
 
 function resolveConnectionSources(componentId: string, port: string, sources: Map<string, SourceExpression[]>, targets: Map<string, FlatEndpoint[]>): SourceExpression[] {
@@ -397,8 +456,30 @@ function resolveConnectionSources(componentId: string, port: string, sources: Ma
   return (targets.get(`${componentId}:${port}`) ?? []).map((endpoint) => ({ kind: "flat", endpoint }));
 }
 
-function resolveConnectionTargets(componentId: string, port: string, sources: Map<string, SourceExpression[]>, targets: Map<string, FlatEndpoint[]>, boundaryOutputNames: ReadonlyMap<string, string>): Array<{ kind: "flat"; endpoint: FlatEndpoint } | { kind: "output"; port: string }> {
+function resolveAliasedSources(projection: Pick<OccurrenceProjection, "inputAliases">, source: SourceExpression, stack: readonly string[] = []): SourceExpression[] {
+  if (source.kind === "flat") return [source];
+  if (stack.includes(source.port)) return [source];
+  const aliases = projection.inputAliases.get(source.port);
+  if (aliases === undefined) return [source];
+  return aliases.flatMap((alias) => resolveAliasedSources(projection, alias, [...stack, source.port]));
+}
+
+function resolveConnectionTargets(
+  componentId: string,
+  port: string,
+  sources: Map<string, SourceExpression[]>,
+  targets: Map<string, FlatEndpoint[]>,
+  boundaryOutputNames: ReadonlyMap<string, string>,
+  boundaryInputNames: ReadonlyMap<string, string>,
+): Array<{ kind: "flat"; endpoint: FlatEndpoint } | { kind: "output"; port: string } | { kind: "input"; port: string }> {
   const direct = targets.get(`${componentId}:${port}`);
+  const boundaryInput = boundaryInputNames.get(`${componentId}:${port}`);
+  if (boundaryInput !== undefined) {
+    return [
+      ...(direct ?? []).map((endpoint) => ({ kind: "flat" as const, endpoint })),
+      { kind: "input" as const, port: boundaryInput },
+    ];
+  }
   if (direct !== undefined && direct.length > 0) return direct.map((endpoint) => ({ kind: "flat", endpoint }));
   if ((direct !== undefined && direct.length === 0) || (targets.has(componentId) && (targets.get(componentId)?.length ?? 0) === 0)) return [{ kind: "output", port: boundaryOutputNames.get(componentId) ?? port }];
   if (sources.has(componentId) || sources.has(`${componentId}:${port}`)) return [{ kind: "output", port }];
@@ -472,9 +553,9 @@ function orderPorts(ports: readonly PortSpec[], order: readonly string[], identi
   return order.map((name) => ports.find((port) => port.name === name)!);
 }
 
-async function readChild(reader: HierarchyProjectReader, identity: string) {
+async function readChild(reader: HierarchyProjectReader, identity: string, occurrencePath: readonly string[] = []) {
   try {
-    return await reader.read(identity);
+    return await reader.read(identity, occurrencePath);
   } catch (error) {
     return { ok: false as const, code: "project-read-failed", message: error instanceof Error ? error.message : "读取子 Project 失败。" };
   }
@@ -511,11 +592,11 @@ function flatIdFor(path: readonly string[], id: string): string {
   return path.length === 0 ? id : `${path.join("/")}/${id}`;
 }
 
-function addFlatConnection(output: MutableOutput, baseId: string, source: FlatEndpoint, target: FlatEndpoint, ownerId: string | undefined): string {
+function addFlatConnection(output: MutableOutput, baseId: string, source: FlatEndpoint, target: FlatEndpoint, ownerIds: readonly string[]): string {
   const existing = output.connections.filter((connection) => connection.id === baseId || connection.id.startsWith(`${baseId}#`)).length;
   const id = existing === 0 ? baseId : `${baseId}#${existing}`;
   output.connections.push({ id, source: { ...source }, target: { ...target } });
-  if (ownerId !== undefined) addSource(output.ownedConnections, ownerId, id);
+  for (const ownerId of ownerIds) addSource(output.ownedConnections, ownerId, id);
   return id;
 }
 
@@ -524,6 +605,10 @@ function addInputTarget(map: Map<string, readonly FlatEndpoint[]>, port: string,
 }
 
 function addOutputSource(map: Map<string, readonly SourceExpression[]>, port: string, source: SourceExpression): void {
+  map.set(port, [...(map.get(port) ?? []), source]);
+}
+
+function addSourceExpression(map: Map<string, readonly SourceExpression[]>, port: string, source: SourceExpression): void {
   map.set(port, [...(map.get(port) ?? []), source]);
 }
 
