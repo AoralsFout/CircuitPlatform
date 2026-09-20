@@ -81,8 +81,8 @@ function waveformValue(point: WaveformPoint, key: string): Signal {
 
 /**
  * 表头显示的步区间，直接从已记录的点推出来。
- * 不写成「01–当前步数」：波形只记录用户发起的推进，连续运行中的自动 tick 会让当前步数
- * 一路涨上去，而网格里的列并不会跟着增加，那种表头会宣称一段并不存在的历史。
+ * 逐 tick 记录（Phase 5）之后列会随推进一路增长，网格改为固定列宽加左右滚动；
+ * 表头仍然只宣称已记录的点构成的区间，不宣称尚未发生的历史。
  */
 const waveformRange = computed(() => {
   const first = props.waveform[0];
@@ -135,7 +135,7 @@ const waveformRange = computed(() => {
     </div>
     <div v-else-if="isExpanded" class="bottom-content bottom-content--waveform">
       <div class="waveform-meta"><span class="eyebrow">WAVEFORM / HISTORY</span><span>{{ waveformRange }}</span></div>
-      <div class="waveform-grid" :style="{ '--waveform-steps': waveform.length }"><div class="waveform-axis"><span>信号</span><span v-for="point in waveform" :key="`axis-${point.step}`">{{ point.step }}</span></div><div v-for="row in waveformRows" :key="row.key" class="waveform-row"><span class="waveform-label">{{ row.label }}</span><span v-for="point in waveform" :key="`${row.key}-${point.step}`" class="waveform-cell" :class="signalStateClass(waveformValue(point, row.key))">{{ waveformValue(point, row.key) }}</span></div></div>
+      <div class="waveform-grid" :style="{ '--waveform-steps': waveform.length }"><div class="waveform-axis"><span>信号</span><span v-for="point in waveform" :key="`axis-${point.step}`">{{ point.step }}</span></div><div v-for="row in waveformRows" :key="row.key" class="waveform-row"><span class="waveform-label">{{ row.label }}</span><span v-for="point in waveform" :key="`${row.key}-${point.step}`" class="waveform-cell" :class="signalStateClass(waveformValue(point, row.key))" :title="waveformValue(point, row.key)">{{ waveformValue(point, row.key) }}</span></div></div>
     </div>
   </section>
 </template>

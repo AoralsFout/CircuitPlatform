@@ -467,7 +467,7 @@ button:disabled { cursor: not-allowed; }
 .empty-state__engine--problem { border-left: 2px solid var(--color-status-error); padding-left: 7px; color: var(--color-status-error); }
 .empty-state__retry { width: 100%; margin-top: 12px; }
 
-.bottom-panel { position: relative; min-height: 0; border-top: 1px solid var(--color-border); background: var(--theme-panel); }
+.bottom-panel { position: relative; min-width: 0; min-height: 0; border-top: 1px solid var(--color-border); background: var(--theme-panel); }
 .bottom-error { position: absolute; z-index: 2; top: 7px; right: 15px; max-width: min(52%, 520px); margin: 0; overflow: hidden; border-left: 2px solid var(--color-status-error); padding-left: 7px; color: var(--color-status-error); font-size: 9px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
 .bottom-tabs { display: flex; gap: 19px; height: 35px; padding: 0 15px; border-bottom: 1px solid var(--color-border); }
 .bottom-tabs button { height: 35px; padding: 0; font-size: 10px; }
@@ -512,14 +512,16 @@ button:disabled { cursor: not-allowed; }
 .engine-indicator--error, .engine-indicator--unavailable { background: var(--color-status-error); }
 .bottom-content--waveform { padding-top: 10px; overflow: auto; }
 .waveform-meta { display: flex; justify-content: space-between; margin-bottom: 9px; color: var(--color-text-faint); font-family: var(--font-data); font-size: 8px; }
-.waveform-grid { overflow-x: auto; font-family: var(--font-data); font-size: 9px; }
-/* 列宽下限取内容宽度：多条位的二进制读数（`1010`）逐位可读，不会被挤到相邻单元里；位宽为 1 时下限仍由 1fr 与行宽决定，与改造前一致。 */
-.waveform-axis, .waveform-row { display: grid; grid-template-columns: 80px repeat(var(--waveform-steps, 1), minmax(min-content, 1fr)); min-width: 340px; }
+.waveform-grid { --waveform-cell-width: 48px; overflow-x: auto; font-family: var(--font-data); font-size: 9px; }
+/* 列宽固定：逐 tick 记录后一列的宽度不能再随最长读数走（多位二进制文本会把 min-content 撑到
+   远超面板），固定宽度让几何稳定、左右滚动查看历史。读数超过单元宽度时省略号截断，完整值
+   由单元的 title 悬停给出；8 位以内的逐位文本（Phase 4.5 的读数口径）在 48px 内放得下。 */
+.waveform-axis, .waveform-row { display: grid; grid-template-columns: 80px repeat(var(--waveform-steps, 1), var(--waveform-cell-width, 48px)); min-width: 340px; }
 .waveform-axis { color: var(--color-text-faint); }
 .waveform-axis span:not(:first-child) { text-align: center; }
 .waveform-row { min-height: 25px; border-top: 1px solid var(--color-border); }
 .waveform-label { display: flex; align-items: center; color: var(--color-text-muted); }
-.waveform-cell { display: grid; min-height: 25px; place-items: center; border-left: 1px solid color-mix(in srgb, var(--color-border) 65%, transparent); }
+.waveform-cell { display: block; min-height: 25px; line-height: 25px; overflow: hidden; text-align: center; text-overflow: ellipsis; white-space: nowrap; border-left: 1px solid color-mix(in srgb, var(--color-border) 65%, transparent); }
 .waveform-cell.signal-state--high { background: color-mix(in srgb, var(--color-signal-high) 15%, transparent); }
 .waveform-cell.signal-state--low { background: color-mix(in srgb, var(--color-signal-low) 12%, transparent); }
 .waveform-cell.signal-state--unknown { background: color-mix(in srgb, var(--color-signal-unknown) 14%, transparent); }
