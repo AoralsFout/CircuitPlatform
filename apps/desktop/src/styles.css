@@ -138,16 +138,30 @@ button:disabled { cursor: not-allowed; }
 .project-name { color: var(--color-text-muted); font-size: 12px; }
 .save-state { display: inline-flex; align-items: center; gap: 6px; color: var(--color-text-faint); font-size: 10px; }
 .save-dot, .mode-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--color-status-success); box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-status-success) 12%, transparent); }
+/* 脏标记与保存失败复用同一个指示器，只换语义色：不允许在组件里引入主题外颜色。 */
+.save-state--dirty { color: var(--color-status-warning); }
+.save-state--dirty .save-dot { background: var(--color-status-warning); box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-status-warning) 12%, transparent); }
+.save-state--error { color: var(--color-status-error); }
+.save-state--error .save-dot { background: var(--color-status-error); box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-status-error) 12%, transparent); }
 .topbar-actions { gap: 7px; }
 .engine-chip { display: inline-flex; align-items: center; gap: 7px; padding: 6px 9px; border: 1px solid var(--color-border); color: var(--color-text-muted); font-size: 10px; }
 .engine-chip--ready { border-color: color-mix(in srgb, var(--color-status-success) 38%, transparent); color: var(--color-status-success); }
 .engine-chip--error, .engine-chip--unavailable { border-color: color-mix(in srgb, var(--color-status-error) 45%, transparent); color: var(--color-status-error); }
 .pulse-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .topbar-button, .avatar-button { display: grid; width: 30px; height: 30px; place-items: center; border: 1px solid transparent; color: var(--color-text-muted); background: transparent; cursor: pointer; }
+.topbar-button--text { width: auto; padding: 0 9px; font-size: 11px; }
 .topbar-button:hover:not(:disabled) { border-color: var(--color-border); color: var(--color-text); background: var(--color-surface); }
 .topbar-button:disabled { opacity: .45; }
 .ui-icon { font-family: var(--font-data); font-size: 15px; }
 .avatar-button { border-color: var(--color-border-strong); color: var(--color-signal-high); font-family: var(--font-data); font-size: 9px; }
+
+/* 最近项目下拉：条目复用原生按钮语义（Tab 可达、Enter 激活），焦点走全局 focus-visible 外轮廓。 */
+.recent-projects { position: relative; }
+.recent-projects-menu { position: absolute; top: calc(100% + 7px); right: 0; z-index: 30; display: grid; gap: 2px; min-width: 250px; max-width: 400px; max-height: 320px; padding: 5px; overflow-y: auto; border: 1px solid var(--color-border-strong); border-radius: 5px; background: var(--color-panel); box-shadow: 0 18px 48px var(--theme-shadow); }
+.recent-projects-item { display: grid; gap: 1px; padding: 7px 10px; border: 1px solid transparent; border-radius: 4px; color: var(--color-text); background: transparent; cursor: pointer; text-align: left; }
+.recent-projects-item:hover:not(:disabled) { border-color: var(--color-border); background: var(--color-surface); }
+.recent-projects-name { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.recent-projects-path { overflow: hidden; color: var(--color-text-faint); font-family: var(--font-data); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 
 .editor-layout { display: grid; min-height: 0; grid-template-columns: 48px 272px minmax(0, 1fr); }
 .editor-layout--sidebar-collapsed { grid-template-columns: 48px minmax(0, 1fr); }
@@ -438,7 +452,22 @@ button:disabled { cursor: not-allowed; }
 .legend-line--outline { height: 4px; border-block: 1px solid var(--color-focus); background: var(--theme-wire-blue); }
 .legend-line--dangling { height: 0; border-top: 2px dashed var(--color-status-warning); background: transparent; }
 
-.bottom-panel { position: relative; min-height: 0; border-top: 1px solid var(--color-border); background: var(--theme-panel); }
+/* 首启空状态面板：占据画布格的引导卡片；入口全部是原生按钮（Tab 可达、Enter 激活），
+   颜色只走语义 Token。最近项目条目复用 .recent-projects-item 的既有样式。 */
+.empty-state { display: flex; min-height: 0; flex-direction: column; align-items: center; justify-content: center; padding: 14px 15px 10px; }
+.empty-state__card { display: grid; width: min(430px, 100%); border: 1px solid var(--color-border-strong); padding: 22px; background: var(--color-panel); box-shadow: var(--shadow-panel); }
+.empty-state__card h2 { margin: 9px 0 0; font-size: 19px; font-weight: 600; letter-spacing: -.02em; }
+.empty-state__lead { margin: 12px 0 0; color: var(--color-text-muted); font-size: 11px; line-height: 1.65; }
+.empty-state__actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+.empty-state__primary { border-color: color-mix(in srgb, var(--color-signal-high) 55%, transparent); color: var(--color-signal-high); background: color-mix(in srgb, var(--color-signal-high) 9%, transparent); }
+.empty-state__primary:hover { border-color: var(--color-signal-high); color: var(--color-signal-high); }
+.empty-state__recent { display: grid; gap: 2px; margin-top: 20px; border-top: 1px solid var(--color-border); padding-top: 12px; }
+.empty-state__recent-title { margin: 0 0 6px; color: var(--color-text-faint); font-size: 10px; font-weight: 600; }
+.empty-state__engine { margin: 14px 0 0; color: var(--color-text-muted); font-size: 10px; line-height: 1.5; }
+.empty-state__engine--problem { border-left: 2px solid var(--color-status-error); padding-left: 7px; color: var(--color-status-error); }
+.empty-state__retry { width: 100%; margin-top: 12px; }
+
+.bottom-panel { position: relative; min-width: 0; min-height: 0; border-top: 1px solid var(--color-border); background: var(--theme-panel); }
 .bottom-error { position: absolute; z-index: 2; top: 7px; right: 15px; max-width: min(52%, 520px); margin: 0; overflow: hidden; border-left: 2px solid var(--color-status-error); padding-left: 7px; color: var(--color-status-error); font-size: 9px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
 .bottom-tabs { display: flex; gap: 19px; height: 35px; padding: 0 15px; border-bottom: 1px solid var(--color-border); }
 .bottom-tabs button { height: 35px; padding: 0; font-size: 10px; }
@@ -483,14 +512,16 @@ button:disabled { cursor: not-allowed; }
 .engine-indicator--error, .engine-indicator--unavailable { background: var(--color-status-error); }
 .bottom-content--waveform { padding-top: 10px; overflow: auto; }
 .waveform-meta { display: flex; justify-content: space-between; margin-bottom: 9px; color: var(--color-text-faint); font-family: var(--font-data); font-size: 8px; }
-.waveform-grid { overflow-x: auto; font-family: var(--font-data); font-size: 9px; }
-/* 列宽下限取内容宽度：多条位的二进制读数（`1010`）逐位可读，不会被挤到相邻单元里；位宽为 1 时下限仍由 1fr 与行宽决定，与改造前一致。 */
-.waveform-axis, .waveform-row { display: grid; grid-template-columns: 80px repeat(var(--waveform-steps, 1), minmax(min-content, 1fr)); min-width: 340px; }
+.waveform-grid { --waveform-cell-width: 48px; overflow-x: auto; font-family: var(--font-data); font-size: 9px; }
+/* 列宽固定：逐 tick 记录后一列的宽度不能再随最长读数走（多位二进制文本会把 min-content 撑到
+   远超面板），固定宽度让几何稳定、左右滚动查看历史。读数超过单元宽度时省略号截断，完整值
+   由单元的 title 悬停给出；8 位以内的逐位文本（Phase 4.5 的读数口径）在 48px 内放得下。 */
+.waveform-axis, .waveform-row { display: grid; grid-template-columns: 80px repeat(var(--waveform-steps, 1), var(--waveform-cell-width, 48px)); min-width: 340px; }
 .waveform-axis { color: var(--color-text-faint); }
 .waveform-axis span:not(:first-child) { text-align: center; }
 .waveform-row { min-height: 25px; border-top: 1px solid var(--color-border); }
 .waveform-label { display: flex; align-items: center; color: var(--color-text-muted); }
-.waveform-cell { display: grid; min-height: 25px; place-items: center; border-left: 1px solid color-mix(in srgb, var(--color-border) 65%, transparent); }
+.waveform-cell { display: block; min-height: 25px; line-height: 25px; overflow: hidden; text-align: center; text-overflow: ellipsis; white-space: nowrap; border-left: 1px solid color-mix(in srgb, var(--color-border) 65%, transparent); }
 .waveform-cell.signal-state--high { background: color-mix(in srgb, var(--color-signal-high) 15%, transparent); }
 .waveform-cell.signal-state--low { background: color-mix(in srgb, var(--color-signal-low) 12%, transparent); }
 .waveform-cell.signal-state--unknown { background: color-mix(in srgb, var(--color-signal-unknown) 14%, transparent); }
@@ -525,6 +556,7 @@ button:disabled { cursor: not-allowed; }
   .rail-button { width: 28px; height: 28px; }
   .canvas-info > span:last-child { display: none; }
   .editor-canvas-wrap { padding: 9px 8px 7px; }
+  .empty-state { padding: 9px 8px 7px; }
   .canvas-legend { gap: 8px; flex-wrap: wrap; }
   .bottom-content--inspector, .bottom-content--properties { gap: 10px; }
   .bottom-content--inspector .inspector-copy, .bottom-content--inspector .inspector-port-list { display: none; }

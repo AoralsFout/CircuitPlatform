@@ -1,6 +1,8 @@
 # 视觉状态截图回归
 
-页面位于 `apps/desktop/visual-regression.html`，直接挂载正式 Vue `App` 与 `CircuitCanvas`，只用内存 Engine adapter 替代 Electron IPC。状态通过真实 DOM 交互产生，不包含手写静态节点、SVG path 或百分比定位：默认、空画布、选中 Component、选中 Wire、ConnectionDraft、Dangling、pending、error、连续运行中、已暂停，以及 Phase 4.5 新增的七个多位电路状态。
+页面位于 `apps/desktop/visual-regression.html`，直接挂载正式 Vue `App` 与 `CircuitCanvas`，只用内存 Engine adapter 替代 Electron IPC。状态通过真实 DOM 交互产生，不包含手写静态节点、SVG path 或百分比定位：首启空状态、默认、空画布、选中 Component、选中 Wire、ConnectionDraft、Dangling、pending、error、连续运行中、已暂停，以及 Phase 4.5 新增的七个多位电路状态。
+
+自 Phase 5（issue #40）起启动不再自动加载示例：`first-start` 状态截取空状态引导面板本身；其余所有需要电路的状态在 `prepare()` 一开始先点击面板上的「加载示例」，等画布出现元件后再继续后面的真实交互。
 
 `running` 与 `paused` 两个状态（issue #24）沿用同一条约束：先点「清空画布」并确认，再从元件库把 Clock、D Flip-Flop、输入拖到画布上，拉出 `out → clock` 与 `out → d` 两条连线，最后按工具栏的「开始连续运行」。暂停态在开始之后再按「暂停」。因此画面上是一条 Clock 驱动 D Flip-Flop 的时序电路，加上工具栏的运行态与已推进步数。
 
@@ -17,7 +19,7 @@
 | `bus-ranges` | 放下拆线器，在检查器里把位区间列表改成 `7:4, 3:0` | 拆线器的位区间编辑，提交后分支标注变成 `out0[7:4]` 与 `out1[3:0]` |
 | `bus-bits-expanded` | 搭出多位通路，切到「输入设置」，左键拨一位、右键把另一位设为 `X` | 8 位输入按位展开成方形按钮，每行八列 |
 | `bus-bits-collapsed` | 同上，再点一次展开按钮 | 收起后的形态：按钮组消失，取值仍显示在标题行上 |
-| `bus-bit-single` | 直接用启动示例里的 1 位输入 | 1 位与 8 位共用同一套视觉，只是每组只有一个方形按钮 |
+| `bus-bit-single` | 直接用示例电路里的 1 位输入 | 1 位与 8 位共用同一套视觉，只是每组只有一个方形按钮 |
 | `bus-bit-space` | 搭出多位通路，切到「输入设置」；那一击由 `visual:probe` 用真实输入发出 | 画面与 `bus-bits-expanded` 相同；这个状态是为探针准备的，不是为截图准备的 |
 
 夹具在这条路径上必须与真实引擎同规则，否则画面会静默失真：`addComponent` 记下它回传的端口清单（拆线器与合线器的清单是数据驱动的，必须由调用方给出），`getSignal` 返回的读数长度等于端口位宽（位宽为 1 时仍返回 `X`，既有状态的画面因此不受影响）。位按钮在引擎绑定就绪之前是禁用的，夹具因此要等按钮可用再点——直接点下去会落在禁用按钮上，静默什么都不做。

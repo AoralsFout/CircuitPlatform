@@ -11,7 +11,7 @@ test("visual fixture covers the required state matrix and reduced motion mode", 
   const fixture = await readFile(join(desktopRoot, "visual-regression.html"), "utf8");
   const script = await readFile(join(desktopRoot, "scripts", "visual-regression.mjs"), "utf8");
   const styles = await readFile(join(desktopRoot, "src", "styles.css"), "utf8");
-  for (const state of ["default", "empty", "selected-component", "selected-wire", "draft", "dangling", "pending", "error", "running", "paused"]) {
+  for (const state of ["first-start", "first-start-recent", "unsaved-confirm", "default", "empty", "selected-component", "selected-wire", "draft", "dangling", "pending", "error", "running", "paused"]) {
     assert.match(script, new RegExp(state.replace("-", "\\-")));
   }
   // 多位电路的状态必须同时出现在脚本的状态表和夹具的 `prepare()` 里：只进状态表会在准备阶段
@@ -196,7 +196,7 @@ test("keyboard equivalents for run control are wired end to end", async () => {
   assert.match(app, /@reset-simulation="reset"/);
 
   // 运行循环排定下一次推进之前必须等上一次响应，且下一次推进只能由调度器排定。
-  assert.match(workspace, /const advanced = await queue\.enqueue\(\(\) => stepInternal\(bindings, \{ record: false \}\)\)/);
+  assert.match(workspace, /const advanced = await queue\.enqueue\(\(\) => stepInternal\(bindings\)\)/);
   assert.match(workspace, /scheduleTick\(\);\n    notifyAdvanced\(\);/);
   // 暂停要取消已经排定的下一次推进。
   assert.match(workspace, /cancelTick\(\);\n      state\.simulationState = "paused"/);
