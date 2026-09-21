@@ -355,11 +355,17 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
     const next = records.value.filter((candidate) => candidate.key !== key);
     const identity = record.binding.projectPath.value;
     if (identity !== null && pathKeys.get(projectPathIdentity(identity)) === key) pathKeys.delete(projectPathIdentity(identity));
+    const wasActive = activeKey.value === key;
     const disposing = disposeController(record);
+    if (wasActive) {
+      await disposing;
+    }
     records.value = next;
-    if (activeKey.value === key) {
+    if (wasActive) {
       const replacement = next[index] ?? next[index - 1] ?? next[0];
       activeKey.value = replacement?.key ?? null;
+      if (records.value.length === 0) ensureController();
+      return;
     }
     if (records.value.length === 0) ensureController();
     await disposing;
