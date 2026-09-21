@@ -1,7 +1,7 @@
 import type { Signal } from "@circuit-platform/protocol";
 import type { ComponentDefinitionRegistry, CanvasNode, CanvasScene, CanvasWire, SubcircuitCanvasState } from "../canvas";
 import { branchBitRanges, formatBitRangeList } from "./bus-ports.ts";
-import type { EditorSelection } from "./index";
+import type { EditorSelection, InternalComponentDescriptor } from "./index";
 
 export interface InspectorPort {
   id: string;
@@ -65,6 +65,68 @@ export interface ComponentInspector {
   hint: string | null;
   /** 子电路的引用与解析状态；不展开内部对象。 */
   subcircuit?: SubcircuitCanvasState;
+  /** 已解析 Subcircuit 使用处的只读内部信号投影；普通元件与未解析实例没有此字段。 */
+  internalTable?: SubcircuitSignalTable;
+}
+
+export interface InternalSignalPort {
+  id: string;
+  name: string;
+  label: string;
+  direction: "input" | "output";
+  width: number;
+  signal: Signal;
+}
+
+export interface InternalSignalComponent {
+  id: string;
+  displayName: string;
+  kind: string;
+  path: readonly string[];
+  ports: readonly InternalSignalPort[];
+}
+
+export interface SubcircuitSignalTable {
+  ownerId: string;
+  components: readonly InternalSignalComponent[];
+  diagnostic: string | null;
+}
+
+export interface SubcircuitSignalProjection {
+  descriptors: readonly InternalComponentDescriptor[];
+  signals: Readonly<Record<string, Signal>>;
+  diagnostic?: string | null;
+}
+
+/**
+ * 从层次描述与父文档的 stable flat 快照生成只读表格。
+ * 该函数不触发 IO，也不接受 Engine ID；缺失读数保持 `X`，便于首次显示和
+ * 引擎故障时保留表格结构。
+ */
+export function createSubcircuitSignalTable(
+  ownerId: string,
+  projection: SubcircuitSignalProjection | null,
+): SubcircuitSignalTable | null {
+  if (projection === null) return null;
+  const descriptors = projection.descriptors.filter((descriptor) => descriptor.ownerId === ownerId);
+  return {
+    ownerId,
+    components: descriptors.map((descriptor) => ({
+      id: descriptor.flatId,
+      displayName: descriptor.displayName,
+      kind: descriptor.kind,
+      path: [...descriptor.path],
+      ports: descriptor.ports.map((port) => ({
+        id: `${descriptor.flatId}:${port.name}`,
+        name: port.name,
+        label: port.bitRange ? `${port.name}[${port.bitRange.msb}:${port.bitRange.lsb}]` : port.name,
+        direction: port.direction,
+        width: port.width,
+        signal: projection.signals[`${descriptor.flatId}:${port.name}`] ?? "X",
+      })),
+    })),
+    diagnostic: projection.diagnostic ?? null,
+  };
 }
 
 export interface WireInspector {
@@ -137,7 +199,12 @@ function bitRangeAttributes(node: CanvasNode): BitRangeAttribute[] {
  * @param registry Component 展示定义注册表，用于提供类型和行为摘要。
  * @returns Component、Wire 或空选择的只读详情。
  */
-export function createInspectorModel(scene: CanvasScene, selection: EditorSelection, registry: ComponentDefinitionRegistry): InspectorModel {
+export function createInspectorModel(
+  scene: CanvasScene,
+  selection: EditorSelection,
+  registry: ComponentDefinitionRegistry,
+  subcircuitProjection: SubcircuitSignalProjection | null = null,
+): InspectorModel {
   if (!selection) return null;
   if (selection.kind === "component") {
     const node = scene.nodes.find((candidate) => candidate.id === selection.id);
@@ -174,6 +241,9 @@ export function createInspectorModel(scene: CanvasScene, selection: EditorSelect
       attributes: [...widthAttributes(node), ...bitRangeAttributes(node)],
       hint: structuralHint(ports),
       ...(node.subcircuit ? { subcircuit: { ...node.subcircuit } } : {}),
+      ...(node.subcircuit?.status === "resolved"
+        ? { internalTable: createSubcircuitSignalTable(node.id, subcircuitProjection) ?? undefined }
+        : {}),
     };
   }
   const wire = scene.wires.find((candidate) => candidate.id === selection.id);

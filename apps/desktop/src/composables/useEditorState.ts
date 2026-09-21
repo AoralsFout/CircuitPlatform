@@ -176,6 +176,11 @@ export function useEditorState(
     canvasScene.value,
     editorState.value?.selection ?? null,
     registry,
+    {
+      descriptors: workspaceState.value.internalComponents ?? [],
+      signals: workspaceState.value.internalSignals ?? {},
+      diagnostic: workspaceState.value.internalReadError ?? null,
+    },
   ));
   const viewport = computed<ViewportState>(() => viewportState.value);
   const interaction = computed<InteractionState>(() => {

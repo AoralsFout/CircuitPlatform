@@ -7,6 +7,7 @@ import {
   type EngineComponentBinding,
   type EngineConnectionBinding,
   type EnginePortRef,
+  type InternalComponentDescriptor,
 } from "../editor/index.ts";
 import { createEngineCallQueue, type EngineCallQueue } from "./engineQueue.ts";
 
@@ -163,6 +164,8 @@ export interface CircuitDocument {
   }[];
   /** 可选的层次投影来源；工作区仍只负责扁平 Circuit 的生命周期。 */
   portSources?: Readonly<Partial<Record<string, Readonly<Partial<Record<string, EditorPortSource>>>>>>;
+  /** 展平层次的只读内部描述；不会进入共享协议或持久化文件。 */
+  internalComponents?: readonly InternalComponentDescriptor[];
 }
 
 /** 编辑器向仿真工作区提供的通用运行时绑定，不依赖任何固定示例身份。 */
@@ -181,6 +184,21 @@ export interface SimulationBindings {
   componentFlatIds?: Readonly<Partial<Record<string, readonly string[]>>>;
   connectionFlatIds?: Readonly<Partial<Record<string, readonly string[]>>>;
   portSources?: Readonly<Partial<Record<string, Readonly<Partial<Record<string, EditorPortSource>>>>>>;
+  /** 已解析层次的内部只读描述；只含 stable flat identity，不含 Engine ID。 */
+  internalComponents?: readonly InternalComponentDescriptor[];
+}
+
+export interface InternalSignalRead {
+  /** 只读表中的稳定行键；不会暴露临时引擎身份。 */
+  key: string;
+  flatId: string;
+  port: string;
+}
+
+export interface InternalSignalReadResult {
+  snapshot: WorkspaceSnapshot;
+  values: Readonly<Record<string, Signal>>;
+  errors: Readonly<Record<string, string>>;
 }
 
 export interface CircuitLoadResult {
@@ -219,6 +237,12 @@ export interface WorkspaceSnapshot {
   inputValues: Readonly<Record<InputKey, InputValue>>;
   /** 最近一次稳定求值后的端口信号，键为 `${editorComponentId}:${portId}`。 */
   signals: Readonly<Record<string, Signal>>;
+  /** tick 返回的全部扁平端点快照，键为 `${flatId}:${port}`，供只读实例表投影。 */
+  internalSignals?: Readonly<Record<string, Signal>>;
+  /** 当前采用的内部描述；只含 stable source identity。 */
+  internalComponents?: readonly InternalComponentDescriptor[];
+  /** 内部表按需读取的可恢复诊断；不改变 Circuit 或已有 signals。 */
+  internalReadError?: string | null;
   /**
    * 兼容投影：文档中第一个 Output 元件的值；全部输出见 `signals`。
    * 提交输入并稳定求值的路径与推进路径都会刷新它：`ticked` 快照同时带回每个 Output 元件的
@@ -358,6 +382,8 @@ export interface Workspace {
    * 推进原语是 `step` 与连续运行。
    */
   refreshReadings(): Promise<WorkspaceSnapshot>;
+  /** 在同一文档调用队列中按需读取可见实例所需端点；不会读取隐藏或未请求端点。 */
+  readInternalSignals(reads: readonly InternalSignalRead[]): Promise<InternalSignalReadResult>;
   /**
    * 开始连续运行：反复排定推进，每一次都在上一次响应之后才排定。
    * @returns 置为运行中之后的快照；不可开始时原样返回当前快照。
@@ -412,6 +438,9 @@ interface MutableState {
   inputB: InputValue;
   inputValues: Record<InputKey, InputValue>;
   signals: Record<string, Signal>;
+  internalSignals: Record<string, Signal>;
+  internalComponents: readonly InternalComponentDescriptor[];
+  internalReadError: string | null;
   outputValue: Signal;
   hasCircuit: boolean;
   runtimeBindings: RuntimeSimulationBindings | null;
@@ -446,6 +475,8 @@ interface RuntimeInputBinding {
 }
 
 interface RuntimeSimulationBindings {
+  /** 稳定扁平来源到当前引擎身份的私有映射，只用于工作区内部投影。 */
+  flatComponents: Readonly<Record<string, number>>;
   inputs: readonly RuntimeInputBinding[];
   /** 文档中全部 Output 元件的接收端；每个 Output 单独读取自己的值。 */
   outputs: readonly RuntimeSignalBinding[];
@@ -530,7 +561,27 @@ function sameBindings(left: SimulationBindings | null, right: SimulationBindings
     sameIdentityMap(left.flatConnections ?? {}, right.flatConnections ?? {}) &&
     sameStringArrayMap(left.componentFlatIds ?? {}, right.componentFlatIds ?? {}) &&
     sameStringArrayMap(left.connectionFlatIds ?? {}, right.connectionFlatIds ?? {}) &&
-    samePortSources(left.portSources ?? {}, right.portSources ?? {});
+    samePortSources(left.portSources ?? {}, right.portSources ?? {}) &&
+    sameInternalComponents(left.internalComponents, right.internalComponents);
+}
+
+function sameInternalComponents(
+  left: readonly InternalComponentDescriptor[] = [],
+  right: readonly InternalComponentDescriptor[] = [],
+): boolean {
+  if (left.length !== right.length) return false;
+  return left.every((descriptor, index) => {
+    const candidate = right[index];
+    if (!candidate || descriptor.ownerId !== candidate.ownerId || descriptor.flatId !== candidate.flatId ||
+      descriptor.kind !== candidate.kind || descriptor.displayName !== candidate.displayName ||
+      descriptor.path.length !== candidate.path.length || descriptor.path.some((part, pathIndex) => part !== candidate.path[pathIndex]) ||
+      descriptor.ports.length !== candidate.ports.length) return false;
+    return descriptor.ports.every((port, portIndex) => {
+      const other = candidate.ports[portIndex];
+      return other !== undefined && port.name === other.name && port.direction === other.direction &&
+        port.width === other.width && port.bitRange?.msb === other.bitRange?.msb && port.bitRange?.lsb === other.bitRange?.lsb;
+    });
+  });
 }
 
 function sameStringArrayMap(
@@ -593,6 +644,14 @@ function pruneSignals(
   return Object.fromEntries(Object.entries(signals).filter(([key]) => liveKeys.has(key)));
 }
 
+function pruneInternalSignals(
+  signals: Readonly<Record<string, Signal>>,
+  descriptors: readonly InternalComponentDescriptor[],
+): Record<string, Signal> {
+  const liveKeys = new Set(descriptors.flatMap((descriptor) => descriptor.ports.map((port) => `${descriptor.flatId}:${port.name}`)));
+  return Object.fromEntries(Object.entries(signals).filter(([key]) => liveKeys.has(key)));
+}
+
 function isErrorResponse(response: EngineResponse): response is Extract<EngineResponse, { type: "error" }> {
   return response.type === "error";
 }
@@ -626,6 +685,9 @@ function createInitialState(): MutableState {
     inputB: "1",
     inputValues: {},
     signals: {},
+    internalSignals: {},
+    internalComponents: [],
+    internalReadError: null,
     outputValue: "X",
     hasCircuit: false,
     runtimeBindings: null,
@@ -650,6 +712,13 @@ function createWorkspaceSnapshot(state: MutableState): WorkspaceSnapshot {
     outputValue: state.outputValue,
     inputValues: { ...state.inputValues },
     signals: { ...state.signals },
+    internalSignals: { ...state.internalSignals },
+    internalComponents: state.internalComponents.map((descriptor) => ({
+      ...descriptor,
+      path: [...descriptor.path],
+      ports: descriptor.ports.map((port) => ({ ...port, ...(port.bitRange ? { bitRange: { ...port.bitRange } } : {}) })),
+    })),
+    internalReadError: state.internalReadError,
     hasCircuit: state.hasCircuit,
     simulationStep: state.simulationStep,
     waveform: state.waveform.map((point) => ({ step: point.step, signals: { ...point.signals } })),
@@ -745,7 +814,9 @@ function runtimeBindingsFrom(bindings: SimulationBindings): RuntimeSimulationBin
     }).filter((binding) => binding.refs.length > 0);
   });
 
-  return { inputs, outputs, observedSignals };
+  const flatComponents = Object.fromEntries(Object.entries(bindings.flatComponents ?? {})
+    .filter((entry): entry is [string, number] => typeof entry[1] === "number"));
+  return { flatComponents, inputs, outputs, observedSignals };
 }
 
 function valuesForBindings(
@@ -798,6 +869,7 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
 
   /** 连续运行期间每一拍完成后通知的订阅者；调用方发起的操作不需要这条通道。 */
   const listeners = new Set<(snapshot: WorkspaceSnapshot) => void>();
+  const internalReadPromises = new Map<string, Promise<InternalSignalReadResult>>();
 
   function notifyAdvanced(): void {
     if (listeners.size === 0) return;
@@ -1057,10 +1129,14 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
         ...(Object.keys(flatComponents).length > 0 ? { flatComponents, componentFlatIds } : {}),
         ...(Object.keys(flatConnections).length > 0 ? { flatConnections, connectionFlatIds } : {}),
         ...(document.portSources ? { portSources: document.portSources } : {}),
+        ...(document.internalComponents ? { internalComponents: document.internalComponents } : {}),
       };
       const runtimeBindings = runtimeBindingsFrom(bindings);
       state.runtimeBindings = runtimeBindings;
       state.lastBindings = bindings;
+      state.internalComponents = bindings.internalComponents ?? [];
+      state.internalSignals = {};
+      state.internalReadError = null;
       // 文档里没有 Input 时输入值没有载体：清空而不是留下上一份文档的旧值。
       state.inputValues = runtimeBindings
         ? valuesForBindings(runtimeBindings, options.initialInputValues ?? state.inputValues, state.inputA, state.inputB)
@@ -1117,6 +1193,9 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
       state.simulationStep = 0;
       state.waveform = [];
       state.signals = {};
+      state.internalSignals = {};
+      state.internalComponents = [];
+      state.internalReadError = null;
       state.outputValue = "X";
       return loadCircuitInternal(document);
     });
@@ -1201,6 +1280,9 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
 
     state.lastBindings = bindings;
     state.runtimeBindings = bindings ? runtimeBindingsFrom(bindings) : null;
+    state.internalComponents = bindings?.internalComponents ?? [];
+    state.internalSignals = pruneInternalSignals(state.internalSignals, state.internalComponents);
+    state.internalReadError = null;
     if (state.runtimeBindings) {
       // 按元件身份保留已积累的运行时状态：还在的端口读数留着，消失的键连同它的值一起丢弃。
       // 引擎侧同样按身份保留，因此这里留下的读数下一拍就能对上。
@@ -1209,6 +1291,9 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
     } else {
       // 没有任何元件可仿真：读数没有载体，运行态回到起点。
       state.signals = {};
+      state.internalSignals = {};
+      state.internalComponents = [];
+      state.internalReadError = null;
       state.outputValue = "X";
       state.simulationState = "stopped";
     }
@@ -1232,6 +1317,44 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
   }
 
   /**
+   * 读取当前可见内部表需要的端点。请求只接受 stable flat ID，解析临时 Engine ID
+   * 与串行化都留在 Workspace 内；失败只记录内部表诊断并保留已有快照。
+   */
+  function readInternalSignals(reads: readonly InternalSignalRead[]): Promise<InternalSignalReadResult> {
+    const unique = [...new Map(reads.map((read) => [`${read.key}\u0000${read.flatId}\u0000${read.port}`, read])).values()];
+    if (unique.length === 0) return Promise.resolve({ snapshot: createWorkspaceSnapshot(state), values: {}, errors: {} });
+    const signature = unique.map((read) => `${read.key}\u0000${read.flatId}\u0000${read.port}`).sort().join("\u0001");
+    const previous = internalReadPromises.get(signature);
+    if (previous !== undefined) return previous;
+    const pending = queue.enqueue(async () => {
+      const bindings = state.lastBindings;
+      const values: Record<string, Signal> = {};
+      const errors: Record<string, string> = {};
+      if (!bindings) return { snapshot: createWorkspaceSnapshot(state), values, errors };
+      const flatComponents = bindings.flatComponents ?? {};
+      for (const read of unique) {
+        const componentId = flatComponents[read.flatId];
+        if (componentId === undefined) {
+          errors[read.key] = "内部端点尚未绑定到当前仿真。";
+          continue;
+        }
+        try {
+          const response = expectResponse(await adapter.getSignal(componentId, read.port), "signal_result");
+          values[read.key] = response.value;
+          state.internalSignals[`${read.flatId}:${read.port}`] = response.value;
+        } catch (error) {
+          errors[read.key] = errorMessage(error, "读取内部信号失败。");
+        }
+      }
+      state.internalReadError = Object.values(errors)[0] ?? null;
+      return { snapshot: createWorkspaceSnapshot(state), values, errors };
+    });
+    internalReadPromises.set(signature, pending);
+    void pending.then(() => internalReadPromises.delete(signature), () => internalReadPromises.delete(signature));
+    return pending;
+  }
+
+  /**
    * 推进一个 tick，并追加这一拍的波形记录。
    * 响应一次带回电路中全部输出 Port 与每个 Output 元件接收端的当前值，
    * 因此每步只有一次跨进程往返，往返次数不随电路规模增长，波形也能记录这一拍的真实读数。
@@ -1249,6 +1372,16 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
       const enginePorts = new Map(
         ticked.signals.map((signal) => [signalKey(String(signal.componentId), signal.port), signal.value]),
       );
+      const flatSignals: Record<string, Signal> = {};
+      for (const [flatId, componentId] of Object.entries(bindings.flatComponents ?? {})) {
+        for (const signal of ticked.signals) {
+          if (signal.componentId === componentId) flatSignals[`${flatId}:${signal.port}`] = signal.value;
+        }
+      }
+      // A tick already contains the complete engine snapshot. Project it once into stable
+      // occurrence-qualified keys; the inspector never performs one get_signal per Port here.
+      state.internalSignals = flatSignals;
+      state.internalReadError = null;
       const readBindings = (candidates: readonly RuntimeSignalBinding[]): Record<string, Signal> => {
         const values: Record<string, Signal> = {};
         for (const binding of candidates) {
@@ -1328,6 +1461,8 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
         state.simulationStep = 0;
         state.waveform = [];
         state.signals = {};
+        state.internalSignals = {};
+        state.internalReadError = null;
         state.outputValue = "X";
         // 重置把引擎里的 Input 也清回了初值，因此必须重新提交当前输入并求值到稳定，
         // 否则画布会停在「全部 X」上。这次求值不计步数，也不追加波形记录。
@@ -1424,6 +1559,7 @@ export function createWorkspace(adapter: EngineAdapter, options: WorkspaceOption
     rebuildCircuit,
     rebindSimulation,
     refreshReadings,
+    readInternalSignals,
     start,
     pause,
     resume,
