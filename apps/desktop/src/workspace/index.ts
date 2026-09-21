@@ -10,6 +10,16 @@ import {
 } from "../editor/index.ts";
 import { createEngineCallQueue, type EngineCallQueue } from "./engineQueue.ts";
 
+export {
+  createDocumentRuntime,
+  type DocumentProjectState,
+  type DocumentRuntime,
+  type DocumentRuntimeOptions,
+  type DocumentRuntimeSnapshot,
+  type DocumentViewState,
+  type PendingFileAction,
+} from "./documentRuntime.ts";
+
 /** 输入设置项的稳定键；键是编辑器组件 ID，与引擎身份无关。 */
 export type InputKey = string;
 /**
