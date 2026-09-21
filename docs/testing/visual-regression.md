@@ -24,6 +24,37 @@
 
 夹具在这条路径上必须与真实引擎同规则，否则画面会静默失真：`addComponent` 记下它回传的端口清单（拆线器与合线器的清单是数据驱动的，必须由调用方给出），`getSignal` 返回的读数长度等于端口位宽（位宽为 1 时仍返回 `X`，既有状态的画面因此不受影响）。位按钮在引擎绑定就绪之前是禁用的，夹具因此要等按钮可用再点——直接点下去会落在禁用按钮上，静默什么都不做。
 
+## Phase 5.6 多文档视觉矩阵
+
+多文档夹具必须通过生产的 tab/workspace facade 产生状态；不得在截图页手写多个静态
+标签或伪造 `DocumentTabSnapshot`。每个状态都在深色/浅色主题和普通/窄窗口各取一份，
+截图供人工检查，DOM 事实由 `visual:probe` 负责自动判定。
+
+| 状态 | 必须覆盖的事实 | 普通/窄 | 深色/浅色 |
+| --- | --- | --- | --- |
+| `multi-tabs` | 至少两个真实标签、活动标签、同名 Editor ID 不串状态 | 待集成验证 | 待集成验证 |
+| `multi-tabs-narrow` | 窄窗口标签可见性、关闭按钮和活动标记不重叠 | 待集成验证 | 待集成验证 |
+| `long-name` | 长路径/长项目名截断但仍可通过 ARIA 名称识别 | 待集成验证 | 待集成验证 |
+| `unnamed-tabs` | 多个未命名文档的稳定序号与去重 | 待集成验证 | 待集成验证 |
+| `unsaved-tab` | dirty 标记、关闭确认、取消后焦点回到原标签 | 待集成验证 | 待集成验证 |
+| `needs-reload` | 父 occurrence 的 stale/需重新加载提示，不误报为 dirty | 待集成验证 | 待集成验证 |
+| `unresolved-drill` | 未解析实例的下钻入口禁用并展示诊断 | 待集成验证 | 待集成验证 |
+| `engine-unavailable` | 单文档不可用，不把其他标签染成 unavailable | 待集成验证 | 待集成验证 |
+| `internal-signals` | occurrence-local 行、值、只读标记和可恢复读取错误 | 待集成验证 | 待集成验证 |
+| `source-return` | 返回父文档后来源选中、居中和焦点状态 | 待集成验证 | 待集成验证 |
+
+Phase 5.6 的建议取证命令（当前分支尚未运行，结果由集成分支填写）为：
+
+```powershell
+pnpm --filter @circuit-platform/desktop visual:test -- --state=multi-tabs,multi-tabs-narrow,long-name,unnamed-tabs,unsaved-tab,needs-reload,unresolved-drill,engine-unavailable,internal-signals,source-return
+pnpm --filter @circuit-platform/desktop visual:probe
+```
+
+`visual:test` 成功只证明页面和夹具能产出截图，不能证明像素哈希稳定；以上状态的 tab
+数量、ARIA 标签、dirty/stale/unresolved/unavailable 文案或类名、禁用下钻、来源选中/
+居中以及内部行和值，必须由 `visual:probe` 逐条断言。表中“待集成验证”不是通过记录，
+也不替代人工查看截图。
+
 ## 运行
 
 在安装依赖后，从仓库根目录执行：

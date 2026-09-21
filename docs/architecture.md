@@ -119,6 +119,52 @@ Electron 主进程通过 JSON Lines 长连接调用引擎。当前协议提供 `
 
 推送时延预算：500 元件 / 1,000 连线的完整推送（含加载后首次求值）均值 ≤ 6 秒（规格 #34 原定价 3 秒，落地后按其「复核口径」预案重定，依据见[性能基准](testing/performance-benchmark.md)），在端到端回归中断言。波形历史按 tick 逐拍记录（上限 1,000 点、丢弃最旧），属于会话状态，不进项目文件。
 
+### Phase 5.6 多文档运行时边界
+
+多文档不改变 JSON Lines 请求或 C++ 引擎语义。Electron 主进程的
+`EngineClientPool` 按 `documentKey` 懒创建一个 `EngineClient` 和一个引擎进程；
+`preload` 只在 IPC 边界传递这个键（`forDocument(key)`），渲染层和项目文件都不保存
+Engine ID。健康检查、重启、待处理请求清理和关闭回收均按键执行，应用退出时再统一
+回收。因而某一份文档的进程退出只会使该文档进入 `unavailable`，不会暂停或重建其他
+文档；进程数暂时随打开文档数增长，不做隐式淘汰。
+
+渲染层有两个刻意相同而不互相替代的 seam：
+
+- `createDocumentCoordinator` 是无头协调器，只拥有标签顺序、规范化路径去重、活动键、
+  打开/关闭错误和一跳来源记录。它接收窄的 `DocumentRuntime` 工厂，因此可以在不启动
+  Vue 或 Electron 窗口的测试中验证竞态、关闭和来源清理。
+- `useDocumentWorkspace` 是生产 live facade。每个 Controller 独立拥有
+  `useWorkspace`、`EditorSession`、视图 refs、tick/recovery scheduler 和文档 adapter；
+  facade 只把当前活动 Controller 投影给既有 App/面板。切换会暂停旧 Controller，重新
+  激活不会偷偷恢复运行；关闭或卸载先停止调度器、取消订阅，再释放该文档的引擎客户端。
+
+下钻来源是运行时关系 `childKey → { parentKey, sourceComponentId }`，不是文件字段。打开
+子文档先走路径去重；同一子文档从另一个 occurrence 下钻时复用标签并更新这一跳来源。
+返回只激活仍存在的父文档、选择并居中稳定的来源 Editor ID；若父或来源已不存在，清掉
+记录而不重新打开文件。关闭一个父文档会清理它作为父的全部 child links，关闭子文档只清理
+它自己的记录，不级联关闭其他标签。
+
+保存后的 stale 归属也按 occurrence 隔离。子文档只有在原子写盘成功、路径和内容版本更新
+完成后才广播保存事件；父文档按规范化目标路径与自己的 occurrence key 比较采用版本，只有
+实际落后者进入 `needsReload`。广播不读取文件、不触碰引擎、不创建父历史帧；显式重载才
+读取该 occurrence 的依赖，并以一个可撤销的局部 projection 事务替换它。成功后只清掉这
+个 occurrence/version 的 stale 标记，其他 occurrence（包括同一父文档中的另一个使用处）
+继续保持 stale。
+
+内部信号是只读的 occurrence-local projection。展平器为每个 occurrence 生成稳定的
+`ownerId`、`flatId` 和端口来源，工作区把已有 tick 快照投影成 `flatId:port`；不把临时
+Engine ID 提升到 UI。只有活动文档中选中的、已解析 Subcircuit 且可见的信号表才生成
+`get_signal` 读取计划；请求按 key 合并，面板隐藏时读取数为零。读取结果带文档/选择/
+projection revision，revision、文档或可见性不匹配的迟到结果丢弃；读取失败只更新可恢复
+诊断，不清除 Circuit、历史或上一份有效读数。连续运行的 tick 仍由该文档自己的 scheduler
+驱动，内部表刷新不能阻塞画布帧。
+
+恢复仍受单文档进程边界约束：检测到该键对应的新进程后，只使用内存中最后一次显式采用的
+完整扁平 projection 重建，不借机读取磁盘或自动重载父文档。输入值按 Editor ID 重新提交，
+读数从第 0 步重新开始，波形清空，撤销/重做历史保留；Clock 相位、tick 计数和
+DFlipFlop `q` 等时序状态不恢复（`q` 回到 `X`）。未受影响文档和 occurrence 的引擎、
+时序状态与历史不变。
+
 ## 仿真模型
 
 初期采用离散 tick 模型。组合逻辑在一个 tick 内传播到稳定状态；时序元件在时钟上升沿采样输入并更新状态。
