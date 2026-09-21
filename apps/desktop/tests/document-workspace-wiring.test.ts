@@ -26,4 +26,3 @@ test("per-document facade keeps editor-state controllers with each document", as
   assert.match(facade, /const active = computed/);
   assert.match(facade, /return workspaceFacade/);
 });
-
