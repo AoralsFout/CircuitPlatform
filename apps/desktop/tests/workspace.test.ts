@@ -912,6 +912,64 @@ test("schedules the next advance only after the previous response arrives", asyn
   assert.equal(scheduler.scheduled, 2);
 });
 
+test("keeps document schedulers and simulation timelines independent", async () => {
+  const firstEngine = new FakeEngine();
+  const secondEngine = new FakeEngine();
+  const firstScheduler = new FakeScheduler();
+  const secondScheduler = new FakeScheduler();
+  const first = createWorkspace(firstEngine, { scheduler: firstScheduler });
+  const second = createWorkspace(secondEngine, { scheduler: secondScheduler });
+
+  await first.checkEngine();
+  await second.checkEngine();
+  await first.loadCircuit(clockDocument());
+  await second.loadCircuit(clockDocument());
+  await first.start();
+  firstScheduler.fire();
+  await drain();
+
+  assert.equal(first.snapshot().simulationState, "running");
+  assert.equal(first.snapshot().simulationStep, 1);
+  assert.equal(second.snapshot().simulationState, "stopped");
+  assert.equal(secondScheduler.pendingCount(), 0);
+  assert.equal(secondEngine.calls.filter((call) => call.type === "tick").length, 0);
+
+  const paused = await first.pause();
+  assert.equal(paused.simulationState, "paused");
+  assert.equal(firstScheduler.pendingCount(), 0);
+  assert.equal(first.snapshot().simulationStep, 1);
+  assert.equal(first.snapshot().waveform.length, 1);
+  assert.equal(secondScheduler.fire(), false);
+
+  // Activating another document does not implicitly resume the old one.
+  assert.equal(first.snapshot().simulationState, "paused");
+  assert.equal(first.snapshot().simulationStep, 1);
+  assert.equal(first.snapshot().signals["clock:out"], "1");
+});
+
+test("pausing while a tick is in flight prevents its completion from scheduling another tick", async () => {
+  const engine = new FakeEngine();
+  const scheduler = new FakeScheduler();
+  const workspace = createWorkspace(engine, { scheduler });
+  await workspace.checkEngine();
+  await workspace.loadCircuit(clockDocument());
+  await workspace.start();
+
+  let release: () => void = () => {};
+  engine.holdTick = () => new Promise<void>((resolve) => { release = resolve; });
+  scheduler.fire();
+  await drain();
+  const paused = await workspace.pause();
+  assert.equal(paused.simulationState, "paused");
+  assert.equal(scheduler.pendingCount(), 0);
+
+  release();
+  await drain();
+  assert.equal(workspace.snapshot().simulationState, "paused");
+  assert.equal(scheduler.pendingCount(), 0);
+  assert.equal(workspace.snapshot().simulationStep, 1);
+});
+
 test("queues an input commit behind an in-flight advance while running", async () => {
   const engine = new FakeEngine();
   const scheduler = new FakeScheduler();
