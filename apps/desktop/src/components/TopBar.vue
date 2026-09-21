@@ -4,6 +4,8 @@ import RecentProjectsMenu from "./RecentProjectsMenu.vue";
 import type { ProjectSaveState } from "../composables/useWorkspace";
 import type { RecentProject } from "../project-file/recent-projects";
 import type { WorkspaceEngineState } from "../workspace";
+import type { DocumentTabSnapshot } from "../workspace/documentCoordinator";
+import { resolveDocumentTabKey } from "./document-tabs";
 
 const props = defineProps<{
   engineState: WorkspaceEngineState;
@@ -20,6 +22,10 @@ const props = defineProps<{
   canSave: boolean;
   /** 最近项目列表，最近使用在前；为空时最近项目入口不渲染。 */
   recentProjects: readonly RecentProject[];
+  /** 打开的文档标签；顺序由协调器维护。 */
+  tabs?: readonly DocumentTabSnapshot[];
+  /** 当前活动标签键。 */
+  activeDocumentKey?: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -35,6 +41,8 @@ const emit = defineEmits<{
   save: [];
   /** 另存为：总是询问位置，成功后文档身份切换为新路径。 */
   saveAs: [];
+  activateTab: [key: string];
+  closeTab: [key: string];
 }>();
 
 /** 保存指示器的可见文案；脏标记与失败都必须让用户「看到」，不能只留在标题里。 */
@@ -45,6 +53,18 @@ const saveStateLabels: Record<ProjectSaveState, string> = {
 };
 
 const saveStateLabel = computed(() => saveStateLabels[props.saveState]);
+
+function onTabKeydown(event: KeyboardEvent, index: number): void {
+  const result = resolveDocumentTabKey(event.key, index, props.tabs?.length ?? 0);
+  if (result.action === "none") return;
+  event.preventDefault();
+  const buttons = Array.from((event.currentTarget as HTMLElement).parentElement?.querySelectorAll<HTMLElement>("[role=tab]") ?? []);
+  buttons[result.index]?.focus();
+  if (result.action === "activate") {
+    const tab = props.tabs?.[result.index];
+    if (tab) emit("activateTab", tab.key);
+  }
+}
 </script>
 
 <template>
@@ -53,7 +73,28 @@ const saveStateLabel = computed(() => saveStateLabels[props.saveState]);
       <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
       <strong class="brand-name">CircuitPlatform</strong>
       <span class="topbar-divider" aria-hidden="true"></span>
-      <span class="project-name">{{ projectName ?? "未命名电路" }}</span>
+      <div v-if="tabs && tabs.length > 0" class="document-tabs" role="tablist" aria-label="打开的项目">
+        <div
+          v-for="(tab, index) in tabs"
+          :key="tab.key"
+          class="document-tab"
+          :class="{ 'document-tab--active': tab.key === activeDocumentKey }"
+          role="tab"
+          :aria-selected="tab.key === activeDocumentKey"
+          :aria-label="`${tab.displayName}${tab.isDirty ? '，有未保存改动' : ''}`"
+          :tabindex="tab.key === activeDocumentKey ? 0 : -1"
+          @click="emit('activateTab', tab.key)"
+          @keydown="onTabKeydown($event, index)"
+        >
+          <span class="document-tab__label">{{ tab.displayName }}</span>
+          <span v-if="tab.isDirty" class="document-tab__dirty" aria-label="未保存" title="未保存">●</span>
+          <span class="document-tab__active-indicator" aria-hidden="true"></span>
+          <span v-if="tabs.length > 1" class="document-tab__close-wrap">
+            <button type="button" class="document-tab__close" :aria-label="`关闭 ${tab.displayName}`" @click.stop="emit('closeTab', tab.key)">×</button>
+          </span>
+        </div>
+      </div>
+      <span v-else class="project-name">{{ projectName ?? "未命名电路" }}</span>
       <span class="save-state" :class="`save-state--${saveState}`" :title="saveError ?? undefined" aria-live="polite"><span class="save-dot" aria-hidden="true"></span>{{ saveStateLabel }}</span>
     </div>
 

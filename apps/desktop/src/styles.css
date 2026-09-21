@@ -136,6 +136,15 @@ button:disabled { cursor: not-allowed; }
 .brand-name { color: var(--color-text); font-size: 13px; letter-spacing: -.02em; }
 .topbar-divider { width: 1px; height: 17px; margin-left: 6px; background: var(--color-border); }
 .project-name { color: var(--color-text-muted); font-size: 12px; }
+.document-tabs { display: flex; align-items: stretch; min-width: 0; max-width: min(48vw, 620px); overflow-x: auto; scrollbar-width: thin; }
+.document-tab { position: relative; display: inline-flex; flex: 0 1 auto; align-items: center; gap: 5px; min-width: 92px; max-width: 190px; padding: 7px 7px 8px 10px; border: 0; border-bottom: 2px solid transparent; color: var(--color-text-muted); background: transparent; cursor: pointer; font: inherit; text-align: left; }
+.document-tab:hover, .document-tab:focus-visible { color: var(--color-text); background: var(--color-surface); }
+.document-tab--active { border-bottom-color: var(--color-signal-high); color: var(--color-text); }
+.document-tab__label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.document-tab__dirty { color: var(--color-status-warning); font-size: 8px; }
+.document-tab__close-wrap { display: inline-flex; }
+.document-tab__close { width: 18px; height: 18px; padding: 0; border: 0; color: var(--color-text-faint); background: transparent; cursor: pointer; }
+.document-tab__close:hover, .document-tab__close:focus-visible { color: var(--color-status-error); background: var(--color-surface); }
 .save-state { display: inline-flex; align-items: center; gap: 6px; color: var(--color-text-faint); font-size: 10px; }
 .save-dot, .mode-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--color-status-success); box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-status-success) 12%, transparent); }
 /* 脏标记与保存失败复用同一个指示器，只换语义色：不允许在组件里引入主题外颜色。 */
@@ -547,6 +556,8 @@ button:disabled { cursor: not-allowed; }
   .topbar { gap: 8px; padding-inline: 9px; }
   .brand-lockup { gap: 7px; }
   .brand-name, .topbar-divider, .project-name, .save-state, .engine-chip { display: none; }
+  .document-tabs { max-width: 45vw; }
+  .document-tab { min-width: 70px; max-width: 140px; padding-inline: 6px; }
   .topbar-actions { margin-left: auto; }
   .editor-layout, .editor-layout--sidebar-collapsed { grid-template-columns: 36px minmax(0, 1fr); }
   .editor-layout > .sidebar { display: none; }

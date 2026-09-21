@@ -86,6 +86,8 @@ export interface DocumentRuntimeOptions {
   temporaryName?: string;
   /** 运行时身份；省略时由工厂分配。 */
   runtimeId?: string;
+  /** 可选的引擎进程释放钩子；Electron 生产桥接按文档键关闭对应进程。 */
+  disposeEngine?: () => void | Promise<void>;
 }
 
 /** 面向协调器的窄运行时接口；调用方不需要接触 Workspace 的引擎绑定或协议响应。 */
@@ -362,6 +364,11 @@ export function createDocumentRuntime(options: DocumentRuntimeOptions): Document
       editorUnsubscribe?.();
       editorUnsubscribe = null;
       listeners.clear();
+      try {
+        void Promise.resolve(options.disposeEngine?.()).catch(() => undefined);
+      } catch {
+        // 引擎关闭是生命周期清理，不能让 UI 的 close 操作被释放错误打断。
+      }
     },
     dispose() {
       runtime.destroy();

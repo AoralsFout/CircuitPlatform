@@ -19,6 +19,19 @@ export {
   type DocumentViewState,
   type PendingFileAction,
 } from "./documentRuntime.ts";
+export {
+  createDocumentCoordinator,
+  createWindowDocumentRuntimeFactory,
+  type CoordinatorCloseResult,
+  type CoordinatorOpenResult,
+  type CoordinatorProjectReader,
+  type DocumentCoordinator,
+  type DocumentCoordinatorOptions,
+  type DocumentCoordinatorSnapshot,
+  type DocumentRuntimeFactory,
+  type DocumentRuntimeFactoryContext,
+  type DocumentTabSnapshot,
+} from "./documentCoordinator.ts";
 
 /** 输入设置项的稳定键；键是编辑器组件 ID，与引擎身份无关。 */
 export type InputKey = string;
