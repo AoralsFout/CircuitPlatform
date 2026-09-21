@@ -23,6 +23,7 @@ export {
   createDocumentCoordinator,
   createWindowDocumentRuntimeFactory,
   type CoordinatorCloseResult,
+  type CoordinatorNewDocumentResult,
   type CoordinatorOpenResult,
   type CoordinatorProjectReader,
   type DocumentCoordinator,

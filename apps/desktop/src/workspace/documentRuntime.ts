@@ -1,6 +1,7 @@
 import {
   createEditorSession,
   type CircuitEnginePort,
+  type CommandResult,
   type EditorCommand,
   type EditorInitialState,
   type EditorSelection,
@@ -105,7 +106,7 @@ export interface DocumentRuntime {
   step(): Promise<DocumentRuntimeSnapshot>;
   reset(): Promise<DocumentRuntimeSnapshot>;
   setInputBit(key: InputKey, index: number, bit: InputBit): Promise<DocumentRuntimeSnapshot>;
-  dispatchEditor(command: EditorCommand): Promise<EditorSnapshot | null>;
+  dispatchEditor(command: EditorCommand): Promise<CommandResult | null>;
   setProjectPath(path: string | null): DocumentRuntimeSnapshot;
   setDirty(isDirty: boolean): DocumentRuntimeSnapshot;
   setSaveError(message: string | null): DocumentRuntimeSnapshot;
@@ -274,11 +275,11 @@ export function createDocumentRuntime(options: DocumentRuntimeOptions): Document
     return publish();
   }
 
-  async function dispatchEditor(command: EditorCommand): Promise<EditorSnapshot | null> {
-    if (destroyed || editor === null) return editorSnapshot;
+  async function dispatchEditor(command: EditorCommand): Promise<CommandResult | null> {
+    if (destroyed || editor === null) return null;
     const result = await editor.dispatch(command);
     if (!destroyed) syncEditor(result.snapshot);
-    return destroyed ? editorSnapshot : result.snapshot;
+    return result;
   }
 
   const runtime: DocumentRuntime = {
