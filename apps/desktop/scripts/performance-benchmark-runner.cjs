@@ -49,19 +49,19 @@ app.whenReady().then(async () => {
       if (isInternalSignals) {
         window.__resetInternalSignalMetrics();
         window.__setInternalSignalMode('hidden');
-        for (let index = 0; index < 4; index += 1) window.__driveInternalSignalFrame();
+        for (let index = 0; index < 4; index += 1) await window.__driveInternalSignalFrame();
         await window.__flush();
         const hidden = window.__internalSignalMetrics();
         window.__setInternalSignalMode('visible');
-        for (let index = 0; index < 8; index += 1) window.__driveInternalSignalFrame();
+        for (let index = 0; index < 8; index += 1) await window.__driveInternalSignalFrame();
         await window.__flush();
         const visible = window.__internalSignalMetrics();
         window.__setInternalSignalMode('rapid-selection');
-        for (let index = 0; index < 8; index += 1) window.__driveInternalSignalFrame();
+        for (let index = 0; index < 8; index += 1) await window.__driveInternalSignalFrame();
         await window.__flush();
         const rapidSelection = window.__internalSignalMetrics();
         window.__setInternalSignalMode('continuous-run');
-        for (let index = 0; index < 8; index += 1) window.__driveInternalSignalFrame();
+        for (let index = 0; index < 8; index += 1) await window.__driveInternalSignalFrame();
         await window.__flush();
         const continuousRun = window.__internalSignalMetrics();
         internalSignals = {
@@ -91,7 +91,7 @@ app.whenReady().then(async () => {
           const frameStarted = performance.now();
           const x = startX + (tick % 240);
           const y = startY + (tick % 240);
-          if (isInternalSignals) window.__driveInternalSignalFrame();
+          if (isInternalSignals) await window.__driveInternalSignalFrame();
           else canvas.dispatchEvent(pointer('pointermove', x, y));
           await window.__flush();
           samples.push(performance.now() - frameStarted);

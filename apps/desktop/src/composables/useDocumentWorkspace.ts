@@ -41,13 +41,10 @@ const mutableWorkspaceRefs = new Set(["state", "editorState", "projectPath", "is
 const mutableEditorRefs = new Set(["showDetails", "showSidebar", "activeRailPage", "bottomTab", "zoom"]);
 
 /**
- * 将现有单文档组合层提升为按文档键的活动投影。
+ * `useDocumentWorkspace` 的依赖注入选项。
  *
- * 每个 Controller 都拥有独立的 `useWorkspace`、EditorSession 和 `useEditorState`；返回对象
- * 只把活动 Controller 投影给 App，因此旧组件无需了解运行时集合，也不会把编辑器历史或视图
- * refs 共享到另一份 Project。文件路径索引在这里先于读文件执行，协调器的标签 seam 由
- * `tabs`/`activeDocumentKey` 暴露给 TopBar。
- * @returns 与旧 `useWorkspace` + `useEditorState` 兼容的活动文档 facade。
+ * 生产环境通常省略全部选项；测试或基准可以为每个文档提供独立的连续运行与恢复调度器，
+ * 以验证文档之间没有共享调度状态。
  */
 export interface DocumentWorkspaceOptions {
   /** 测试可注入可控 tick 调度器；生产环境省略时每份文档各自创建默认调度器。 */
@@ -60,6 +57,17 @@ export interface DocumentWorkspaceOptions {
   recoverySchedulerFactory?: (documentKey: string) => TickScheduler;
 }
 
+/**
+ * 将现有单文档组合层提升为按文档键的活动投影。
+ *
+ * 每个 Controller 都拥有独立的 `useWorkspace`、EditorSession 和 `useEditorState`；返回 facade
+ * 只把活动 Controller 投影给 App，因此旧组件无需了解运行时集合，也不会把编辑器历史或视图
+ * refs 共享到另一份 Project。文件路径索引在这里先于读文件执行，协调器的标签 seam 由
+ * `tabs`/`activeDocumentKey` 暴露给 TopBar。
+ * @param options 调度器依赖注入；省略时生产路径为每份文档创建默认调度器。
+ * @returns 与旧 `useWorkspace` + `useEditorState` 兼容的活动文档 facade，以及标签、激活和关闭操作。
+ * @throws facade 被销毁后，迟到的文件/引擎结果会被丢弃；调用方不得再依赖已关闭文档的状态。
+ */
 export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): any {
   // Keep nested per-document refs intact; `ref()` deep-unpacks binding/editor refs inside records.
   const records = shallowRef<DocumentController[]>([]);
