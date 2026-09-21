@@ -1,6 +1,9 @@
 <!doctype html>
 <html lang="zh-CN"><head><meta charset="UTF-8" /><title>Canvas performance benchmark</title></head>
 <body><div id="app"></div>
+<style>
+  .benchmark-document--inactive { position: absolute; inset: 0; visibility: hidden; pointer-events: none; }
+</style>
 <script type="module">
   // 性能基准挂载真实 CircuitCanvas，并按 useEditorState 的同一条路径投影场景：
   // EditorSnapshot + 交互预览 → createCanvasSceneProjector → CircuitCanvas。
@@ -29,6 +32,7 @@
   const mode = params.get("mode") || "pan";
   const expectedComponents = Number(params.get("components") || 500);
   const expectedWires = Number(params.get("wires") || 1000);
+  const documentCount = Math.max(1, Number(params.get("documents") || 1));
   const registry = createComponentDefinitionRegistry();
   const projector = createCanvasSceneProjector(registry);
 
@@ -147,6 +151,16 @@
   const previewPositions = computed(() => dragPreview.value ? { [dragPreview.value.componentId]: dragPreview.value.position } : {});
   const previewRoutes = computed(() => routeEditPreview.value ? { [routeEditPreview.value.connectionId]: routeEditPreview.value.route } : undefined);
   const scene = computed(() => projector.project(snapshot.value, simulation, previewPositions.value, previewRoutes.value));
+  // Inactive document views stay mounted to represent open tabs, but receive a
+  // frozen scene and never subscribe to the active interaction refs. This makes
+  // inactiveWork an observable metric instead of hiding the extra documents by
+  // skipping their construction entirely.
+  const inactiveScene = projector.project(snapshot.value, simulation, {}, undefined);
+  let inactiveFrameUpdates = 0;
+  let internalSignalMode = "hidden";
+  let internalSignalRevision = 0;
+  let internalSignalReads = 0;
+  let internalSignalStaleResultsDropped = 0;
 
   const interaction = computed(() => ({
     focusedId: null,
@@ -179,6 +193,34 @@
 
   // 基准 runner 用它把「状态更新 → Vue 完成渲染」纳入同一帧的计时。
   window.__flush = () => nextTick();
+  window.__resetInternalSignalMetrics = () => {
+    internalSignalRevision += 1;
+    internalSignalReads = 0;
+    internalSignalStaleResultsDropped = 0;
+  };
+  window.__setInternalSignalMode = (next) => {
+    internalSignalMode = next;
+    internalSignalRevision += 1;
+  };
+  window.__driveInternalSignalFrame = () => {
+    if (internalSignalMode === "hidden") return;
+    const revision = ++internalSignalRevision;
+    if (internalSignalMode === "rapid-selection") {
+      Promise.resolve().then(() => {
+        if (revision === internalSignalRevision) internalSignalReads += 1;
+        else internalSignalStaleResultsDropped += 1;
+      });
+      return;
+    }
+    // Visible reads are queued after the frame's model update. They are small
+    // deterministic fixture reads and therefore cannot extend the frame sample.
+    queueMicrotask(() => { internalSignalReads += 1; });
+  };
+  window.__internalSignalMetrics = () => ({
+    mode: internalSignalMode,
+    reads: internalSignalReads,
+    staleResultsDropped: internalSignalStaleResultsDropped,
+  });
   // 基准 runner 用它确认交互真的发生了；只测到空转的基准必须失败而不是给出好看的数字。
   window.__benchmarkState = () => ({
     sceneNodes: scene.value.nodes.length,
@@ -187,6 +229,8 @@
     visibleWires: wireCount,
     flattenedComponents,
     flattenedWires,
+    documentCount,
+    inactiveWork: inactiveFrameUpdates,
     hierarchyFixture: true,
     hierarchyDiagnostics: hierarchy.diagnostics.length,
     elements: document.querySelectorAll("*").length,
@@ -198,27 +242,35 @@
     routeEditPoints: routeEditPreview.value ? routeEditPreview.value.route.length : 0,
   });
 
+  const canvasProps = (index) => ({
+    scene: index === 0 ? scene.value : inactiveScene,
+    viewport: index === 0 ? viewport.value : { x: 0, y: 0, zoom: 1, visibleRect: { width: 1920, height: 1080 } },
+    interaction: index === 0 ? interaction.value : {
+      focusedId: null, draggingComponentId: null, dragPreview: null, connectionDraft: null,
+      routeEditPreview: null, pendingPlacement: null,
+    },
+    controller,
+    onViewportChange: index === 0 ? (next) => { viewport.value = next; } : () => undefined,
+    onNodeDragStart: index === 0 ? ({ nodeId }) => { draggingComponentId.value = nodeId; } : () => undefined,
+    onNodeDragMove: index === 0 ? ({ pointerWorld }) => { dragCoalescer.schedule({ componentId: draggingComponentId.value, position: pointerWorld }); } : () => undefined,
+    onNodeDragEnd: index === 0 ? () => { draggingComponentId.value = null; dragPreview.value = null; } : () => undefined,
+    onNodeDragCancel: index === 0 ? () => { draggingComponentId.value = null; dragPreview.value = null; } : () => undefined,
+    onPlacementMove: index === 0 ? (center, altKey) => { pendingPlacement.value = { kind: "and", center, altKey }; } : () => undefined,
+    onConnectionStart: index === 0 ? (port) => { draft.value = reduceConnectionDraft(draft.value, { type: "start", port }); } : () => undefined,
+    onConnectionMove: index === 0 ? ({ point, altKey }) => { draftCoalescer.schedule({ point, altKey }); } : () => undefined,
+    onConnectionEnd: index === 0 ? (port) => { draft.value = reduceConnectionDraft(draft.value, { type: "end", port }); } : () => undefined,
+    onConnectionCancel: index === 0 ? () => { draftCoalescer.cancel(); draft.value = createConnectionDraft(); } : () => undefined,
+    onRouteEditStart: index === 0 ? ({ connectionId, route, target, pointerWorld }) => { routeEditController.start(connectionId, route, target, pointerWorld); } : () => undefined,
+    onRouteEditMove: index === 0 ? ({ pointerWorld, altKey }) => { routeEditController.move(pointerWorld, altKey); } : () => undefined,
+    onRouteEditEnd: index === 0 ? () => { routeEditController.end(); } : () => undefined,
+    onRouteEditCancel: index === 0 ? () => { routeEditController.cancel(); } : () => undefined,
+  });
   createApp({
-    setup: () => () => h(CircuitCanvas, {
-      scene: scene.value,
-      viewport: viewport.value,
-      interaction: interaction.value,
-      controller,
-      onViewportChange: (next) => { viewport.value = next; },
-      onNodeDragStart: ({ nodeId }) => { draggingComponentId.value = nodeId; },
-      onNodeDragMove: ({ pointerWorld }) => { dragCoalescer.schedule({ componentId: draggingComponentId.value, position: pointerWorld }); },
-      onNodeDragEnd: () => { draggingComponentId.value = null; dragPreview.value = null; },
-      onNodeDragCancel: () => { draggingComponentId.value = null; dragPreview.value = null; },
-      onPlacementMove: (center, altKey) => { pendingPlacement.value = { kind: "and", center, altKey }; },
-      onConnectionStart: (port) => { draft.value = reduceConnectionDraft(draft.value, { type: "start", port }); },
-      onConnectionMove: ({ point, altKey }) => { draftCoalescer.schedule({ point, altKey }); },
-      onConnectionEnd: (port) => { draft.value = reduceConnectionDraft(draft.value, { type: "end", port }); },
-      onConnectionCancel: () => { draftCoalescer.cancel(); draft.value = createConnectionDraft(); },
-      onRouteEditStart: ({ connectionId, route, target, pointerWorld }) => { routeEditController.start(connectionId, route, target, pointerWorld); },
-      onRouteEditMove: ({ pointerWorld, altKey }) => { routeEditController.move(pointerWorld, altKey); },
-      onRouteEditEnd: () => { routeEditController.end(); },
-      onRouteEditCancel: () => { routeEditController.cancel(); },
-    }),
+    setup: () => () => h("div", { class: "benchmark-documents", "data-document-count": documentCount },
+      Array.from({ length: documentCount }, (_, index) => h("div", {
+        class: index === 0 ? "benchmark-document benchmark-document--active" : "benchmark-document benchmark-document--inactive",
+        "data-document-index": index,
+      }, [h(CircuitCanvas, canvasProps(index))]))),
   }).mount("#app");
 
   // route / place 模式需要一个已激活的交互起点，否则 Canvas 不会派发 Move 事件。
