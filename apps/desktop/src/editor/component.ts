@@ -30,6 +30,10 @@ export interface SubcircuitComponentData {
   targetIdentity?: string;
   /** 运行时诊断；不参与序列化。 */
   diagnostic?: SubcircuitDiagnostic;
+  /** 当前父文档仍持有旧的 adopted snapshot；不参与序列化。 */
+  needsReload?: boolean;
+  /** 该 occurrence 实际采用的子 Project 版本；不参与序列化。 */
+  adoptedVersion?: string;
 }
 
 /** 编辑器元件按类型扩展的数据；当前只有 Subcircuit 使用。 */

@@ -96,6 +96,10 @@ export interface DocumentTabSnapshot {
   openError: string | null;
   engineState: WorkspaceSnapshot["engineState"];
   simulationState: WorkspaceSnapshot["simulationState"];
+  /** 父文档是否有仍未显式重载的子 Project occurrence。 */
+  needsReload?: boolean;
+  /** 需要重载的 occurrence 数量；保留数量便于无障碍文案与多 occurrence 展示。 */
+  staleSubcircuitCount?: number;
 }
 
 /** 多文档协调器的只读快照；active 是当前唯一投影到 UI 的运行时。 */

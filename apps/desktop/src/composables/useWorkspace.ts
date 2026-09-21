@@ -90,6 +90,17 @@ interface PlatformBridge extends DocumentEngineBridge, ProjectFileBridge {
 /** 顶栏保存状态的三个可见语义：已保存、有未保存改动、最近一次保存失败。 */
 export type ProjectSaveState = "saved" | "dirty" | "error";
 
+/** 父文档中一个 Subcircuit occurrence 的采用版本与独立重载状态。 */
+export interface SubcircuitOccurrenceSnapshot {
+  componentId: EditorComponentId;
+  reference: string;
+  targetIdentity: string;
+  adoptedVersion: string | null;
+  needsReload: boolean;
+  status: "resolved" | "unresolved" | "resolving";
+  diagnostic: string | null;
+}
+
 /** 未保存文档在另存为对话框里的默认文件名；与顶栏占位名一致。 */
 const UNTITLED_PROJECT_NAME = "未命名电路.circuit.json";
 
@@ -100,6 +111,15 @@ const PROJECT_FILE_NOT_FOUND_CODE = "PROJECT_FILE_NOT_FOUND";
 function hierarchyCacheKey(identity: string, occurrencePath: readonly string[] = []): string {
   const normalized = projectPathIdentity(identity);
   return occurrencePath.length === 0 ? normalized : `${normalized}\u0001${occurrencePath.join("/")}`;
+}
+
+/** ProjectFileData 的内容 token；保存成功事件与各 occurrence 共享这份稳定身份。 */
+function projectVersionOf(file: ProjectFileData): string {
+  return JSON.stringify(file);
+}
+
+function occurrenceVersionKey(targetIdentity: string, componentId: string): string {
+  return `${projectPathIdentity(targetIdentity)}\u0001${componentId}`;
 }
 
 /** 丢弃一个 occurrence 的完整递归缓存树，避免失败重载留下不可见的旧子 Project。 */
@@ -182,6 +202,14 @@ export interface WorkspaceBinding {
   addSubcircuitFromDialog(center?: Point): Promise<boolean>;
   /** 显式重新读取并采用一个 Subcircuit 及其递归依赖；磁盘变化不会自动传播。 */
   reloadSubcircuit(componentId: EditorComponentId): Promise<boolean>;
+  /** 当前父文档的 occurrence-local 旧版本列表；不会把 stale 混入 isDirty。 */
+  staleSubcircuits: ComputedRef<readonly SubcircuitOccurrenceSnapshot[]>;
+  /** 当前文档是否至少有一个 Subcircuit occurrence 需要显式重载。 */
+  needsReload: ComputedRef<boolean>;
+  /** 保存成功后由多文档协调器调用；只更新状态，不读取磁盘、不创建历史。 */
+  markSubcircuitsStale(targetIdentity: string, savedVersion: string): void;
+  /** 当前文档最近一次成功保存的内容 token。 */
+  projectVersion: DeepReadonly<Ref<string | null>>;
   /** 当前文档已保存到的路径原始写法；从未保存过时为 null。 */
   projectPath: DeepReadonly<Ref<string | null>>;
   /** 文档内容（结构与 Input 当前值）自上次保存以来是否有改动。 */
@@ -378,10 +406,16 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   let adoptedCircuit: CircuitDocument | null = null;
   /** 当前显式采用的 Project 图快照；普通编辑与引擎重建只读这份内存图。 */
   let adoptedProjectFiles: Map<string, ProjectFileData> | null = null;
+  /** 每个顶层 Subcircuit occurrence 独立记录它实际采用的磁盘快照版本。 */
+  const adoptedOccurrenceVersions = new Map<string, string>();
+  /** 只存 occurrence key，不把 stale 合并到文档 dirty 或解析 status。 */
+  const staleOccurrences = new Set<string>();
   /** 投影历史只保存不含引擎 ID 的采用快照；接口不变的重载也靠 revision 区分。 */
   const adoptedProjectionRevisions = new Map<string, {
     hierarchy: FlattenProjectResult;
     projectFiles: Map<string, ProjectFileData>;
+    occurrenceVersions: Map<string, string>;
+    staleOccurrences: Set<string>;
   }>();
   let nextProjectionRevision = 1;
   let simulationRefreshRequested = false;
@@ -390,6 +424,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   let recoveryWaitCancel: (() => void) | null = null;
 
   const projectPath = shallowRef<string | null>(null);
+  const projectVersion = shallowRef<string | null>(null);
   const isDirty = shallowRef(false);
   const saveError = shallowRef<string | null>(null);
   const openError = shallowRef<string | null>(null);
@@ -429,6 +464,111 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     // 加载示例就是后者（规格语义：未保存文档），只要存在可序列化的文档就保持置脏。
     const current = serializeCurrentProjectFile();
     isDirty.value = savedFileSnapshot === null ? current !== null : current !== savedFileSnapshot;
+  }
+
+  /** 在编辑器快照上叠加运行时 stale 元数据；该叠加不会进入撤销栈或项目文件。 */
+  function snapshotWithStaleMetadata(snapshot: EditorSnapshot): EditorSnapshot {
+    return {
+      ...snapshot,
+      document: {
+        ...snapshot.document,
+        components: snapshot.document.components.map((component) => {
+          const data = component.data?.subcircuit;
+          if (component.kind !== "subcircuit" || data === undefined) return component;
+          const target = data.targetIdentity ?? (projectPath.value === null
+            ? null
+            : projectPathIdentity(resolveProjectReference(data.reference, projectPath.value)));
+          const key = target === null ? null : occurrenceVersionKey(target, component.id);
+          const adoptedVersion = key === null ? undefined : adoptedOccurrenceVersions.get(key);
+          const needsReload = key !== null && staleOccurrences.has(key);
+          return {
+            ...component,
+            data: {
+              ...component.data,
+              subcircuit: {
+                ...data,
+                adoptedVersion,
+                ...(needsReload ? { needsReload: true } : { needsReload: false }),
+              },
+            },
+          };
+        }),
+      },
+    };
+  }
+
+  /** 重新计算一份层次投影后，记录每个可见 occurrence 对应的采用版本。 */
+  function captureOccurrenceVersions(hierarchy: FlattenProjectResult, projectFiles: Map<string, ProjectFileData>): void {
+    for (const component of hierarchy.document.components) {
+      if (component.kind !== "subcircuit" || component.data?.subcircuit === undefined) continue;
+      const data = component.data.subcircuit;
+      const target = projectPathIdentity(data.targetIdentity ?? resolveProjectReference(data.reference, projectPath.value ?? ""));
+      const file = projectFiles.get(hierarchyCacheKey(target, [component.id])) ?? projectFiles.get(target);
+      const key = occurrenceVersionKey(target, component.id);
+      if (file !== undefined) adoptedOccurrenceVersions.set(key, projectVersionOf(file));
+      else adoptedOccurrenceVersions.delete(key);
+    }
+  }
+
+  /** 同步投影快照中的 stale 字段，供画布和检查器观察而不制造编辑历史。 */
+  function publishStaleMetadata(): void {
+    if (editor !== null) editorState.value = snapshotWithStaleMetadata(editor.snapshot());
+  }
+
+  const staleSubcircuits = computed<readonly SubcircuitOccurrenceSnapshot[]>(() => {
+    const snapshot = editorState.value;
+    const path = projectPath.value;
+    if (snapshot === null || path === null) return [];
+    return snapshot.document.components.flatMap((component) => {
+      if (component.kind !== "subcircuit" || component.data?.subcircuit === undefined) return [];
+      const data = component.data.subcircuit;
+      const targetIdentity = projectPathIdentity(data.targetIdentity ?? resolveProjectReference(data.reference, path));
+      const key = occurrenceVersionKey(targetIdentity, component.id);
+      if (!staleOccurrences.has(key)) return [];
+      return [{
+        componentId: component.id,
+        reference: data.reference,
+        targetIdentity,
+        adoptedVersion: adoptedOccurrenceVersions.get(key) ?? null,
+        needsReload: true,
+        status: data.status ?? (data.diagnostic ? "unresolved" : "resolved"),
+        diagnostic: data.diagnostic?.message ?? null,
+      }];
+    });
+  });
+  const needsReload = computed(() => staleSubcircuits.value.length > 0);
+
+  /**
+   * 将保存成功事件投影到本父文档的 adopted occurrence；此操作只改运行时标记，
+   * 不读取文件、不触碰引擎绑定，也不创建父文档历史帧。
+   * @param targetIdentity 已规范化的子 Project 路径身份。
+   * @param savedVersion 子 Project 写盘成功后的内容 token。
+   */
+  function markSubcircuitsStale(targetIdentity: string, savedVersion: string): void {
+    const normalized = projectPathIdentity(targetIdentity);
+    const path = projectPath.value;
+    if (editor === null || path === null) return;
+    let changed = false;
+    for (const component of editor.snapshot().document.components) {
+      if (component.kind !== "subcircuit" || component.data?.subcircuit === undefined) continue;
+      const data = component.data.subcircuit;
+      const resolved = projectPathIdentity(data.targetIdentity ?? resolveProjectReference(data.reference, path));
+      if (resolved !== normalized) continue;
+      const key = occurrenceVersionKey(resolved, component.id);
+      const adoptedVersion = adoptedOccurrenceVersions.get(key);
+      if (adoptedVersion !== undefined && adoptedVersion !== savedVersion && !staleOccurrences.has(key)) {
+        staleOccurrences.add(key);
+        changed = true;
+      }
+    }
+    if (changed) {
+      const revision = editor.projection()?.revision;
+      if (revision !== undefined) {
+        const adopted = adoptedProjectionRevisions.get(revision);
+        if (adopted !== undefined) adopted.staleOccurrences = new Set(staleOccurrences);
+      }
+      publishStaleMetadata();
+    }
   }
 
   /** 读取本地偏好存储；浏览器禁用持久化时返回 null，记录最近项目安静降级。 */
@@ -658,12 +798,15 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     adoptedHierarchy = { ...flattened, document: editor.snapshot().document };
     adoptedCircuit = circuitFromHierarchy(flattened);
     adoptedProjectFiles = cache;
+    captureOccurrenceVersions(adoptedHierarchy, cache);
     const revision = editor.projection()?.revision;
     editor.adoptProjection(editorProjectionFromHierarchy(adoptedHierarchy, undefined, revision));
     if (revision !== undefined) {
       adoptedProjectionRevisions.set(revision, {
         hierarchy: adoptedHierarchy,
         projectFiles: new Map(cache),
+        occurrenceVersions: new Map(adoptedOccurrenceVersions),
+        staleOccurrences: new Set(staleOccurrences),
       });
     }
   }
@@ -680,7 +823,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     if (editor === null) return false;
     const revision = `hierarchy-${nextProjectionRevision++}`;
     const result = await editor.replaceProjection(editorProjectionFromHierarchy(hierarchy, forceReplaceOwner, revision));
-    editorState.value = result.snapshot;
+    editorState.value = snapshotWithStaleMetadata(result.snapshot);
     await refreshSimulationAfterBindingsChange();
     if (!result.ok) {
       if (ENGINE_TRANSPORT_ERROR_CODES.includes(result.error.code)) beginRecovery();
@@ -689,7 +832,14 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     adoptedHierarchy = hierarchy;
     adoptedCircuit = circuitFromHierarchy(hierarchy);
     adoptedProjectFiles = projectFiles;
-    adoptedProjectionRevisions.set(revision, { hierarchy, projectFiles: new Map(projectFiles) });
+    captureOccurrenceVersions(hierarchy, projectFiles);
+    adoptedProjectionRevisions.set(revision, {
+      hierarchy,
+      projectFiles: new Map(projectFiles),
+      occurrenceVersions: new Map(adoptedOccurrenceVersions),
+      staleOccurrences: new Set(staleOccurrences),
+    });
+    publishStaleMetadata();
     refreshDirtyMarker();
     return true;
   }
@@ -703,6 +853,11 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     adoptedHierarchy = { ...adopted.hierarchy, document: editor!.snapshot().document };
     adoptedCircuit = circuitFromHierarchy(adopted.hierarchy);
     adoptedProjectFiles = new Map(adopted.projectFiles);
+    adoptedOccurrenceVersions.clear();
+    for (const [key, version] of adopted.occurrenceVersions) adoptedOccurrenceVersions.set(key, version);
+    staleOccurrences.clear();
+    for (const key of adopted.staleOccurrences) staleOccurrences.add(key);
+    publishStaleMetadata();
   }
 
   /** 层次解析结果的扁平 Circuit 适配；协议类型在这个 seam 之后保持闭合。 */
@@ -880,15 +1035,28 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     adoptedHierarchy = adopted;
     adoptedCircuit = circuit;
     adoptedProjectFiles = projectFiles;
+    adoptedOccurrenceVersions.clear();
+    staleOccurrences.clear();
+    projectPath.value = path;
     state.value = loaded.snapshot;
     if (adopted !== null && projectFiles !== null) {
       const revision = `hierarchy-${nextProjectionRevision++}`;
-      adoptedProjectionRevisions.set(revision, { hierarchy: adopted, projectFiles: new Map(projectFiles) });
+      captureOccurrenceVersions(adopted, projectFiles);
+      adoptedProjectionRevisions.set(revision, {
+        hierarchy: adopted,
+        projectFiles: new Map(projectFiles),
+        occurrenceVersions: new Map(adoptedOccurrenceVersions),
+        staleOccurrences: new Set(staleOccurrences),
+      });
       attachEditor(document, bindings, editorProjectionFromHierarchy(adopted, undefined, revision));
     } else {
       attachEditor(document, bindings);
     }
-    projectPath.value = path;
+    projectVersion.value = projectFiles === null || path === null
+      ? null
+      : projectVersionOf(projectFiles.get(projectPathIdentity(path))!);
+    if (adopted !== null && projectFiles !== null) captureOccurrenceVersions(adopted, projectFiles);
+    publishStaleMetadata();
     saveError.value = null;
     openError.value = null;
   }
@@ -913,9 +1081,9 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
         },
       },
     );
-    editorState.value = editor.snapshot();
+    editorState.value = snapshotWithStaleMetadata(editor.snapshot());
     unsubscribeEditor = editor.subscribe((snapshot) => {
-      editorState.value = snapshot;
+      editorState.value = snapshotWithStaleMetadata(snapshot);
     });
     // 新会话的初始文档就是脏标记的基线：加载（示例或项目）之后是干净的，改动才置脏。
     savedFileSnapshot = serializeCurrentProjectFile();
@@ -993,10 +1161,10 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   async function runEditorCommand(command: EditorCommand): Promise<CommandResult | null> {
     if (!editor) return null;
     const pending = editor.dispatch(command);
-    editorState.value = editor.snapshot();
+    editorState.value = snapshotWithStaleMetadata(editor.snapshot());
     const result = await pending;
     if (disposed) return null;
-    editorState.value = result.snapshot;
+    editorState.value = snapshotWithStaleMetadata(result.snapshot);
     await refreshSimulationAfterBindingsChange();
     if (disposed) return null;
     if (result.ok && (command.type === "undo" || command.type === "redo")) {
@@ -1174,11 +1342,20 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     clearHierarchyOccurrenceCache(cache, occurrencePath);
     const hierarchy = await flattenVisibleDocument(editor.snapshot().document, cache, true, [{ identity: target, occurrencePath }]);
     if (hierarchy === null) {
-      editorState.value = editor.snapshot();
+      editorState.value = snapshotWithStaleMetadata(editor.snapshot());
       return false;
     }
     const succeeded = await replaceHierarchyProjection(hierarchy, cache, componentId);
     if (succeeded) {
+      // 只有这个 occurrence 真正采用了新投影才清除提示；同一文件的兄弟 occurrence
+      // 以及其他父文档仍保留各自的旧版本状态。
+      staleOccurrences.delete(occurrenceVersionKey(target, componentId));
+      const revision = editor.projection()?.revision;
+      if (revision !== undefined) {
+        const adopted = adoptedProjectionRevisions.get(revision);
+        if (adopted !== undefined) adopted.staleOccurrences = new Set(staleOccurrences);
+      }
+      publishStaleMetadata();
       const diagnostic = hierarchy.diagnostics.find((item) => item.componentId === componentId);
       openError.value = diagnostic?.message ?? null;
     } else {
@@ -1301,6 +1478,8 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
               document: documentWithReferences(adopted.hierarchy.document, historicalReferences),
             },
             projectFiles,
+            occurrenceVersions: new Map(adopted.occurrenceVersions),
+            staleOccurrences: new Set(adopted.staleOccurrences),
           });
         }
       }
@@ -1317,6 +1496,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
       adoptedProjectFiles = cache;
     }
     saveError.value = null;
+    projectVersion.value = content;
     // 基线取序列化时刻的内容：写文件期间用户又做了编辑的话，保存结束后仍然是脏的。
     savedFileSnapshot = content;
     refreshDirtyMarker();
@@ -1708,6 +1888,10 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     duplicateComponent,
     addSubcircuitFromDialog,
     reloadSubcircuit,
+    staleSubcircuits,
+    needsReload,
+    markSubcircuitsStale,
+    projectVersion: readonly(projectVersion),
     projectPath: readonly(projectPath),
     isDirty: readonly(isDirty),
     saveError: readonly(saveError),

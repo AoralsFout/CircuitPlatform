@@ -37,7 +37,7 @@ interface DocumentController {
   stopPathWatch: () => void;
 }
 
-const mutableWorkspaceRefs = new Set(["state", "editorState", "projectPath", "isDirty", "saveError", "openError", "pendingFileAction", "recentProjects"]);
+const mutableWorkspaceRefs = new Set(["state", "editorState", "projectPath", "isDirty", "saveError", "openError", "pendingFileAction", "recentProjects", "staleSubcircuits", "needsReload", "projectVersion"]);
 const mutableEditorRefs = new Set(["showDetails", "showSidebar", "activeRailPage", "bottomTab", "zoom"]);
 
 /**
@@ -84,6 +84,18 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
 
   function syncRecentProjects(): void {
     recentProjects.value = readSharedRecentProjects();
+  }
+
+  /** 广播已确认写盘的子 Project 版本；仅更新仍打开父文档的 stale 投影。 */
+  function publishSuccessfulSave(record: DocumentController): void {
+    const path = record.binding.projectPath.value;
+    const version = record.binding.projectVersion.value;
+    if (path === null || version === null) return;
+    const identity = projectPathIdentity(path);
+    for (const candidate of records.value) {
+      if (candidate === record || candidate.disposed || !candidate.hasDocument) continue;
+      candidate.binding.markSubcircuitsStale(identity, version);
+    }
   }
   // Tab activation is serialized so a rapid A → B → C sequence cannot let an
   // older pause finish after a newer activation and publish the wrong active view.
@@ -327,7 +339,9 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
     const record = active.value;
     if (!record?.hasDocument) return false;
     if (record.binding.projectPath.value === null) return saveProjectAs();
-    return record.binding.save();
+    const succeeded = await record.binding.save();
+    if (succeeded) publishSuccessfulSave(record);
+    return succeeded;
   }
 
   /** 打开另存为对话框并在任何写盘前检查路径身份冲突。 */
@@ -361,6 +375,7 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
     if (succeeded) {
       pathKeys.set(targetIdentity, record.key);
       syncRecentProjects();
+      publishSuccessfulSave(record);
     }
     return succeeded;
   }
@@ -387,6 +402,7 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
     if (!succeeded) return false;
     pathKeys.set(projectPathIdentity(conflict.targetPath), source.key);
     syncRecentProjects();
+    publishSuccessfulSave(source);
     await discardRecord(target);
     return true;
   }
@@ -449,6 +465,8 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
       openError: record.binding.openError.value,
       engineState: record.binding.state.value.engineState,
       simulationState: record.binding.state.value.simulationState,
+      needsReload: record.binding.needsReload.value,
+      staleSubcircuitCount: record.binding.staleSubcircuits.value.length,
     })));
 
   const refNames = new Set([...mutableWorkspaceRefs, "canSave", "projectName", "saveState", "recentProjects"]);
