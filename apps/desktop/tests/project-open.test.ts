@@ -375,6 +375,38 @@ test("opening a hierarchy keeps one visible Subcircuit and pushes only the flatt
   }
 });
 
+test("marks a child occurrence stale without reloading or creating parent history", async () => {
+  const engine = new OpenFlowEngine();
+  const storage = memoryStorage();
+  const restore = stubWindow(engine, storage);
+  try {
+    const parentPath = "E:\\circuits\\parent-stale.circuit.json";
+    const childPath = "e:\\circuits\\child.circuit.json";
+    const original = childProjectFile("not");
+    const changed = childProjectFile("and");
+    engine.files.set(parentPath, JSON.stringify(parentProjectFile()));
+    engine.files.set(childPath.toLowerCase(), JSON.stringify(original));
+    const binding = useWorkspace();
+    await binding.bootstrap();
+    assert.equal(await binding.openProjectFromPath(parentPath), true);
+    const beforeCalls = engine.calls.length;
+    const beforeHistory = binding.editorState.value?.canUndo;
+
+    binding.markSubcircuitsStale(childPath, JSON.stringify(changed));
+
+    assert.equal(binding.needsReload.value, true);
+    assert.equal(binding.staleSubcircuits.value.length, 1);
+    assert.equal(binding.editorState.value?.canUndo, beforeHistory);
+    assert.equal(engine.calls.length, beforeCalls, "stale notification does not touch the engine");
+    assert.equal(binding.editorState.value?.document.components.find((component) => component.id === "unit")?.data?.subcircuit?.needsReload, true);
+    assert.equal(await binding.reloadSubcircuit("unit"), true);
+    assert.equal(binding.needsReload.value, false);
+    assert.equal(binding.editorState.value?.document.components.find((component) => component.id === "unit")?.data?.subcircuit?.needsReload, false);
+  } finally {
+    restore();
+  }
+});
+
 test("adding and reloading a Subcircuit are atomic undoable projection transactions", async () => {
   const engine = new OpenFlowEngine();
   const storage = memoryStorage();
