@@ -281,6 +281,8 @@ const defaultRecoveryScheduler: TickScheduler = {
 };
 
 export interface UseWorkspaceOptions {
+  /** 连续推进的调度器；生产环境省略时使用工作区默认定时器。 */
+  scheduler?: TickScheduler;
   /**
    * 引擎不可用期间健康检查重试的调度器；省略时使用 `setTimeout`。
    * 测试注入手动点火的假实现即可无头驱动恢复循环。
@@ -354,12 +356,16 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   };
   // 一条队列同时交给工作区与编辑器端口：运行中的推进、输入提交与结构提交因此排在同一个队里。
   const queue = createEngineCallQueue();
-  const workspace = createWorkspace(monitoredAdapter, { queue });
+  const workspace = createWorkspace(monitoredAdapter, { queue, scheduler: options.scheduler });
   const recoveryScheduler = options.recoveryScheduler ?? defaultRecoveryScheduler;
   const state = shallowRef(workspace.snapshot());
   // 连续运行的每一拍由工作区自行排定，因此界面靠订阅拿到那部分快照变化。
   workspace.subscribe((snapshot) => {
     state.value = snapshot;
+    // 连续运行的 tick 不经过 reflect；因此引擎在后台推进期间死亡时，必须从订阅
+    // 路径启动本运行时自己的恢复循环。恢复状态和编辑器冻结都留在此文档闭包内，
+    // 不会暂停或重建其他标签。
+    if (snapshot.engineState === "unavailable" || snapshot.engineState === "error") beginRecovery();
   });
   const editorState = shallowRef<EditorSnapshot | null>(null);
   let editor: EditorSession | null = null;

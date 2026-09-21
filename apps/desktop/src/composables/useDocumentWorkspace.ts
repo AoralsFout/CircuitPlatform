@@ -5,6 +5,7 @@ import { readRecentProjects, type RecentProject } from "../project-file/recent-p
 import type { EditorComponentId, EditorSelection, Point, WireColorId } from "../editor/index.ts";
 import { useEditorState } from "./useEditorState.ts";
 import { useWorkspace, type WorkspaceBinding } from "./useWorkspace.ts";
+import type { TickScheduler } from "../workspace/index.ts";
 import type { DocumentTabSnapshot } from "../workspace/documentCoordinator.ts";
 
 type EditorBinding = ReturnType<typeof useEditorState>;
@@ -40,7 +41,18 @@ const mutableEditorRefs = new Set(["showDetails", "showSidebar", "activeRailPage
  * `tabs`/`activeDocumentKey` 暴露给 TopBar。
  * @returns 与旧 `useWorkspace` + `useEditorState` 兼容的活动文档 facade。
  */
-export function useDocumentWorkspace(): any {
+export interface DocumentWorkspaceOptions {
+  /** 测试可注入可控 tick 调度器；生产环境省略时每份文档各自创建默认调度器。 */
+  scheduler?: TickScheduler;
+  /** 需要验证调度器隔离时，为每个文档键创建一个独立调度器。 */
+  schedulerFactory?: (documentKey: string) => TickScheduler;
+  /** 测试可注入可控恢复重试调度器。 */
+  recoveryScheduler?: TickScheduler;
+  /** 为每个文档创建独立的恢复重试调度器。 */
+  recoverySchedulerFactory?: (documentKey: string) => TickScheduler;
+}
+
+export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): any {
   // Keep nested per-document refs intact; `ref()` deep-unpacks binding/editor refs inside records.
   const records = shallowRef<DocumentController[]>([]);
   const activeKey = ref<string | null>(null);
@@ -62,6 +74,9 @@ export function useDocumentWorkspace(): any {
   function syncRecentProjects(): void {
     recentProjects.value = readSharedRecentProjects();
   }
+  // Tab activation is serialized so a rapid A → B → C sequence cannot let an
+  // older pause finish after a newer activation and publish the wrong active view.
+  let activationChain: Promise<void> = Promise.resolve();
 
   function platform(): Window["circuitPlatform"] {
     return window.circuitPlatform;
@@ -70,8 +85,13 @@ export function useDocumentWorkspace(): any {
   function createController(assignTemporaryName = true): DocumentController {
     const key = `document-${sequence.value++}`;
     const temporaryName = assignTemporaryName ? `未命名 ${temporarySequence.value++}` : undefined;
-    // 保持现有按文档键的公开 seam：useWorkspace({ documentKey: key })。
-    const binding = useWorkspace({ documentKey: key, temporaryName });
+    const scheduler = options.schedulerFactory?.(key) ?? options.scheduler;
+    const recoveryScheduler = options.recoverySchedulerFactory?.(key) ?? options.recoveryScheduler;
+    // Keep the production path's narrow facade explicit; test-only scheduler injection
+    // adds no shared coordination state and remains scoped to this controller.
+    const binding = scheduler === undefined && recoveryScheduler === undefined
+      ? useWorkspace({ documentKey: key, temporaryName })
+      : useWorkspace({ documentKey: key, temporaryName, scheduler, recoveryScheduler });
     const editor = useEditorState(
       binding.state,
       binding.editorState,
@@ -108,12 +128,28 @@ export function useDocumentWorkspace(): any {
     actionError.value = null;
   }
 
+  /** Pause the previous live document before publishing a new active document. */
+  function activateRecord(record: DocumentController): Promise<void> {
+    const operation = activationChain.then(async () => {
+      // The initial empty controller is projected while activeKey is null. It still
+      // needs an explicit key when its first Project becomes a real document.
+      if (activeKey.value === record.key) return;
+      const previous = active.value;
+      if (previous?.hasDocument && previous.binding.state.value.simulationState === "running") {
+        await previous.binding.pause();
+      }
+      setActive(record);
+    });
+    activationChain = operation.catch(() => undefined);
+    return operation;
+  }
+
   async function openProject(path: string): Promise<boolean> {
     const identity = projectPathIdentity(path);
     const existingKey = pathKeys.get(identity);
     if (existingKey !== undefined) {
       const existing = records.value.find((record) => record.key === existingKey);
-      if (existing) setActive(existing);
+      if (existing) await activateRecord(existing);
       return existing !== undefined;
     }
     const waiting = opening.get(identity);
@@ -132,7 +168,7 @@ export function useDocumentWorkspace(): any {
       if (!records.value.includes(record)) records.value = [...records.value, record];
       pathKeys.set(identity, record.key);
       syncRecentProjects();
-      setActive(record);
+      await activateRecord(record);
       return true;
     })();
     opening.set(identity, operation);
@@ -151,7 +187,7 @@ export function useDocumentWorkspace(): any {
     }
     record.hasDocument = true;
     if (!records.value.includes(record)) records.value = [...records.value, record];
-    setActive(record);
+    await activateRecord(record);
     return true;
   }
 
@@ -304,9 +340,9 @@ export function useDocumentWorkspace(): any {
     if (records.value.length === 0) ensureController();
   }
 
-  function activateTab(key: string): void {
+  function activateTab(key: string): Promise<void> {
     const record = records.value.find((candidate) => candidate.key === key && candidate.hasDocument);
-    if (record) setActive(record);
+    return record ? activateRecord(record) : Promise.resolve();
   }
 
   const tabs = computed<readonly DocumentTabSnapshot[]>(() => records.value

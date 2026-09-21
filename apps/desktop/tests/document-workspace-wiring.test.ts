@@ -21,7 +21,7 @@ test("App projects active document tabs and forwards activation/close commands",
 
 test("per-document facade keeps editor-state controllers with each document", async () => {
   const facade = await readFile(join(desktopRoot, "src", "composables", "useDocumentWorkspace.ts"), "utf8");
-  assert.match(facade, /useWorkspace\(\{ documentKey: key \}\)/);
+  assert.match(facade, /useWorkspace\(\{ documentKey: key(?:, temporaryName)?/);
   assert.match(facade, /useEditorState\(/);
   assert.match(facade, /const active = computed/);
   assert.match(facade, /return workspaceFacade/);
