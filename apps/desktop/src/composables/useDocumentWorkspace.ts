@@ -1,4 +1,4 @@
-import { computed, ref, watch, type ComputedRef, type Ref } from "vue";
+import { computed, ref, shallowRef, watch, type ComputedRef, type Ref } from "vue";
 import type { ComponentKindName, PortSpec } from "@circuit-platform/protocol";
 import { projectPathIdentity } from "../project-file/paths.ts";
 import type { EditorComponentId, EditorSelection, Point, WireColorId } from "../editor/index.ts";
@@ -30,7 +30,8 @@ const mutableEditorRefs = new Set(["showDetails", "showSidebar", "activeRailPage
  * @returns 与旧 `useWorkspace` + `useEditorState` 兼容的活动文档 facade。
  */
 export function useDocumentWorkspace(): any {
-  const records = ref<DocumentController[]>([]);
+  // Keep nested per-document refs intact; `ref()` deep-unpacks binding/editor refs inside records.
+  const records = shallowRef<DocumentController[]>([]);
   const activeKey = ref<string | null>(null);
   const sequence = ref(1);
   const pathKeys = new Map<string, string>();
@@ -272,7 +273,7 @@ export function useDocumentWorkspace(): any {
       if (refNames.has(property)) return projectRef(property);
       return (...args: unknown[]) => {
         const method = active.value?.binding[property as keyof WorkspaceBinding];
-        return typeof method === "function" ? method.apply(active.value?.binding, args) : undefined;
+        return typeof method === "function" ? Reflect.apply(method, active.value?.binding, args) : undefined;
       };
     },
   }) as any;
@@ -284,7 +285,7 @@ export function useDocumentWorkspace(): any {
       if (value !== undefined && typeof value !== "function") return editorRef(property);
       return (...args: unknown[]) => {
         const method = active.value?.editor[property as keyof EditorBinding];
-        return typeof method === "function" ? method.apply(active.value?.editor, args) : undefined;
+        return typeof method === "function" ? Reflect.apply(method, active.value?.editor, args) : undefined;
       };
     },
   }) as any;

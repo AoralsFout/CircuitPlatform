@@ -293,11 +293,22 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     ? platform.forDocument(options.documentKey)
     : platform;
   const adapter: DocumentEngineBridge & ProjectFileBridge = {
-    ...engine,
-    pickSavePath: platform.pickSavePath,
-    writeProjectFile: platform.writeProjectFile,
-    pickOpenPath: platform.pickOpenPath,
-    readProjectFile: platform.readProjectFile,
+    checkEngine: () => engine.checkEngine(),
+    addComponent: (kind, ports) => engine.addComponent(kind, ports),
+    setPortWidth: (componentId, ports) => engine.setPortWidth(componentId, ports),
+    addConnection: (source, target) => engine.addConnection(source, target),
+    removeComponent: (componentId) => engine.removeComponent(componentId),
+    removeConnection: (connectionId) => engine.removeConnection(connectionId),
+    setInput: (componentId, value) => engine.setInput(componentId, value),
+    settle: () => engine.settle(),
+    tick: () => engine.tick(),
+    reset: () => engine.reset(),
+    getSignal: (componentId, port) => engine.getSignal(componentId, port),
+    ...(engine.closeDocument ? { closeDocument: () => engine.closeDocument!() } : {}),
+    pickSavePath: (options) => platform.pickSavePath(options),
+    writeProjectFile: (filePath, content) => platform.writeProjectFile(filePath, content),
+    pickOpenPath: () => platform.pickOpenPath(),
+    readProjectFile: (filePath) => platform.readProjectFile(filePath),
   };
   // 记录每次健康检查看到的引擎进程代号：恢复流程靠「代号是否变化」区分「进程真的换了」
   // 与「一次超时之类的传输故障误伤了结构事务」——后者引擎还在，电路不需要重建。
