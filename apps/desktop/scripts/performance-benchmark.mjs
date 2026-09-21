@@ -89,6 +89,10 @@ function resultFor({ documentCount, measured }) {
     && (internalSignals?.staleResultsDropped ?? 0) > 0
     && (internalSignals?.continuousRunReads ?? 0) > 0
   );
+  const runtimeAdapters = measured.final.runtimeAdapterCount === documentCount
+    && Array.isArray(measured.final.runtimeAdapterKeys)
+    && measured.final.runtimeAdapterKeys.length === documentCount
+    && new Set(measured.final.runtimeAdapterKeys).size === documentCount;
   return {
   viewport: "1920x1080",
   components: Number(components),
@@ -125,6 +129,7 @@ function resultFor({ documentCount, measured }) {
     && interacted
     && measured.p95FrameMs <= 20
     && measured.final.documentCount === documentCount
+    && runtimeAdapters
     && measured.final.inactiveWork === 0
     && internalPass,
   };

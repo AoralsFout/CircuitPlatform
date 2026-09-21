@@ -85,6 +85,7 @@ test("multidocument benchmark uses production runtimes and adapter-observed work
   const desktopRoot = join(fileURLToPath(new URL(".", import.meta.url)), "..");
   const benchmark = await readFile(join(desktopRoot, "benchmark.html"), "utf8");
   const runner = await readFile(join(desktopRoot, "scripts", "performance-benchmark-runner.cjs"), "utf8");
+  const benchmarkScript = await readFile(join(desktopRoot, "scripts", "performance-benchmark.mjs"), "utf8");
   assert.match(benchmark, /useDocumentWorkspace\(\{ schedulerFactory/);
   assert.match(benchmark, /forDocument: \(documentKey\) => adapterFor\(documentKey\)/);
   assert.match(benchmark, /rootPaths = Array\.from\(\{ length: documentCount/);
@@ -99,6 +100,10 @@ test("multidocument benchmark uses production runtimes and adapter-observed work
   assert.doesNotMatch(benchmark, /const snapshot = ref\(/);
   assert.doesNotMatch(benchmark, /internalSignalReads\s*\+=/);
   assert.match(runner, /await window\.__driveInternalSignalFrame\(\)/);
+  assert.match(benchmarkScript, /measured\.final\.runtimeAdapterCount === documentCount/);
+  assert.match(benchmarkScript, /runtimeAdapterKeys\.length === documentCount/);
+  assert.match(benchmarkScript, /new Set\(measured\.final\.runtimeAdapterKeys\)\.size === documentCount/);
+  assert.match(benchmarkScript, /&& runtimeAdapters/);
 });
 
 test("hierarchy performance fixture reaches the production flattener at 500/1000 scale", async () => {
