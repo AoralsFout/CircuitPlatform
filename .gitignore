@@ -16,3 +16,7 @@ engine/build/
 Thumbs.db
 Desktop.ini
 apps/desktop/artifacts/visual-regression/
+
+# Circuits files
+circuits/
+circuits/*
