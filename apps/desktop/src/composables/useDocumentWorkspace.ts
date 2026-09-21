@@ -229,7 +229,7 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
     await activateRecord(parent);
     const revealed = await parent.editor.revealComponent(source.componentId);
     if (!revealed) drillDownSources.delete(child.key);
-    return true;
+    return revealed;
   }
 
   async function createNewDocument(): Promise<boolean> {

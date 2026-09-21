@@ -814,7 +814,12 @@ function onCanvasKeyboard(event: KeyboardEvent): void {
       allowSameDirectionDraftTarget = false;
       emit("connectionStart", port);
     }
-    else if (focusDataset?.focusKind === "component") emit("selectComponent", focusDataset.focusId ?? "");
+    else if (focusDataset?.focusKind === "component") {
+      const componentId = focusDataset.focusId ?? "";
+      const node = props.scene.nodes.find((candidate) => candidate.id === componentId);
+      if (event.key === "Enter" && node?.subcircuit?.status === "resolved") emit("openSubcircuit", componentId);
+      else emit("selectComponent", componentId);
+    }
     else if (focusDataset?.focusKind === "connection") emit("selectConnection", focusDataset.focusId ?? "");
   } else if (action.type === "cancel") {
     // 键盘微调的手势状态只存在本组件，必须先于其它分支清理。
