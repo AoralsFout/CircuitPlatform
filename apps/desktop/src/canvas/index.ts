@@ -995,6 +995,7 @@ export {
   MIN_VIEWPORT_ZOOM,
   applyWheelViewport,
   applyViewportWheel,
+  centerViewportOnPoint,
   clampViewportZoom,
   createViewportState,
   fitViewportToBounds,

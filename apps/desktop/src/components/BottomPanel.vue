@@ -41,6 +41,7 @@ const emit = defineEmits<{
   setPortWidth: [componentId: string, portName: string, width: number];
   setBitRanges: [componentId: string, ranges: readonly BitRange[]];
   reloadSubcircuit: [componentId: string];
+  openSubcircuit: [componentId: string];
 }>();
 
 /**
@@ -118,6 +119,13 @@ const waveformRange = computed(() => {
         <div v-if="inspector.subcircuit" class="inspector-subcircuit" aria-label="子电路状态">
           <div class="inspector-details"><span>引用：{{ inspector.subcircuit.relativePath }}</span><span role="status">状态：{{ subcircuitStatusLabel(inspector.subcircuit.status) }}</span></div>
           <p v-if="inspector.subcircuit.diagnostic" :id="`subcircuit-diagnostic-${inspector.id}`" class="inspector-hint" role="alert">{{ inspector.subcircuit.diagnostic }}</p>
+          <button
+            type="button"
+            :disabled="inspector.subcircuit.status !== 'resolved'"
+            :aria-describedby="inspector.subcircuit.diagnostic ? `subcircuit-diagnostic-${inspector.id}` : undefined"
+            :aria-label="`打开子电路 ${inspector.subcircuit.relativePath}`"
+            @click="emit('openSubcircuit', inspector.id)"
+          >打开子电路</button>
           <button type="button" :disabled="inspector.subcircuit.status === 'resolving'" :aria-describedby="inspector.subcircuit.diagnostic ? `subcircuit-diagnostic-${inspector.id}` : undefined" :aria-label="`重新加载子电路 ${inspector.subcircuit.relativePath}`" @click="emit('reloadSubcircuit', inspector.id)">重新加载子电路</button>
         </div>
         <div class="inspector-value"><span>当前信号</span><strong :class="signalStateClass(inspector.signal)">{{ inspector.signal }}</strong></div>

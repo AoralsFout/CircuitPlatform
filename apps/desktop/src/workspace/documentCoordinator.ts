@@ -2,6 +2,7 @@ import {
   parseProjectFile,
   projectPathIdentity,
   rebaseProjectFileReferences,
+  resolveProjectReference,
   serializeProjectFile,
   type ParsedProjectFile,
 } from "../project-file/index.ts";
@@ -130,6 +131,12 @@ export type CoordinatorCloseResult =
   | { ok: true; key: string; activeKey: string | null }
   | { ok: false; reason: "not-found" | "unsaved-changes"; key: string };
 
+/** Headless/UI 协调器共用的一跳下钻来源；不保存运行时或 DOM 引用。 */
+export interface CoordinatorDrillDownSource {
+  parentKey: string;
+  componentId: string;
+}
+
 export interface DocumentCoordinatorOptions {
   /** 打开已保存 Project 时使用的读文件桥接。 */
   reader: CoordinatorProjectReader;
@@ -228,6 +235,7 @@ export function createDocumentCoordinator(options: DocumentCoordinatorOptions) {
   let disposed = false;
   let recentProjects: RecentProject[] = readRecentProjects(options.writer?.storage);
   let pendingSaveConflict: CoordinatorSaveConflict | null = null;
+  const drillDownSources = new Map<string, CoordinatorDrillDownSource>();
 
   function nextKey(): string {
     let key = `document-${sequence++}`;
@@ -277,6 +285,22 @@ export function createDocumentCoordinator(options: DocumentCoordinatorOptions) {
     activeKey = key;
     openError = null;
     publish();
+    const source = drillDownSources.get(previous?.key ?? "");
+    if (source?.parentKey === key && previous !== undefined) await revealSource(previous.key, next);
+    return true;
+  }
+
+  /** 选择来源元件；视口精确居中由 live canvas editor facade 完成。 */
+  async function revealSource(childKey: string, parent: RuntimeRecord): Promise<boolean> {
+    const source = drillDownSources.get(childKey);
+    if (!source) return false;
+    const component = parent.snapshot.editor?.document.components.find((candidate) => candidate.id === source.componentId);
+    if (!component) {
+      drillDownSources.delete(childKey);
+      await parent.runtime.setSelection(null);
+      return false;
+    }
+    await parent.runtime.setSelection({ kind: "component", id: source.componentId });
     return true;
   }
 
@@ -368,6 +392,36 @@ export function createDocumentCoordinator(options: DocumentCoordinatorOptions) {
     try { return await operation; } finally { opening.delete(identity); }
   }
 
+  /** 以普通 openProject/dedupe 流程打开已解析的 Subcircuit，并替换最近一跳来源。 */
+  async function openSubcircuit(componentId: string): Promise<CoordinatorOpenResult> {
+    const parent = activeRecord();
+    const parentPath = parent?.snapshot.project.path;
+    const component = parent?.snapshot.editor?.document.components.find((candidate) => candidate.id === componentId);
+    const subcircuit = component?.kind === "subcircuit" ? component.data?.subcircuit : undefined;
+    const status = subcircuit?.status ?? (subcircuit?.diagnostic ? "unresolved" : "resolved");
+    if (!parent || parentPath === null || parentPath === undefined || !subcircuit || status !== "resolved") {
+      return { ok: false, error: subcircuit?.diagnostic?.message ?? "子电路尚未解析，无法打开。" };
+    }
+    const opened = await openProject(resolveProjectReference(subcircuit.reference, parentPath));
+    if (!opened.ok || opened.key === parent.key) return opened;
+    drillDownSources.set(opened.key, { parentKey: parent.key, componentId });
+    return opened;
+  }
+
+  /** 显式返回最近父文档；来源不存在时仅清除记录，不重新打开文件。 */
+  async function returnToParent(): Promise<boolean> {
+    const child = activeRecord();
+    const source = child ? drillDownSources.get(child.key) : undefined;
+    const parent = source ? byKey.get(source.parentKey) : undefined;
+    if (!child || !source) return false;
+    if (!parent) {
+      drillDownSources.delete(child.key);
+      return false;
+    }
+    await activate(parent.key);
+    return revealSource(child.key, parent);
+  }
+
   async function newDocument(): Promise<CoordinatorNewDocumentResult> {
     if (disposed) return { ok: false, error: "文档协调器已释放。" };
     const key = nextKey();
@@ -421,6 +475,8 @@ export function createDocumentCoordinator(options: DocumentCoordinatorOptions) {
     const record = byKey.get(key);
     if (record === undefined) return { ok: false, reason: "not-found", key };
     if (record.snapshot.project.isDirty && options.discard !== true) return { ok: false, reason: "unsaved-changes", key };
+    drillDownSources.delete(key);
+    for (const [childKey, source] of drillDownSources) if (source.parentKey === key) drillDownSources.delete(childKey);
     const index = records.indexOf(record);
     record.unsubscribe();
     record.runtime.destroy();
@@ -566,6 +622,7 @@ export function createDocumentCoordinator(options: DocumentCoordinatorOptions) {
     records.length = 0;
     byKey.clear();
     byIdentity.clear();
+    drillDownSources.clear();
     opening.clear();
     activeKey = null;
     openError = null;
@@ -612,6 +669,13 @@ export function createDocumentCoordinator(options: DocumentCoordinatorOptions) {
     saveAs,
     confirmSaveConflict,
     cancelSaveConflict,
+    openSubcircuit,
+    returnToParent,
+    canReturnToParent: () => {
+      const child = activeRecord();
+      const source = child ? drillDownSources.get(child.key) : undefined;
+      return Boolean(source && byKey.has(source.parentKey));
+    },
   };
   return coordinator;
 }

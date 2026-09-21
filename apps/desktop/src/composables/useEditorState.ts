@@ -1,4 +1,4 @@
-import { computed, ref, watch, type DeepReadonly, type Ref } from "vue";
+import { computed, nextTick, ref, watch, type DeepReadonly, type Ref } from "vue";
 import type { BitRange, ComponentKindName, PortSpec, Signal } from "@circuit-platform/protocol";
 import {
   readDefaultWireColor,
@@ -19,6 +19,7 @@ import {
   createNodeDragController,
   createRouteEditController,
   createViewportState,
+  centerViewportOnPoint,
   emptyCanvasScene,
   fitViewportToBounds,
   resizeViewport,
@@ -80,7 +81,7 @@ export type { WaveformRow };
 export function useEditorState(
   workspaceState: DeepReadonly<Ref<WorkspaceSnapshot>>,
   editorState: DeepReadonly<Ref<EditorSnapshot | null>>,
-  selectEditor: (selection: EditorSelection) => Promise<void>,
+  selectEditor: (selection: EditorSelection | null) => Promise<void>,
   moveComponent: (componentId: EditorComponentId, position: Point) => Promise<void> = async () => undefined,
   updatePlacement?: (center: Point, altKey?: boolean) => Promise<void>,
   editRoute: (connectionId: EditorConnectionId, route: readonly Point[]) => Promise<void> = async () => undefined,
@@ -397,6 +398,27 @@ export function useEditorState(
     void selectEditor({ kind: "component", id: componentId });
   }
 
+  /**
+   * 选择并定位一个已有元件；定位只改变临时视口与 DOM 焦点，不进入撤销历史。
+   * 元件已经被删除时清空选择并返回 false，让工作区安全清除悬空的下钻来源。
+   */
+  async function revealComponent(componentId: EditorComponentId): Promise<boolean> {
+    const node = canvasScene.value.nodes.find((candidate) => candidate.id === componentId);
+    if (!node) {
+      await selectEditor(null);
+      focusedId.value = null;
+      return false;
+    }
+    await selectEditor({ kind: "component", id: componentId });
+    viewportState.value = centerViewportOnPoint(viewportState.value, {
+      x: node.position.x + node.size.width / 2,
+      y: node.position.y + node.size.height / 2,
+    });
+    await nextTick();
+    focusedId.value = componentId;
+    return true;
+  }
+
   function selectConnection(connectionId: EditorConnectionId): void {
     void selectEditor({ kind: "connection", id: connectionId });
   }
@@ -515,6 +537,7 @@ export function useEditorState(
     setDefaultWireColor,
     rememberComponentKind,
     selectComponent,
+    revealComponent,
     selectConnection,
     setPortWidth,
     setBitRanges,

@@ -76,10 +76,22 @@ const emit = defineEmits<{
   connectionCancel: [];
   focusChange: [id: string | null];
   clearSelection: [];
+  openSubcircuit: [componentId: string];
 }>();
 
 const canvasElement = ref<HTMLElement | null>(null);
 let resizeObserver: ResizeObserver | null = null;
+
+// 工作区切回父文档时，revealComponent 先发布 focusedId；等场景 DOM 重建后把真实焦点
+// 放回来源节点，避免只显示视觉高亮而键盘焦点仍停留在旧标签。
+watch(() => props.interaction.focusedId, (id) => {
+  if (!id) return;
+  void nextTick(() => {
+    const target = Array.from(canvasElement.value?.querySelectorAll<HTMLElement>('[data-focus-kind="component"]') ?? [])
+      .find((element) => element.dataset.focusId === id);
+    target?.focus();
+  });
+});
 
 /**
  * 请求指针捕获，失败时保持交互继续。
@@ -722,6 +734,14 @@ function onNodeClick(nodeId: string): void {
   emit("selectComponent", nodeId);
 }
 
+/** 双击只对当前场景里仍已解析的 Subcircuit 发出下钻意图。 */
+function onNodeDoubleClick(nodeId: string): void {
+  if (props.interaction.connectionDraft) return;
+  const node = props.scene.nodes.find((candidate) => candidate.id === nodeId);
+  if (node?.subcircuit?.status !== "resolved") return;
+  emit("openSubcircuit", nodeId);
+}
+
 function focusPortTarget(target: HTMLElement): ConnectionDraftPort | null {
   const nodeId = target.dataset.nodeId;
   const portId = target.dataset.portId;
@@ -1009,7 +1029,7 @@ watch(() => props.scene.wires, async () => {
           </template>
           <path v-if="interaction.connectionDraft" class="signal-wire signal-wire--draft" :d="pathFor(interaction.connectionDraft)" />
         </svg>
-        <article v-for="node in scene.nodes" :key="node.id" v-memo="[node, interaction.focusedId, interaction.draggingComponentId, hoveredConnectionTarget]" class="circuit-node" :class="{ 'circuit-node--selected': node.selected, 'circuit-node--focused': interaction.focusedId === node.id, 'circuit-node--dragging': interaction.draggingComponentId === node.id }" :style="nodeStyle(node)" role="button" tabindex="0" data-canvas-focus data-focus-kind="component" :data-focus-id="node.id" :data-selected="node.selected ? 'true' : 'false'" :data-subcircuit-status="node.subcircuit?.status" :aria-label="node.subcircuit ? `${node.displayName}，${subcircuitStatusLabel(node.subcircuit.status)}${node.subcircuit.diagnostic ? `，${node.subcircuit.diagnostic}` : ''}` : `选择${node.kind.toUpperCase()} 元件`" @focus="emit('focusChange', node.id)" @pointerdown.stop="onNodePointerDown($event, node)" @click="onNodeClick(node.id)">
+        <article v-for="node in scene.nodes" :key="node.id" v-memo="[node, interaction.focusedId, interaction.draggingComponentId, hoveredConnectionTarget]" class="circuit-node" :class="{ 'circuit-node--selected': node.selected, 'circuit-node--focused': interaction.focusedId === node.id, 'circuit-node--dragging': interaction.draggingComponentId === node.id }" :style="nodeStyle(node)" role="button" tabindex="0" data-canvas-focus data-focus-kind="component" :data-focus-id="node.id" :data-selected="node.selected ? 'true' : 'false'" :data-subcircuit-status="node.subcircuit?.status" :aria-disabled="node.subcircuit ? node.subcircuit.status !== 'resolved' : undefined" :aria-label="node.subcircuit ? `${node.displayName}，${subcircuitStatusLabel(node.subcircuit.status)}${node.subcircuit.diagnostic ? `，${node.subcircuit.diagnostic}` : ''}` : `选择${node.kind.toUpperCase()} 元件`" @focus="emit('focusChange', node.id)" @pointerdown.stop="onNodePointerDown($event, node)" @click="onNodeClick(node.id)" @dblclick.stop="onNodeDoubleClick(node.id)">
           <template v-if="!node.subcircuit"><strong>{{ node.kind.toUpperCase() }}</strong></template>
           <template v-else><strong>{{ node.displayName }}</strong></template>
           <span v-for="port in node.ports" :key="port.id" class="node-port" :class="[port.direction === 'input' ? 'node-port--left' : 'node-port--right', signalStateClass(port.signal), { 'node-port--dangling': port.dangling, 'node-port--connection-target': isHoveredConnectionTarget(node.id, port.id) }]" :style="{ top: `${port.offset.y}px` }" :data-port-id="port.id" :data-node-id="node.id" :data-signal="port.signal" :data-dangling="port.dangling ? 'true' : 'false'" :data-focus-id="`port:${node.id}:${port.id}`" data-focus-kind="port" data-canvas-focus role="button" tabindex="0" :aria-label="`${port.direction === 'input' ? '输入' : '输出'}端口 ${port.label}，信号 ${port.signal}${port.dangling ? '，悬空' : ''}`" @focus="emit('focusChange', `port:${node.id}:${port.id}`)" @pointerdown.stop="onPortPointerDown($event, node, port)" @pointerup.stop="onPortPointerUp($event, node, port)" @click.stop="onPortClick($event)"><span class="node-port__anchor" aria-hidden="true"></span><span class="node-port__label">{{ port.label }}</span></span>

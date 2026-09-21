@@ -68,8 +68,11 @@ const {
   requestOpenRecent,
   tabs,
   activeDocumentKey,
+  canReturnToParent,
   activateTab,
   closeTab,
+  openSubcircuit,
+  returnToParent,
   requestLoadExample,
   addSubcircuitFromDialog,
   reloadSubcircuit,
@@ -247,6 +250,7 @@ onBeforeUnmount(() => {
       :recent-projects="recentProjects"
       :tabs="tabs"
       :active-document-key="activeDocumentKey"
+      :can-return-to-parent="canReturnToParent"
       @cycle-theme="cycleTheme"
       @check-engine="checkEngine"
       @new-document="requestNew"
@@ -256,6 +260,7 @@ onBeforeUnmount(() => {
       @save-as="saveProjectAs"
       @activate-tab="activateTab"
       @close-tab="closeTab"
+      @return-to-parent="returnToParent"
     />
 
     <section class="editor-layout" :class="{ 'editor-layout--sidebar-collapsed': !showSidebar || activeRailPage === 'settings' }">
@@ -349,6 +354,7 @@ onBeforeUnmount(() => {
           @connection-waypoint-remove-or-cancel="removeConnectionWaypointOrCancel"
           @connection-cancel="cancelConnection"
           @focus-change="focusCanvasObject"
+          @open-subcircuit="openSubcircuit"
           @viewport-change="setViewport"
           @resize="resizeCanvas"
           @placement-move="placementMoved"
@@ -373,6 +379,7 @@ onBeforeUnmount(() => {
           @set-port-width="setPortWidth"
           @set-bit-ranges="setBitRanges"
           @reload-subcircuit="reloadSubcircuit"
+          @open-subcircuit="openSubcircuit"
           :waveform="state.waveform"
           :waveform-rows="waveformRows"
           @select-tab="bottomTab = $event"

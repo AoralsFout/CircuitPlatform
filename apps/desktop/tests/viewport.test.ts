@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   applyWheelViewport,
+  centerViewportOnPoint,
   createViewportState,
   fitViewportToBounds,
   isViewportPanPointer,
@@ -51,6 +52,14 @@ test("fit-to-window centers complete circuit and resize preserves world center",
   const beforeCenter = screenToWorld({ x: 400, y: 250 }, fitted);
   const resized = resizeViewport(fitted, { width: 1000, height: 700 });
   assert.deepEqual(screenToWorld({ x: 500, y: 350 }, resized), beforeCenter);
+});
+
+test("centering a source node preserves zoom and places its center in the viewport center", () => {
+  const viewport = createViewportState({ width: 800, height: 500 }, { x: 120, y: 20, zoom: 1.75 });
+  const centered = centerViewportOnPoint(viewport, { x: 100, y: 60 });
+  assert.equal(centered.zoom, viewport.zoom);
+  assert.deepEqual(worldToScreen({ x: 100, y: 60 }, centered), { x: 400, y: 250 });
+  assert.deepEqual(viewport.visibleRect, centered.visibleRect);
 });
 
 test("ctrl/cmd wheel zooms around the pointer instead of translating", () => {
