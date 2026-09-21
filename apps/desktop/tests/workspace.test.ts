@@ -754,6 +754,54 @@ test("advances the clock one tick per single step with a single round trip", asy
   assert.equal(second.canStep, true);
 });
 
+test("projects a full tick snapshot into stable internal rows without per-port reads", async () => {
+  const engine = new FakeEngine();
+  const workspace = createWorkspace(engine);
+  await workspace.checkEngine();
+  const loaded = await workspace.loadCircuit({
+    components: [{ id: "flat-dff", flatId: "unit-a/state", kind: "d_flip_flop" }],
+    connections: [],
+    internalComponents: [{
+      ownerId: "unit-a",
+      flatId: "unit-a/state",
+      kind: "d_flip_flop",
+      displayName: "状态寄存器",
+      path: ["unit-a", "state"],
+      ports: builtInPortsById({ dff: "d_flip_flop" }).dff!,
+    }],
+  });
+  assert.ok(loaded.bindings);
+  const before = engine.calls.length;
+  await workspace.step();
+  assert.equal(engine.calls.slice(before).filter((call) => call.type === "tick").length, 1);
+  assert.equal(engine.calls.slice(before).filter((call) => call.type === "getSignal").length, 0);
+  const snapshot = workspace.snapshot();
+  assert.equal(snapshot.internalComponents?.[0]?.flatId, "unit-a/state");
+  assert.equal(snapshot.internalSignals?.["unit-a/state:q"], "X");
+});
+
+test("coalesces identical visible internal reads on the document queue", async () => {
+  const engine = new FakeEngine();
+  const workspace = createWorkspace(engine);
+  await workspace.checkEngine();
+  await workspace.loadCircuit({
+    components: [{ id: "flat-gate", flatId: "unit-a/gate", kind: "and" }],
+    connections: [],
+    internalComponents: [{
+      ownerId: "unit-a",
+      flatId: "unit-a/gate",
+      kind: "and",
+      displayName: "与门",
+      path: ["unit-a", "gate"],
+      ports: builtInPortsById({ gate: "and" }).gate!,
+    }],
+  });
+  const read = [{ key: "unit-a/gate:out", flatId: "unit-a/gate", port: "out" }];
+  const before = engine.calls.filter((call) => call.type === "getSignal").length;
+  await Promise.all([workspace.readInternalSignals(read), workspace.readInternalSignals(read)]);
+  assert.equal(engine.calls.filter((call) => call.type === "getSignal").length - before, 1);
+});
+
 test("records the advanced reading in the waveform instead of the previous settle", async () => {
   const engine = new FakeEngine();
   const workspace = createWorkspace(engine);

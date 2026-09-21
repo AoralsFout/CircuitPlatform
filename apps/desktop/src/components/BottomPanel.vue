@@ -143,6 +143,15 @@ const waveformRange = computed(() => {
         <div class="inspector-port-list" aria-label="端口信号">
           <span v-for="port in inspector.ports" :key="port.id" class="inspector-port-row"><span>{{ port.direction === 'input' ? '输入' : '输出' }} · {{ port.label }}（{{ port.width }} 位）</span><strong :class="signalStateClass(port.signal)">{{ port.signal }}</strong><small>{{ port.connectionState === 'connected' ? '已连接' : port.connectionState === 'dangling' ? '悬空' : '未连接' }}</small></span>
         </div>
+        <section v-if="inspector.internalTable" class="inspector-internal-table" aria-label="子电路内部实时信号" aria-readonly="true">
+          <div class="inspector-internal-heading"><strong>使用处内部信号</strong><span>父电路展平副本 · 只读</span></div>
+          <p v-if="inspector.internalTable.diagnostic" class="inspector-hint" role="alert">{{ inspector.internalTable.diagnostic }}</p>
+          <div v-for="component in inspector.internalTable.components" :key="component.id" class="inspector-internal-component">
+            <div class="inspector-internal-component-heading"><span>{{ component.displayName }}</span><small>{{ component.kind }} · {{ component.path.join(' / ') }}</small></div>
+            <div v-for="port in component.ports" :key="port.id" class="inspector-port-row"><span>{{ port.direction === 'input' ? '输入' : '输出' }} · {{ port.label }}（{{ port.width }} 位）</span><strong :class="signalStateClass(port.signal)">{{ port.signal }}</strong></div>
+          </div>
+          <span v-if="inspector.internalTable.components.length === 0" class="inspector-empty">当前使用处没有可展示的内部元件。</span>
+        </section>
       </template>
       <template v-else-if="inspector?.kind === 'wire'">
         <div class="bottom-inspector-heading"><div><span class="eyebrow">WIRE</span><strong>选中 Wire</strong></div><span class="inspector-kind">{{ inspector.status === 'dangling' ? '悬空' : '正常' }}</span></div>

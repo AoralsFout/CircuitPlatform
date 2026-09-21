@@ -9,6 +9,7 @@ import {
   type EditorComponent,
   type EditorComponentKind,
   type EditorComponentId,
+  type InternalComponentDescriptor,
   type EditorDocument,
   type EditorProjectionInput,
   type Point,
@@ -29,6 +30,7 @@ import {
   type SimulationBindings,
   type TickScheduler,
   type WorkspaceSnapshot,
+  type InternalSignalRead,
 } from "../workspace/index.ts";
 import { createEngineCallQueue } from "../workspace/engineQueue.ts";
 import {
@@ -161,6 +163,8 @@ export interface WorkspaceBinding {
   reset(): Promise<void>;
   /** 设置某个 Input 某一位的取值；运行中只提交 `set_input`，停止或暂停时提交后立刻求值。 */
   setInputBit(key: InputKey, index: number, bit: InputBit): Promise<void>;
+  /** 设置只读内部信号表的可见性；隐藏时不会发起内部 Port 读取。 */
+  setInternalSignalTableVisible(visible: boolean): void;
   select(selection: EditorSelection): Promise<void>;
   moveComponent(componentId: EditorComponentId, position: Point): Promise<void>;
   editRoute(connectionId: string, route: readonly Point[]): Promise<void>;
@@ -402,6 +406,8 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   let unsubscribeEditor: (() => void) | null = null;
   /** 当前文档已经显式采用的层次投影；引擎重建只复用它，绝不重新读取磁盘。 */
   let adoptedHierarchy: FlattenProjectResult | null = null;
+  /** 层次投影事务成功发布前，供绑定回调使用的新稳定描述。 */
+  let pendingHierarchyForBindings: FlattenProjectResult | null = null;
   /** 与 `adoptedHierarchy` 对应、可直接重建到空引擎的扁平 Circuit。 */
   let adoptedCircuit: CircuitDocument | null = null;
   /** 当前显式采用的 Project 图快照；普通编辑与引擎重建只读这份内存图。 */
@@ -419,9 +425,60 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   }>();
   let nextProjectionRevision = 1;
   let simulationRefreshRequested = false;
+  let internalSignalTableVisible = false;
+  let internalReadRevision = 0;
+  let internalReadInFlight: Promise<void> | null = null;
+  let internalReadQueued = false;
   /** 恢复循环是否在跑：防止同一次不可用触发多条并行的恢复路径。 */
   let recovering = false;
   let recoveryWaitCancel: (() => void) | null = null;
+
+  /** 只为当前活动、已解析的 Subcircuit 组装按需读取计划。 */
+  function visibleInternalReads(): InternalSignalRead[] {
+    if (!internalSignalTableVisible || editor === null || state.value.engineState !== "ready") return [];
+    const selection = editor.snapshot().selection;
+    if (selection?.kind !== "component") return [];
+    const selected = editor.snapshot().document.components.find((component) => component.id === selection.id);
+    if (selected?.kind !== "subcircuit" || selected.data?.subcircuit?.status !== "resolved") return [];
+    return (state.value.internalComponents ?? [])
+      .filter((descriptor) => descriptor.ownerId === selected.id)
+      .flatMap((descriptor) => descriptor.ports.map((port) => ({
+        key: `${descriptor.flatId}:${port.name}`,
+        flatId: descriptor.flatId,
+        port: port.name,
+      })));
+  }
+
+  /**
+   * 可见性驱动的读取调度。一次读取结束前的重复请求只留下最后目标，
+   * 结果携带的 revision 失配时不发布到当前文档/选择。
+   */
+  function refreshVisibleInternalSignals(): void {
+    const revision = ++internalReadRevision;
+    const reads = visibleInternalReads();
+    if (reads.length === 0) return;
+    if (internalReadInFlight !== null) {
+      internalReadQueued = true;
+      return;
+    }
+    internalReadInFlight = (async () => {
+      const result = await workspace.readInternalSignals(reads);
+      if (disposed || revision !== internalReadRevision || !internalSignalTableVisible) return;
+      state.value = result.snapshot;
+    })().finally(() => {
+      internalReadInFlight = null;
+      if (internalReadQueued) {
+        internalReadQueued = false;
+        refreshVisibleInternalSignals();
+      }
+    });
+  }
+
+  function setInternalSignalTableVisible(visible: boolean): void {
+    internalSignalTableVisible = visible;
+    internalReadRevision += 1;
+    if (visible) refreshVisibleInternalSignals();
+  }
 
   const projectPath = shallowRef<string | null>(null);
   const projectVersion = shallowRef<string | null>(null);
@@ -601,6 +658,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     const next = await pending;
     if (disposed) return;
     state.value = next;
+    refreshVisibleInternalSignals();
     if (state.value.engineState === "unavailable" || state.value.engineState === "error") {
       beginRecovery();
     }
@@ -675,6 +733,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     const ports: Record<string, readonly PortSpec[]> = {};
     const componentFlatIds: Record<string, readonly string[]> = {};
     const connectionFlatIds: Record<string, readonly string[]> = {};
+    const internalComponents = internalComponentsFromHierarchy(hierarchy, flatBindings);
 
     for (const component of hierarchy.document.components) {
       const flatIds = hierarchy.sources.components[component.id] ?? [];
@@ -718,7 +777,21 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
       componentFlatIds,
       connectionFlatIds,
       portSources,
+      internalComponents,
     };
+  }
+
+  /** 在编辑器局部事务重新发布绑定时，继续携带当前采用层次的内部描述。 */
+  function internalComponentsFromHierarchy(
+    hierarchy: FlattenProjectResult,
+    flatBindings: SimulationBindings,
+  ): InternalComponentDescriptor[] {
+    return Object.values(hierarchy.sources.internalComponents)
+      .flatMap((descriptors) => descriptors.map((descriptor) => ({
+        ...descriptor,
+        path: [...descriptor.path],
+        ports: flatBindings.ports?.[descriptor.flatId] ?? descriptor.ports,
+      })));
   }
 
   /** 把层次解析器的稳定来源映射转换成编辑器事务所需的扁平投影。 */
@@ -822,7 +895,13 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   ): Promise<boolean> {
     if (editor === null) return false;
     const revision = `hierarchy-${nextProjectionRevision++}`;
-    const result = await editor.replaceProjection(editorProjectionFromHierarchy(hierarchy, forceReplaceOwner, revision));
+    pendingHierarchyForBindings = hierarchy;
+    let result: CommandResult;
+    try {
+      result = await editor.replaceProjection(editorProjectionFromHierarchy(hierarchy, forceReplaceOwner, revision));
+    } finally {
+      pendingHierarchyForBindings = null;
+    }
     editorState.value = snapshotWithStaleMetadata(result.snapshot);
     await refreshSimulationAfterBindingsChange();
     if (!result.ok) {
@@ -873,6 +952,13 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
         source: { ...connection.source },
         target: { ...connection.target },
       })),
+      ...(Object.values(hierarchy.sources.internalComponents).flat().length > 0
+        ? { internalComponents: Object.values(hierarchy.sources.internalComponents).flat().map((descriptor) => ({
+          ...descriptor,
+          path: [...descriptor.path],
+          ports: descriptor.ports.map((port) => ({ ...port, ...(port.bitRange ? { bitRange: { ...port.bitRange } } : {}) })),
+        })) }
+        : {}),
     };
   }
 
@@ -1057,6 +1143,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
       : projectVersionOf(projectFiles.get(projectPathIdentity(path))!);
     if (adopted !== null && projectFiles !== null) captureOccurrenceVersions(adopted, projectFiles);
     publishStaleMetadata();
+    refreshVisibleInternalSignals();
     saveError.value = null;
     openError.value = null;
   }
@@ -1076,7 +1163,19 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
         // EditorSession 只询问一个布尔可用性 seam；引擎状态仍留在 Workspace 快照中。
         isEngineAvailable: () => workspace.snapshot().engineState === "ready",
         onBindingsChanged(nextBindings) {
-          state.value = workspace.rebindSimulation(nextBindings);
+          const hierarchyForBindings = pendingHierarchyForBindings ?? adoptedHierarchy;
+          const projected = hierarchyForBindings === null
+            ? nextBindings
+            : {
+                ...nextBindings,
+                // EditorSession keeps componentKinds as a non-enumerable compatibility
+                // property on its callback projection. Re-state it explicitly when
+                // adding hierarchy-only internal descriptors so runtime derivation
+                // still recognizes Input/Output components.
+                ...(nextBindings.componentKinds !== undefined ? { componentKinds: nextBindings.componentKinds } : {}),
+                internalComponents: internalComponentsFromHierarchy(hierarchyForBindings, nextBindings),
+              };
+          state.value = workspace.rebindSimulation(projected);
           simulationRefreshRequested = true;
         },
       },
@@ -1084,6 +1183,9 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     editorState.value = snapshotWithStaleMetadata(editor.snapshot());
     unsubscribeEditor = editor.subscribe((snapshot) => {
       editorState.value = snapshotWithStaleMetadata(snapshot);
+      // Selection/projection changes invalidate any in-flight instance read. A
+      // visible inspector is refreshed only for the latest resolved owner.
+      refreshVisibleInternalSignals();
     });
     // 新会话的初始文档就是脏标记的基线：加载（示例或项目）之后是干净的，改动才置脏。
     savedFileSnapshot = serializeCurrentProjectFile();
@@ -1863,6 +1965,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     step,
     reset,
     setInputBit,
+    setInternalSignalTableVisible,
     select: (selection) => dispatch({ type: "select", selection }),
     moveComponent: (componentId, position) => dispatch({ type: "move-component", componentId, position }),
     editRoute: (connectionId, route) => dispatch({ type: "edit-route", connectionId, route }),

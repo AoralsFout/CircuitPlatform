@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from "vue";
+import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import BottomPanel from "./components/BottomPanel.vue";
 import CircuitCanvas from "./components/CircuitCanvas.vue";
 import ClearCanvasDialog from "./components/ClearCanvasDialog.vue";
@@ -27,6 +27,7 @@ const {
   step,
   reset,
   setInputBit,
+  setInternalSignalTableVisible,
   select,
   moveComponent,
   deleteSelection,
@@ -145,6 +146,14 @@ const {
 const ZOOM_STEP = 10;
 
 const isBottomPanelExpanded = ref(true);
+
+// Internal instance reads are visibility-driven. The document binding keeps the
+// latest selection/projection revision and cancels publication of stale results.
+watch(
+  [isBottomPanelExpanded, bottomTab, () => editorState.value?.selection],
+  () => setInternalSignalTableVisible(isBottomPanelExpanded.value && bottomTab.value === "inspector"),
+  { immediate: true, deep: true },
+);
 
 function toggleBottomPanel(): void {
   isBottomPanelExpanded.value = !isBottomPanelExpanded.value;

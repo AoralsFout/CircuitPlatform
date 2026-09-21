@@ -78,6 +78,23 @@ export type EditorConnectionId = string;
 export type EngineComponentId = number;
 export type EngineConnectionId = number;
 
+/**
+ * 只读 Subcircuit 检查器使用的稳定扁平元件描述。
+ *
+ * `flatId` 是层次展平产生的来源身份；这里刻意不携带临时 Engine ID，避免
+ * 引擎重建或其它文档的运行时状态泄漏到 UI。`ownerId` 指向顶层可见的
+ * Subcircuit 使用处，`path` 保留 occurrence 层次，允许同一子 Project 的
+ * 多个使用处分别投影各自的内部状态。
+ */
+export interface InternalComponentDescriptor {
+  ownerId: EditorComponentId;
+  flatId: string;
+  kind: ComponentKindName;
+  displayName: string;
+  path: readonly string[];
+  ports: readonly PortSpec[];
+}
+
 /** 一个顶层编辑器对象所拥有的扁平引擎 Component 身份。普通对象通常只有一个。 */
 export type EngineComponentBinding = EngineComponentId | readonly EngineComponentId[];
 
