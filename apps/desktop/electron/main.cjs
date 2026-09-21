@@ -52,7 +52,10 @@ function createWindow() {
     }
   });
 
-  if (app.isPackaged || process.env.CIRCUIT_PLATFORM_PRODUCTION === "1") {
+  if (process.env.CIRCUIT_PLATFORM_E2E_URL) {
+    // 专用真实 E2E 页面仍使用本文件注册的 IPC handler 与 preload，只替换渲染入口。
+    window.loadURL(process.env.CIRCUIT_PLATFORM_E2E_URL);
+  } else if (app.isPackaged || process.env.CIRCUIT_PLATFORM_PRODUCTION === "1") {
     window.loadFile(path.resolve(__dirname, "../dist/index.html"));
   } else {
     window.loadURL("http://127.0.0.1:5173");
@@ -99,6 +102,13 @@ app.whenReady().then(() => {
     engineClients.closeDocument(documentKey);
     return { ok: true };
   });
+  if (process.env.CIRCUIT_PLATFORM_E2E === "1") {
+    ipcMain.handle("engine:e2e-kill", (_event, documentKey) => {
+      const client = engineClients.clientFor(requireDocumentKey(documentKey));
+      const processHandle = client.engine;
+      return { ok: processHandle !== null && processHandle.kill() };
+    });
+  }
   // 项目文件通道只做对话框与 IO：序列化与校验在渲染层，校验规则只有一份实现（规格 #34）。
   // 参数校验失败按既有通道惯例抛 TypeError；文件系统失败进结果对象，让渲染层拿到可展示原因。
   ipcMain.handle("project:pick-save-path", async (event, options) => {
