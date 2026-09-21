@@ -79,6 +79,14 @@ interface ProjectFileBridge {
   readProjectFile(filePath: string): Promise<{ ok: true; content: string } | { ok: false; reason: string; code?: string }>;
 }
 
+interface DocumentEngineBridge extends EngineAdapter {
+  closeDocument?: () => Promise<{ ok: true }>;
+}
+
+interface PlatformBridge extends DocumentEngineBridge, ProjectFileBridge {
+  forDocument?: (documentKey: string) => DocumentEngineBridge;
+}
+
 /** 顶栏保存状态的三个可见语义：已保存、有未保存改动、最近一次保存失败。 */
 export type ProjectSaveState = "saved" | "dirty" | "error";
 
@@ -114,7 +122,9 @@ interface HierarchyRefreshRoot {
 /** 置脏确认挂起的文件操作种类；`open` 可能携带最近项目入口挂起的路径。 */
 type PendingFileActionKind = "open" | "new" | "load-example";
 
-interface WorkspaceBinding {
+export interface WorkspaceBinding {
+  /** 释放此文档的恢复调度、编辑器订阅和按文档引擎进程。 */
+  dispose(): void;
   state: DeepReadonly<Ref<WorkspaceSnapshot>>;
   editorState: DeepReadonly<Ref<EditorSnapshot | null>>;
   bootstrap(): Promise<void>;
@@ -269,6 +279,8 @@ export interface UseWorkspaceOptions {
    * 测试注入手动点火的假实现即可无头驱动恢复循环。
    */
   recoveryScheduler?: TickScheduler;
+  /** 文档引擎键；省略时保留单文档兼容桥接。 */
+  documentKey?: string;
 }
 
 /**
@@ -276,7 +288,17 @@ export interface UseWorkspaceOptions {
  * @returns 只读仿真/编辑器快照，以及基于稳定 editor ID 的界面操作。
  */
 export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBinding {
-  const adapter = (window as unknown as { circuitPlatform: EngineAdapter & ProjectFileBridge }).circuitPlatform;
+  const platform = (window as unknown as { circuitPlatform: PlatformBridge }).circuitPlatform;
+  const engine = options.documentKey !== undefined && typeof platform.forDocument === "function"
+    ? platform.forDocument(options.documentKey)
+    : platform;
+  const adapter: DocumentEngineBridge & ProjectFileBridge = {
+    ...engine,
+    pickSavePath: platform.pickSavePath,
+    writeProjectFile: platform.writeProjectFile,
+    pickOpenPath: platform.pickOpenPath,
+    readProjectFile: platform.readProjectFile,
+  };
   // 记录每次健康检查看到的引擎进程代号：恢复流程靠「代号是否变化」区分「进程真的换了」
   // 与「一次超时之类的传输故障误伤了结构事务」——后者引擎还在，电路不需要重建。
   let lastKnownEngineEpoch: number | null = null;
@@ -337,6 +359,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   let simulationRefreshRequested = false;
   /** 恢复循环是否在跑：防止同一次不可用触发多条并行的恢复路径。 */
   let recovering = false;
+  let disposed = false;
 
   const projectPath = shallowRef<string | null>(null);
   const isDirty = shallowRef(false);
@@ -734,6 +757,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     let rebuildFailed = false;
     try {
       for (;;) {
+        if (disposed) return;
         // 恢复期间的检查走原始 adapter：包装层会顺手刷新「最近确认在线的进程代号」，
         // 而这里的比较恰恰要拿「恢复开始之前」记录的代号来判断进程有没有换过。
         let health: EngineHealth;
@@ -1560,6 +1584,13 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   }
 
   return {
+    dispose() {
+      disposed = true;
+      unsubscribeEditor?.();
+      unsubscribeEditor = null;
+      workspace.pause();
+      void adapter.closeDocument?.();
+    },
     state: readonly(state),
     editorState: readonly(editorState),
     bootstrap: checkEngine,

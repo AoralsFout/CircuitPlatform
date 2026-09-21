@@ -10,11 +10,11 @@ import ToolRail from "./components/ToolRail.vue";
 import TopBar from "./components/TopBar.vue";
 import UnsavedChangesDialog from "./components/UnsavedChangesDialog.vue";
 import WorkspaceSidebar from "./components/WorkspaceSidebar.vue";
-import { useEditorState } from "./composables/useEditorState";
+import { useDocumentWorkspace } from "./composables/useDocumentWorkspace";
 import { useThemePreference } from "./composables/useThemePreference";
-import { useWorkspace } from "./composables/useWorkspace";
 import { isEditableKeyboardTarget, resolveEditorShortcut } from "./editor/keyboard";
 
+const documentWorkspace = useDocumentWorkspace();
 const {
   state,
   editorState,
@@ -62,10 +62,14 @@ const {
   cancelPendingFileAction,
   recentProjects,
   requestOpenRecent,
+  tabs,
+  activeDocumentKey,
+  activateTab,
+  closeTab,
   requestLoadExample,
   addSubcircuitFromDialog,
   reloadSubcircuit,
-} = useWorkspace();
+} = documentWorkspace;
 const {
   selectedConnection,
   sidebarComponents,
@@ -120,7 +124,7 @@ const {
   focusCanvasObject,
   setPortWidth,
   setBitRanges,
-} = useEditorState(state, editorState, select, moveComponent, updatePlacement, editRoute, createConnection, setPortWidthCommand);
+} = documentWorkspace.editor;
 const {
   preference: themePreference,
   label: themeLabel,
@@ -232,6 +236,8 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
       :save-error="saveError"
       :can-save="canSave"
       :recent-projects="recentProjects"
+      :tabs="tabs"
+      :active-document-key="activeDocumentKey"
       @cycle-theme="cycleTheme"
       @check-engine="checkEngine"
       @new-document="requestNew"
@@ -239,6 +245,8 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
       @open-recent-project="requestOpenRecent"
       @save="saveProject"
       @save-as="saveProjectAs"
+      @activate-tab="activateTab"
+      @close-tab="closeTab"
     />
 
     <section class="editor-layout" :class="{ 'editor-layout--sidebar-collapsed': !showSidebar || activeRailPage === 'settings' }">
