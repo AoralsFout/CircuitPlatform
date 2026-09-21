@@ -15,7 +15,7 @@ function requireDocumentKey(documentKey) {
  */
 function createDocumentEngineBridge(documentKey) {
   const key = requireDocumentKey(documentKey);
-  return {
+  const bridge = {
     checkEngine: () => ipcRenderer.invoke("engine:health", key),
     addComponent: (kind, ports) => ipcRenderer.invoke("engine:add-component", key, kind, ports),
     addConnection: (source, target) => ipcRenderer.invoke("engine:add-connection", key, source, target),
@@ -29,6 +29,11 @@ function createDocumentEngineBridge(documentKey) {
     setPortWidth: (componentId, ports) => ipcRenderer.invoke("engine:set-port-width", key, componentId, ports),
     closeDocument: () => ipcRenderer.invoke("engine:close-document", key),
   };
+  // 只在专用真实 E2E 进程暴露按文档故障注入；生产渲染器没有这个能力。
+  if (process.env.CIRCUIT_PLATFORM_E2E === "1") {
+    bridge.killForTest = () => ipcRenderer.invoke("engine:e2e-kill", key);
+  }
+  return bridge;
 }
 
 const defaultEngineBridge = createDocumentEngineBridge(DEFAULT_DOCUMENT_KEY);
