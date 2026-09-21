@@ -13,7 +13,7 @@
 - Phase 4.5：多位 Port 与总线，已完成（七个交付切片全部落地，端到端回归与截图基准由 issue #32 收口；逐条记录见本文件 `### Phase 4.5` 的「已交付」各节，已知限制见其中「已交付（切片 7）」一节）；
 - Phase 5：波形和持久化，已完成（六个交付切片全部落地，规格 #34，票 #35–#42，逐条记录见本文件 `### Phase 5` 的「已交付」各节）；
 - Phase 5.5：层次化电路，已完成（按引用组合、递归展平、手动重载、历史事务、持久化与真实引擎回归已落地）；
-- Phase 5.6：多文档与下钻，未开始；
+- Phase 5.6：多文档与下钻，运行时实现已落地，真实 E2E、视觉矩阵、1/5/10 性能矩阵和最终证据待集成验证；在证据补齐前不标记完成；
 - Phase 6：工程化和发布，未开始。
 
 Phase 0–2.5 已建立 C++ 电路模型、组合逻辑求值、组合环路检测，以及 Electron 与 C++ 引擎之间可复现的 JSON Lines 会话。Phase 3 已完成：切片 1、2、3 的全部工程步骤均已交付，画布是数据驱动的场景投影，AND 示例与用户搭建的电路走同一条通用文档路径，不再有专用仿真投影，指针与键盘两条路径都具备完整编辑能力。切片 3 的性能验收此前未达标，已于 2026-09-18 修复指针热路径的强制同步重排与信号层的排版动画，五种交互模式的 P95 从 60–94ms 降到 0.2–7.1ms，全部满足 20ms 预算。
@@ -406,11 +406,12 @@ issue #20 接上了 `tick` 的第 ④ 步：
 - 工作区以标签页承载多份打开的 Project，始终只有一份活动文档；不做分屏，不做多窗口；
 - 同一份 Project 只存在一个标签。已保存文档的身份是它的规范化绝对路径；未保存的文档同样占有一个标签，以临时身份标识（如「未命名 1」），但它不能被 Subcircuit 引用，也不参与按路径去重。保存时身份从临时切换为路径，该路径已在标签栏时合并到已有标签；
 - 每份文档持有独立的引擎进程、独立的 `EditorSession` 和独立的视图状态；切走的文档冻结但保留信号快照、波形历史和 DFlipFlop 状态；
+- Electron 主进程通过 `EngineClientPool` 按文档键拥有连接和进程；`createDocumentCoordinator` 是无头标签/路径/来源 seam，生产 `useDocumentWorkspace` 为每个 Controller 创建独立 Workspace、EditorSession、视图、tick/recovery scheduler 和 `preload.forDocument(key)` adapter；两者均不把 Engine ID 暴露到项目或 Vue API；
 - 双击画布上的 Subcircuit 打开它引用的子 Project，作为一份完全同权的可编辑文档；检查器提供键盘可达的等价入口；
-- 子文档记录一跳来源，任何方式切回父文档都选中并居中该来源实例；不引入导航栈；
-- 子 Project 的未保存改动只存在于子文档自己的标签页，不改变父电路使用的展平副本；保存后父文档出现"需重新加载"提示，重载仍由用户显式触发；
+- 子文档按 `childKey → { parentKey, sourceComponentId }` 记录一跳来源，任何方式切回父文档都选中并居中该来源实例；关闭父文档清理指向它的所有来源，关闭子文档只清理自身；不引入导航栈或自动重新打开；
+- 子 Project 的未保存改动只存在于子文档自己的标签页，不改变父电路使用的展平副本；成功保存后按“规范化路径 + occurrence”广播 stale，父文档出现"需重新加载"提示，重载仍由用户显式触发且只清除成功的 occurrence；
 - "未解析"的 Subcircuit 禁止下钻，并给出可展示的原因；
-- 实例内部实时信号以只读信号表呈现在检查器中，显示的是**父电路展平副本**的状态，不是子文档标签页的状态。
+- 实例内部实时信号以只读信号表呈现在检查器中，显示的是**父电路展平副本**的状态，不是子文档标签页的状态；只为活动、选中且可见的 occurrence 调度读取，隐藏时零读取，结果以文档/选择/projection revision 丢弃迟到值。
 
 交付切片，全部完成后才视为本阶段完成：
 
@@ -418,6 +419,10 @@ issue #20 接上了 `tick` 的第 ④ 步：
 2. 工作区与标签页：文档身份与单选去重、每文档一份 `EditorSession` 与视图状态、信号与波形的键空间加文档维度；
 3. 下钻与来源：画布双击与检查器入口、来源记录与返回高亮、未解析禁用下钻、未保存改动不穿透、保存后的"需重新加载"提示；
 4. 实例内部实时信号：检查器中的只读信号表。
+
+上述四个代码切片在当前实现中已有对应模块和单元/集成 seam，但“切片完成”不等于
+Phase 5.6 已闭合：生产 BrowserWindow/preload/IPC 的多文档场景、视觉事实和文档数
+性能证据必须由下表命令补齐。
 
 验收标准：
 
@@ -431,6 +436,30 @@ issue #20 接上了 `tick` 的第 ④ 步：
 - 选中已解析的 Subcircuit 时，检查器显示其展平副本的实时信号；同一子 Project 在父电路中被放入多份时，两份状态互不影响；
 - 活动文档的帧耗时仍满足 Phase 3 的基准，且与打开的文档数无关；
 - 类型检查和非视觉自动化测试通过 `pnpm verify`。
+
+### Phase 5.6 验收证据矩阵（待集成填写）
+
+不要用 headless coordinator、单文档 temporal E2E 或既有单文档性能数字替代下列证据。
+本分支未运行这些命令；命令成功、版本和结果由集成分支补录。
+
+| 证据 | 命令 | 必须记录 | 当前状态 |
+| --- | --- | --- | --- |
+| 真实多文档 E2E | `pnpm --filter @circuit-platform/desktop test:multidocument-e2e` | 真实 Project 文件 → BrowserWindow/preload IPC → JSON Lines → C++；双 occurrence、显式重载、单文档 kill/recovery、关闭清理 | 待集成验证 |
+| 统一验证 | `pnpm verify` | 类型检查、非视觉自动化测试和构建结果 | 待集成验证 |
+| 视觉截图 | `pnpm --filter @circuit-platform/desktop visual:test -- --state=multi-tabs,multi-tabs-narrow,long-name,unnamed-tabs,unsaved-tab,needs-reload,unresolved-drill,engine-unavailable,internal-signals,source-return` | 深/浅色 × 普通/窄窗口截图供人工检查 | 待集成验证 |
+| 视觉事实 | `pnpm --filter @circuit-platform/desktop visual:probe` | tab/ARIA、dirty/stale/unresolved/unavailable、禁用下钻、来源居中、内部行和值 | 待集成验证 |
+| 1/5/10 平移 | `pnpm --filter @circuit-platform/desktop performance:benchmark --mode=pan --documents=1,5,10` | 每个文档数的 active P95 ≤ 20ms、`interacted`、inactiveWork | 待集成验证 |
+| 1/5/10 拖动 | `pnpm --filter @circuit-platform/desktop performance:benchmark --mode=drag --documents=1,5,10` | 同上，且真实 RAF 诊断字段保留 | 待集成验证 |
+| 内部信号 | `pnpm --filter @circuit-platform/desktop performance:benchmark --mode=internal-signals --documents=1,5,10` | hidden/visible/rapid/running：隐藏零读取、迟到 revision 丢弃、读取不阻塞帧 | 待集成验证 |
+
+### Phase 5.6 已知限制
+
+- 引擎进程和 EngineClient 仍是一文档一份；暂不设置进程上限或淘汰策略，资源治理另立决策；
+- 切换文档只暂停正在运行的旧文档，重新激活不会自动 resume；非活动文档不应有逐帧 scheduler 工作；
+- 普通保存不读取子文件，保存广播不自动重载父文档；stale 是 occurrence-local 运行时状态，不写入 Project；
+- 引擎进程替换、显式 projection 重载和撤销重建都会丢失受影响子树的时序状态：DFlipFlop `q` 回到 `X`、Clock 相位和 tick 归零，波形按既有重建语义清空；未受影响文档/occurrence 不受影响；
+- 截图 PNG hash 不是自动基线，视觉自动验收依赖 DOM probe，人工仍需查看截图；
+- 该阶段不新增 JSON Lines/C++ 请求类型，不做分屏、多窗口、跨文档复制粘贴或自动重载。
 
 第一版明确不做：分屏并列显示两份电路；同一份 Project 开多个标签；下钻的导航栈或多级面包屑；把侧栏"层级"页改成层次树；在父画布上就地展开实例内部；以独立只读文档查看实例内部；跨文档复制粘贴或拖拽元件；多窗口；被引用子 Project 的自动重载。
 

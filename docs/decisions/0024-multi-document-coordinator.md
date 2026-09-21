@@ -21,6 +21,12 @@ Vue 中的 live workspace facade 遵守同一生命周期边界：每个 Control
 文档键引擎客户端前先停止调度器并取消订阅。应用卸载时释放整个集合；尚未完成的打开/新建
 操作会在发布标签或路径索引前检查 Controller 与集合是否仍存活。
 
+下钻来源只保留运行时的一跳映射
+`childKey → { parentKey, sourceComponentId }`。路径去重后复用已有子标签并更新最近来源；
+返回由 live facade 选择、居中和聚焦来源，headless coordinator 只选择稳定 Editor ID。
+关闭父文档会清理所有指向它的 child links，关闭子文档只清理自身映射；来源失效时不重新
+打开文件。
+
 ## 后果
 
 Vue 只需投影协调器快照中的 `active`，测试可以直接驱动打开、激活和关闭命令。文件读取或
