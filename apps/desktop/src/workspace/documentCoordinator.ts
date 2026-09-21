@@ -1,8 +1,16 @@
 import {
   parseProjectFile,
   projectPathIdentity,
+  rebaseProjectFileReferences,
+  serializeProjectFile,
   type ParsedProjectFile,
 } from "../project-file/index.ts";
+import {
+  readRecentProjects,
+  rememberRecentProject,
+  type KeyValueStorage,
+  type RecentProject,
+} from "../project-file/recent-projects.ts";
 import type { CommandResult, EditorCommand } from "../editor/index.ts";
 import type {
   CircuitDocument,
@@ -24,6 +32,13 @@ export interface CoordinatorProjectReader {
     | { ok: true; content: string }
     | { ok: false; reason: string; code?: string }
   >;
+}
+
+/** 多文档保存所需的最小文件桥；冲突确认完成前不会调用 writeProjectFile。 */
+export interface CoordinatorProjectWriter {
+  pickSavePath(options?: { defaultPath?: string }): Promise<{ ok: true; path: string } | { ok: false; reason: string }>;
+  writeProjectFile(path: string, content: string): Promise<{ ok: true } | { ok: false; reason: string }>;
+  storage?: KeyValueStorage | null;
 }
 
 /** 创建运行时的输入；`documentKey` 贯穿到 Electron 的按文档引擎桥接。 */
@@ -89,6 +104,18 @@ export interface DocumentCoordinatorSnapshot {
   active: DocumentRuntimeSnapshot | null;
   /** 最近一次打开动作的错误；失败不会修改 tabs 或 active。 */
   openError: string | null;
+  recentProjects: readonly RecentProject[];
+  pendingSaveConflict: CoordinatorSaveConflict | null;
+}
+
+/** 保存目标已被另一标签占用时的稳定冲突描述。 */
+export interface CoordinatorSaveConflict {
+  sourceKey: string;
+  targetKey: string;
+  targetPath: string;
+  sourceDisplayName: string;
+  targetDisplayName: string;
+  targetIsDirty: boolean;
 }
 
 export type CoordinatorOpenResult =
@@ -112,6 +139,8 @@ export interface DocumentCoordinatorOptions {
   pathIdentity?: (path: string) => string;
   /** 测试或产品可覆写路径解析；默认使用项目文件的唯一解析实现。 */
   parse?: (raw: unknown) => ReturnType<typeof parseProjectFile>;
+  /** 保存/另存为桥接；省略时协调器仍可用于只读打开和仿真。 */
+  writer?: CoordinatorProjectWriter;
 }
 
 interface RuntimeRecord {
@@ -197,6 +226,8 @@ export function createDocumentCoordinator(options: DocumentCoordinatorOptions) {
   let sequence = 1;
   let temporarySequence = 1;
   let disposed = false;
+  let recentProjects: RecentProject[] = readRecentProjects(options.writer?.storage);
+  let pendingSaveConflict: CoordinatorSaveConflict | null = null;
 
   function nextKey(): string {
     let key = `document-${sequence++}`;
@@ -215,6 +246,8 @@ export function createDocumentCoordinator(options: DocumentCoordinatorOptions) {
       activeKey,
       active: active === null ? null : cloneRuntimeSnapshot(active),
       openError,
+      recentProjects: [...recentProjects],
+      pendingSaveConflict,
     };
   }
 
@@ -225,7 +258,10 @@ export function createDocumentCoordinator(options: DocumentCoordinatorOptions) {
   }
 
   function updateRecord(record: RuntimeRecord, next: DocumentRuntimeSnapshot): void {
+    if (record.identity !== null && byIdentity.get(record.identity) === record.key) byIdentity.delete(record.identity);
     record.snapshot = cloneRuntimeSnapshot(next);
+    record.identity = next.project.path === null ? null : identityOf(next.project.path);
+    if (record.identity !== null) byIdentity.set(record.identity, record.key);
     publish();
   }
 
@@ -381,6 +417,7 @@ export function createDocumentCoordinator(options: DocumentCoordinatorOptions) {
   }
 
   async function close(key: string, options: { discard?: boolean } = {}): Promise<CoordinatorCloseResult> {
+    if (pendingSaveConflict !== null) return { ok: false, reason: "unsaved-changes", key };
     const record = byKey.get(key);
     if (record === undefined) return { ok: false, reason: "not-found", key };
     if (record.snapshot.project.isDirty && options.discard !== true) return { ok: false, reason: "unsaved-changes", key };
@@ -389,7 +426,7 @@ export function createDocumentCoordinator(options: DocumentCoordinatorOptions) {
     record.runtime.destroy();
     records.splice(index, 1);
     byKey.delete(key);
-    if (record.identity !== null) byIdentity.delete(record.identity);
+    if (record.identity !== null && byIdentity.get(record.identity) === key) byIdentity.delete(record.identity);
     if (activeKey === key) {
       const replacement = records[index] ?? records[index - 1] ?? records[0];
       activeKey = replacement?.key ?? null;
@@ -398,9 +435,120 @@ export function createDocumentCoordinator(options: DocumentCoordinatorOptions) {
     return { ok: true, key, activeKey };
   }
 
+  function activeRecord(): RuntimeRecord | undefined {
+    return activeKey === null ? undefined : byKey.get(activeKey);
+  }
+
+  function serializeForTarget(record: RuntimeRecord, targetPath: string): { ok: true; content: string } | { ok: false; error: string } {
+    if (record.snapshot.editor === null) return { ok: false, error: "编辑器尚未准备好，无法保存。" };
+    const file = serializeProjectFile({
+      document: record.snapshot.editor.document,
+      inputValues: record.snapshot.workspace.inputValues,
+    });
+    let prepared = file;
+    if (record.snapshot.project.path !== null && identityOf(record.snapshot.project.path) !== identityOf(targetPath)) {
+      const rebased = rebaseProjectFileReferences(file, record.snapshot.project.path, targetPath);
+      if (!rebased.ok) return { ok: false, error: rebased.error.message };
+      prepared = rebased.value;
+    }
+    const content = JSON.stringify(prepared);
+    const validation = parse(JSON.parse(content));
+    return validation.ok
+      ? { ok: true, content }
+      : { ok: false, error: `项目文件校验失败：${validation.errors[0]?.message ?? "未知原因"}` };
+  }
+
+  async function commitSave(record: RuntimeRecord, targetPath: string): Promise<boolean> {
+    if (options.writer === undefined) {
+      record.runtime.setSaveError("当前运行环境不支持项目文件保存。");
+      return false;
+    }
+    const serialized = serializeForTarget(record, targetPath);
+    if (!serialized.ok) {
+      record.runtime.setSaveError(serialized.error);
+      return false;
+    }
+    const result = await options.writer.writeProjectFile(targetPath, serialized.content);
+    if (!result.ok) {
+      record.runtime.setSaveError(result.reason);
+      return false;
+    }
+    record.runtime.setProjectPath(targetPath);
+    record.runtime.setSaveError(null);
+    record.runtime.setDirty(false);
+    recentProjects = rememberRecentProject(options.writer.storage, recentProjects, targetPath);
+    return true;
+  }
+
+  /** 保存活动标签；没有路径时转入另存为。 */
+  async function save(): Promise<boolean> {
+    if (pendingSaveConflict !== null) return false;
+    const record = activeRecord();
+    if (record === undefined) return false;
+    if (record.snapshot.project.path === null) return saveAs();
+    return commitSave(record, record.snapshot.project.path);
+  }
+
+  /** 另存为先解析路径身份，再决定是否进入冲突确认，写盘始终发生在确认之后。 */
+  async function saveAs(): Promise<boolean> {
+    if (options.writer === undefined || pendingSaveConflict !== null) return false;
+    const source = activeRecord();
+    if (source === undefined) return false;
+    const dialog = await options.writer.pickSavePath({ defaultPath: source.snapshot.project.path ?? source.snapshot.project.displayName });
+    if (!dialog.ok) {
+      if (dialog.reason !== "canceled") source.runtime.setSaveError(dialog.reason);
+      return false;
+    }
+    const targetIdentity = identityOf(dialog.path);
+    const target = records.find((candidate) => candidate.key !== source.key && candidate.identity === targetIdentity);
+    if (target !== undefined) {
+      pendingSaveConflict = {
+        sourceKey: source.key,
+        targetKey: target.key,
+        targetPath: dialog.path,
+        sourceDisplayName: source.snapshot.project.displayName,
+        targetDisplayName: target.snapshot.project.displayName,
+        targetIsDirty: target.snapshot.project.isDirty,
+      };
+      publish();
+      return false;
+    }
+    return commitSave(source, dialog.path);
+  }
+
+  /** 确认冲突后仅提交记录中的源/目标运行时；写入失败不会关闭目标标签。 */
+  async function confirmSaveConflict(): Promise<boolean> {
+    const conflict = pendingSaveConflict;
+    if (conflict === null) return false;
+    pendingSaveConflict = null;
+    const source = byKey.get(conflict.sourceKey);
+    const target = byKey.get(conflict.targetKey);
+    if (source === undefined || target === undefined || target.identity !== identityOf(conflict.targetPath)) {
+      source?.runtime.setSaveError("保存冲突目标已改变，请重新选择路径。");
+      publish();
+      return false;
+    }
+    activeKey = source.key;
+    const succeeded = await commitSave(source, conflict.targetPath);
+    if (!succeeded) return false;
+    await close(target.key, { discard: true });
+    activeKey = source.key;
+    publish();
+    return true;
+  }
+
+  /** 取消冲突确认，不读取文档、不写盘、不改变标签。 */
+  function cancelSaveConflict(): void {
+    if (pendingSaveConflict === null) return;
+    pendingSaveConflict = null;
+    publish();
+  }
+
   async function dispatchEditor(command: EditorCommand): Promise<CommandResult | null> {
     const record = activeKey === null ? undefined : byKey.get(activeKey);
-    return record?.runtime.dispatchEditor(command) ?? null;
+    const result = await (record?.runtime.dispatchEditor(command) ?? Promise.resolve(null));
+    if (record !== undefined && result?.ok) record.runtime.setDirty(true);
+    return result;
   }
 
   /** 释放协调器拥有的全部文档运行时；清理失败不会阻断其他文档的释放。 */
@@ -448,12 +596,22 @@ export function createDocumentCoordinator(options: DocumentCoordinatorOptions) {
     async resume() { return activeRuntime()?.resume() ?? null; },
     async step() { return activeRuntime()?.step() ?? null; },
     async reset() { return activeRuntime()?.reset() ?? null; },
-    async setInputBit(key: InputKey, index: number, bit: InputBit) { return activeRuntime()?.setInputBit(key, index, bit) ?? null; },
+    async setInputBit(key: InputKey, index: number, bit: InputBit) {
+      const record = activeRecord();
+      if (record === undefined) return null;
+      const next = await record.runtime.setInputBit(key, index, bit);
+      record.runtime.setDirty(true);
+      return next;
+    },
     async setSelection(selection: DocumentViewState["selection"]) { return activeRuntime()?.setSelection(selection) ?? null; },
     setViewport(viewport: DocumentViewState["viewport"]) { return activeRuntime()?.setViewport(viewport) ?? null; },
     setActiveRailPage(page: DocumentViewState["activeRailPage"]) { return activeRuntime()?.setActiveRailPage(page) ?? null; },
     setBottomTab(tab: DocumentViewState["bottomTab"]) { return activeRuntime()?.setBottomTab(tab) ?? null; },
     async checkEngine() { return activeRuntime()?.checkEngine() ?? null; },
+    save,
+    saveAs,
+    confirmSaveConflict,
+    cancelSaveConflict,
   };
   return coordinator;
 }

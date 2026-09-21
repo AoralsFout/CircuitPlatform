@@ -6,6 +6,7 @@ import ClearCanvasDialog from "./components/ClearCanvasDialog.vue";
 import EditorToolbar from "./components/EditorToolbar.vue";
 import EmptyStatePanel from "./components/EmptyStatePanel.vue";
 import SettingsPage from "./components/SettingsPage.vue";
+import SaveConflictDialog from "./components/SaveConflictDialog.vue";
 import ToolRail from "./components/ToolRail.vue";
 import TopBar from "./components/TopBar.vue";
 import UnsavedChangesDialog from "./components/UnsavedChangesDialog.vue";
@@ -54,6 +55,9 @@ const {
   canSave,
   save: saveProject,
   saveAs: saveProjectAs,
+  pendingSaveConflict,
+  confirmSaveConflict,
+  cancelSaveConflict,
   openError,
   pendingFileAction,
   requestOpen,
@@ -181,6 +185,7 @@ function onEditorKeydown(event: KeyboardEvent): void {
   if (shortcut === "cancel") {
     // Esc 只取消当前最上层状态：文件操作确认 → 清空确认框 → 恢复提示 → 草稿 → 拖动预览 → 选择。
     if (pendingFileAction.value) cancelPendingFileAction();
+    else if (pendingSaveConflict.value) cancelSaveConflict();
     else if (editorState.value?.confirmation) void cancelCurrentOperation();
     else if (editorState.value?.operation === "recovery-required") return;
     else if (interaction.value.connectionDraft) cancelConnection();
@@ -401,6 +406,13 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
       :action="pendingFileAction"
       @confirm="confirmPendingFileAction"
       @cancel="cancelPendingFileAction"
+    />
+
+    <SaveConflictDialog
+      v-if="pendingSaveConflict"
+      :conflict="pendingSaveConflict"
+      @confirm="confirmSaveConflict"
+      @cancel="cancelSaveConflict"
     />
   </main>
 </template>
