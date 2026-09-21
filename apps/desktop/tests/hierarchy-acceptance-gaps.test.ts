@@ -390,6 +390,30 @@ test("an unresolved Subcircuit can be duplicated, deleted, undone and redone wit
   }
 });
 
+test("a resolved Subcircuit keeps authoritative flat ports for its read-only internal signal table", async () => {
+  const engine = new AcceptanceEngine();
+  const restore = installWindow(engine);
+  try {
+    const parentPath = "E:\\circuits\\parent.circuit.json";
+    const childPath = "E:\\circuits\\child.circuit.json";
+    engine.files.set(parentPath, JSON.stringify(resolvedParent()));
+    engine.files.set(childPath.toLowerCase(), JSON.stringify(resolvedChild()));
+    const binding = useWorkspace();
+    await binding.bootstrap();
+
+    assert.equal(await binding.openProjectFromPath(parentPath), true);
+    const internal = binding.state.value.internalComponents ?? [];
+    assert.equal(internal.length, 2);
+    assert.deepEqual(internal.map((descriptor) => descriptor.flatId), ["unit/gate", "unit/gate2"]);
+    assert.deepEqual(internal.map((descriptor) => descriptor.ports.map((port) => port.name)), [
+      ["in", "out"],
+      ["in", "out"],
+    ]);
+  } finally {
+    restore();
+  }
+});
+
 test("a failed resolved Subcircuit projection is compensated without publishing a history frame", async () => {
   const engine = new AcceptanceEngine();
   const restore = installWindow(engine);

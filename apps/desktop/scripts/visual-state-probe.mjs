@@ -62,8 +62,8 @@ const COLLECT = `(async () => {
   const hierarchyInspector = document.querySelector(".inspector-subcircuit");
   const hierarchyStatus = hierarchyInspector?.querySelector('[role="status"]');
   const hierarchyDiagnostic = hierarchyInspector?.querySelector('[role="alert"]');
-  const hierarchyReload = hierarchyInspector?.querySelector("button");
-  const tabs = [...document.querySelectorAll('[role="tab"]')].map((tab) => ({
+  const hierarchyReload = hierarchyInspector?.querySelector('button[aria-label^="重新加载子电路"]');
+  const tabs = [...document.querySelectorAll('.document-tabs [role="tab"]')].map((tab) => ({
     label: text(tab),
     selected: tab.getAttribute("aria-selected") === "true",
     ariaLabel: tab.getAttribute("aria-label"),
@@ -220,8 +220,8 @@ const interactions = {
 /** 每个状态一条断言集：只断言「这个状态确实渲染成了它该有的样子」。 */
 const expectations = {
   "unsaved-confirm": (facts, failures) => {
-    check(failures, facts.unsavedDialog !== null, "置脏后新建应呈现未保存确认对话框");
-    check(failures, facts.unsavedDialog?.title === "新建文档？", `对话框标题不符：${facts.unsavedDialog?.title}`);
+    check(failures, facts.unsavedDialog !== null, "关闭脏标签应呈现未保存确认对话框");
+    check(failures, facts.unsavedDialog?.title === "关闭项目？", `对话框标题不符：${facts.unsavedDialog?.title}`);
     check(failures, typeof facts.unsavedDialog?.confirmText === "string" && facts.unsavedDialog.confirmText.length > 0, "对话框缺少放弃操作的确认按钮");
   },
   "first-start-recent": (facts, failures) => {
@@ -400,15 +400,25 @@ async function main() {
       height: 900,
       webPreferences: { sandbox: true, backgroundThrottling: false },
     });
+    window.webContents.on("console-message", (_event, level, message) => console.error(`[visual probe console ${level}] ${message}`));
+    window.webContents.on("did-fail-load", (_event, code, description) => console.error(`[visual probe load ${code}] ${description}`));
     const results = [];
     const failures = [];
-    for (const [state, expect] of Object.entries(expectations)) {
+    const requestedState = process.argv.find((argument) => argument.startsWith("--state="))?.slice("--state=".length);
+    const selectedExpectations = requestedState === undefined
+      ? Object.entries(expectations)
+      : Object.entries(expectations).filter(([state]) => state === requestedState);
+    if (requestedState !== undefined && selectedExpectations.length === 0) {
+      throw new Error(`未知视觉状态：${requestedState}`);
+    }
+    for (const [state, expect] of selectedExpectations) {
+      console.log(`Probing visual state ${state}`);
       await window.loadURL(`${baseUrl}/visual-regression.html?state=${state}&theme=dark`);
       await window.webContents.executeJavaScript(
         "new Promise((resolve, reject) => { const started = Date.now(); const check = () => {"
         + " if (window.__visualError) return reject(new Error(`视觉夹具准备失败：${window.__visualError}`));"
         + " if (document.querySelector('.app-shell') && window.__visualReady) return resolve(true);"
-        + " if (Date.now() - started > 20000) return reject(new Error('真实 Vue App 未完成准备'));"
+        + " if (Date.now() - started > 30000) return reject(new Error(`真实 Vue App 未完成准备：${document.body.innerText.slice(0, 1600)}`));"
         + " setTimeout(check, 50); }; check(); })",
       );
       const interaction = interactions[state];
@@ -417,6 +427,7 @@ async function main() {
       Object.assign(facts, measurements[state] ?? {});
       const stateFailures = [];
       expect(facts, stateFailures);
+      if (stateFailures.length > 0) console.error(`Visual state ${state} facts: ${JSON.stringify(facts)}`);
       results.push({ state, ok: stateFailures.length === 0, failures: stateFailures });
       failures.push(...stateFailures.map((message) => `${state}：${message}`));
     }

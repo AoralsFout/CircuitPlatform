@@ -4,6 +4,12 @@
   <body><div id="app"></div>
     <script type="module">
       // 截图使用真实 Vue 应用和 CircuitCanvas；此 adapter 只替代 Electron 引擎边界。
+      window.addEventListener("error", (event) => {
+        window.__visualError = event.error?.stack ?? event.message;
+      });
+      window.addEventListener("unhandledrejection", (event) => {
+        window.__visualError = event.reason?.stack ?? String(event.reason);
+      });
       const params = new URLSearchParams(location.search);
       const state = params.get("state") || "default";
       const parentPath = "/visual/parent.circuit.json";
@@ -77,15 +83,17 @@
         circuit: {
           components: [
             { id: "child-input", kind: "input", displayName: "A", position: { x: 72, y: 140 }, ports: [bit("out", "output")] },
+            { id: "child-not", kind: "not", displayName: "NOT 1", position: { x: 216, y: 140 }, ports: [bit("in", "input"), bit("out", "output")] },
             { id: "child-output", kind: "output", displayName: "Y", position: { x: 360, y: 140 }, ports: [bit("in", "input")] },
           ],
           connections: [
-            { id: "child-wire", source: { component: "child-input", port: "out" }, target: { component: "child-output", port: "in" } },
+            { id: "child-wire-in", source: { component: "child-input", port: "out" }, target: { component: "child-not", port: "in" } },
+            { id: "child-wire-out", source: { component: "child-not", port: "out" }, target: { component: "child-output", port: "in" } },
           ],
         },
       };
-      const hierarchyState = [
-        "hierarchy-resolved", "hierarchy-unresolved", "multi-tabs", "multi-tabs-narrow",
+      const hierarchyState = state === "hierarchy-resolved" || state === "hierarchy-unresolved" || [
+        "multi-tabs", "multi-tabs-narrow",
         "needs-reload", "unresolved-drill", "internal-signals", "source-return",
       ].includes(state);
       const openPaths = state === "multi-tabs" || state === "multi-tabs-narrow"
@@ -367,26 +375,28 @@
           await settle(80);
           return;
         }
-        if (state === "unsaved-tab") return;
-        click(await waitFor('[title="加载示例电路"]'));
-        await waitFor(".circuit-node");
-        failAdds = state === "error";
         if (state === "unnamed-tabs") {
-          click(await waitFor('[title="新建 (Ctrl/Cmd+N)"]'));
-          await waitFor('.confirmation-dialog');
-          click(document.querySelector('.confirmation-dialog button.dialog-button--danger'));
-          await waitFor('[role="tab"]:nth-child(2)');
-          await settle(80);
-          click(await waitFor('[title="新建 (Ctrl/Cmd+N)"]'));
-          await waitFor('[role="tab"]:nth-child(3)');
+          // 空工作区的顶栏「新建」尚未启用，第一份文档必须走空状态入口；
+          // 建立活动文档后，后两份再走用户日常使用的顶栏入口。
+          click(await waitFor('.empty-state__actions button:nth-child(2)'));
+          await waitFor('.document-tabs [role="tab"]:nth-child(1)');
+          for (let index = 2; index <= 3; index += 1) {
+            click(await waitFor('[title="新建 (Ctrl/Cmd+N)"]'));
+            await waitFor(`.document-tabs [role="tab"]:nth-child(${index})`);
+          }
           await settle(80);
           return;
         }
+        click(await waitFor('[title="加载示例电路"]'));
+        await waitFor(".circuit-node");
+        failAdds = state === "error";
         if (state === "unsaved-confirm") {
-          // 未保存改动的确认（规格测试决策）：示例加载后本身就是一份未保存文档，
-          // 点「新建」触发置脏确认对话框，画面停在对话框上。对话框由真实交互产生。
-          click(await waitFor('[title="新建 (Ctrl/Cmd+N)"]'));
-          await waitFor(".confirmation-dialog");
+          // 示例通过多文档 facade 创建普通未保存标签；关闭它应显示目标稳定的确认对话框。
+          const closeButton = await waitFor(".document-tab__close");
+          if (!closeButton) throw new Error("未保存确认夹具未找到标签关闭按钮");
+          click(closeButton);
+          const closeDialog = await waitFor(".confirmation-dialog");
+          if (!closeDialog) throw new Error(`关闭脏标签后未显示确认对话框；dirty=${Boolean(document.querySelector(".document-tab__dirty"))}`);
           await settle(40);
           return;
         }

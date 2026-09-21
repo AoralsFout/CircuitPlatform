@@ -89,12 +89,13 @@ async function main() {
     for (const theme of options.themes) {
       for (const [viewportName, viewport] of Object.entries(viewports)) {
         for (const state of options.states) {
+          console.log(`Capturing visual state ${theme}/${viewportName}/${state}`);
           window.setSize(viewport.width, viewport.height);
           const motion = options.reducedMotion ? "&motion=reduced" : "";
           await window.loadURL(`http://127.0.0.1:${port}/visual-regression.html?theme=${theme}&state=${state}${motion}`);
           // 等待真实 Vue 场景完成挂载、并且夹具已经把该状态的全部交互跑完。
           // 只等 `.app-shell` 会在准备过程中取图，拍到的就不是这个状态的最终画面。
-          await window.webContents.executeJavaScript("new Promise((resolve, reject) => { const started = Date.now(); const check = () => { if (window.__visualError) return reject(new Error(`视觉夹具准备失败：${window.__visualError}`)); if (document.querySelector('.app-shell') && window.__visualReady) return resolve(true); if (Date.now() - started > 20000) return reject(new Error('真实 Vue App 未完成准备')); setTimeout(check, 50); }; check(); })");
+          await window.webContents.executeJavaScript("new Promise((resolve, reject) => { const started = Date.now(); const check = () => { if (window.__visualError) return reject(new Error(`视觉夹具准备失败：${window.__visualError}`)); if (document.querySelector('.app-shell') && window.__visualReady) return resolve(true); if (Date.now() - started > 30000) return reject(new Error(`真实 Vue App 未完成准备：${document.body.innerText.slice(0, 1600)}`)); setTimeout(check, 50); }; check(); })");
           await new Promise((resolvePromise) => setTimeout(resolvePromise, 180));
           const bodyText = await window.webContents.executeJavaScript("document.body.innerText.slice(0, 120)");
           if (!bodyText) throw new Error(`真实 Vue 页面未渲染：${theme}/${viewportName}/${state}`);
@@ -120,5 +121,5 @@ async function main() {
 
 main().catch((error) => {
   console.error(error);
-  process.exitCode = 1;
+  process.exit(1);
 });

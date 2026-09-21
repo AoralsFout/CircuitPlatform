@@ -1002,11 +1002,16 @@ export function createEditorSession(
     };
     // 只在确实有元件带着端口清单时才发布这个字段：一个空的映射与「还不知道」在运行时
     // 是同一种情况，而留一个空对象会让绑定的形状多出一个没有信息量的键。
-    const knownPorts = Object.fromEntries(
-      [...document.components.values()]
-        .filter((component) => component.lifecycle === "active" && component.ports !== undefined)
-        .map((component) => [component.id, component.ports!]),
-    );
+    const knownPorts = {
+      // 层次投影还会携带不出现在顶层文档中的 flat 元件端口；它们是实例内部只读信号表
+      // 的权威结构，发布一次普通编辑绑定时不能因“不可见”而被裁掉。
+      ...(bindings.ports ?? {}),
+      ...Object.fromEntries(
+        [...document.components.values()]
+          .filter((component) => component.lifecycle === "active" && component.ports !== undefined)
+          .map((component) => [component.id, component.ports!]),
+      ),
+    };
     if (Object.keys(knownPorts).length > 0) nextBindings.ports = knownPorts;
     if (bindings.flatComponents) nextBindings.flatComponents = { ...bindings.flatComponents };
     if (bindings.flatConnections) nextBindings.flatConnections = { ...bindings.flatConnections };

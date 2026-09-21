@@ -30,5 +30,10 @@ test("per-document facade keeps editor-state controllers with each document", as
   assert.match(facade, /useWorkspace\(\{ documentKey: key(?:, temporaryName)?/);
   assert.match(facade, /useEditorState\(/);
   assert.match(facade, /const active = computed/);
+  assert.match(facade, /reactive\(new Map<string, DrillDownSource>\(\)\)/);
+  assert.match(facade, /"value" in value\) return \(value as Ref<unknown> \| ComputedRef<unknown>\)\.value/);
+  assert.match(facade, /property === "requestLoadExample"/);
+  assert.match(facade, /record\.hasDocument = true/);
+  assert.match(facade, /records\.value = records\.value\.includes\(record\) \? \[\.\.\.records\.value\]/);
   assert.match(facade, /return workspaceFacade/);
 });

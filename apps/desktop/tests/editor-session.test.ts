@@ -235,6 +235,25 @@ test("replaces a flattened projection as one history frame and restores it with 
   assert.equal(redone.snapshot.document.components.some((component) => component.id === "not-gate"), true);
 });
 
+test("publishing visible editor bindings preserves authoritative ports for hidden flat components", async () => {
+  const engine = new FakeEngine();
+  const updates: EditorBindings[] = [];
+  const document = createAndDemoDocument();
+  const hiddenPorts = defaultPortsFor("not") ?? [];
+  const session = createEditorSession({
+    document,
+    bindings: {
+      components: { "input-a": 1, "input-b": 2, "and-gate": 3, output: 4 },
+      connections: { "wire-a": 10, "wire-b": 11, "wire-output": 12 },
+      ports: { "unit-a/hidden-not": hiddenPorts },
+    },
+  }, engine, { onBindingsChanged: (bindings) => updates.push(bindings) });
+
+  const result = await session.dispatch({ type: "delete-connection", connectionId: "wire-a" });
+  assert.equal(result.ok, true);
+  assert.deepEqual(updates.at(-1)?.ports?.["unit-a/hidden-not"], hiddenPorts);
+});
+
 test("failed flattened projection publishes compensated engine identities without changing the document", async () => {
   const engine = new FakeEngine();
   const updates: EditorBindings[] = [];

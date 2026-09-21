@@ -730,7 +730,13 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     const components: Record<string, number | readonly number[]> = {};
     const connections: Record<string, number | readonly number[]> = {};
     const componentKinds: Record<string, EditorComponentKind> = {};
-    const ports: Record<string, readonly PortSpec[]> = {};
+    // 隐藏的扁平元件不会出现在顶层 Editor 文档里，但实例信号表仍要使用引擎回传的
+    // 权威端口清单。把这些 flat ID 一并保留在绑定中，后续 EditorSession 发布绑定时
+    // 才不会只剩顶层 Subcircuit 端口、把内部行投影成空表。
+    const ports: Record<string, readonly PortSpec[]> = Object.fromEntries(
+      Object.entries(flatBindings.ports ?? {}).flatMap(([flatId, portList]) =>
+        portList === undefined ? [] : [[flatId, portList] as const]),
+    );
     const componentFlatIds: Record<string, readonly string[]> = {};
     const connectionFlatIds: Record<string, readonly string[]> = {};
     const internalComponents = internalComponentsFromHierarchy(hierarchy, flatBindings);

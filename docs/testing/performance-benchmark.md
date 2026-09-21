@@ -53,15 +53,15 @@ Phase 5.6 使用同一份生产 500 Component / 1,000 Connection 展平夹具，
 
 | 场景 | 文档数 | 模式 | 通过条件 | 证据 |
 | --- | ---: | --- | --- | --- |
-| 活动画布平移 | 1 / 5 / 10 | `pan` | 每个 N 的活动 P95 ≤ 20ms、`interacted=true` | 待集成验证 |
-| 活动画布拖动 | 1 / 5 / 10 | `drag` | 每个 N 的活动 P95 ≤ 20ms、`interacted=true` | 待集成验证 |
-| 内部表隐藏 | 1 / 5 / 10 | `internal-signals-hidden` | `reads=0`，画布帧样本不因 N 增长而阻塞 | 待集成验证 |
-| 内部表显示 | 1 / 5 / 10 | `internal-signals-visible` | 只读选中 occurrence，读取不阻塞画布帧 | 待集成验证 |
-| 快速切换 occurrence | 1 / 5 / 10 | `internal-signals-rapid` | 迟到 revision 结果丢弃，不发布到新选择 | 待集成验证 |
-| 连续运行 | 1 / 5 / 10 | `internal-signals-running` | tick 只由活动文档推进，表刷新不引入逐帧读取 | 待集成验证 |
+| 活动画布平移 | 1 / 5 / 10 | `pan` | 每个 N 的活动 P95 ≤ 20ms、`interacted=true` | 通过：P95 `0.4 / 0.3 / 0.2ms`，`inactiveWork=0` |
+| 活动画布拖动 | 1 / 5 / 10 | `drag` | 每个 N 的活动 P95 ≤ 20ms、`interacted=true` | 通过：P95 `0.4 / 0.4 / 0.5ms`，`inactiveWork=0` |
+| 内部表隐藏 | 1 / 5 / 10 | `internal-signals-hidden` | `reads=0`，画布帧样本不因 N 增长而阻塞 | 通过：每档 `hiddenReads=0`、P95 `0.1ms` |
+| 内部表显示 | 1 / 5 / 10 | `internal-signals-visible` | 只读选中 occurrence，读取不阻塞画布帧 | 通过：每档 `visibleReads=8`、P95 `0.1ms` |
+| 快速切换 occurrence | 1 / 5 / 10 | `internal-signals-rapid` | 迟到 revision 结果丢弃，不发布到新选择 | 通过：每档 `rapidSelectionReads=1`、`staleResultsDropped=7` |
+| 连续运行 | 1 / 5 / 10 | `internal-signals-running` | tick 只由活动文档推进，表刷新不引入逐帧读取 | 通过：每档 `continuousRunReads=8`、`inactiveWork=0` |
 
-建议的集成取证命令如下；本分支没有运行这些新矩阵，表中的“待集成验证”必须由集成
-分支用命令输出替换，不得把既有单文档结果外推为 Phase 5.6 证据：
+2026-09-21 已在同一 Windows 集成工作区运行以下矩阵；上表记录的是命令 JSON 输出，
+不是由既有单文档结果外推：
 
 ```powershell
 pnpm --filter @circuit-platform/desktop performance:benchmark --mode=pan --documents=1,5,10

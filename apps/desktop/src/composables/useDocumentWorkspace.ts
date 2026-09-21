@@ -1,4 +1,4 @@
-import { computed, ref, shallowRef, watch, type ComputedRef, type Ref } from "vue";
+import { computed, reactive, ref, shallowRef, watch, type ComputedRef, type Ref } from "vue";
 import type { ComponentKindName, PortSpec } from "@circuit-platform/protocol";
 import { projectPathIdentity, resolveProjectReference } from "../project-file/paths.ts";
 import { readRecentProjects, type RecentProject } from "../project-file/recent-projects.ts";
@@ -67,7 +67,7 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
   const sequence = ref(1);
   const temporarySequence = ref(1);
   const pathKeys = new Map<string, string>();
-  const drillDownSources = new Map<string, DrillDownSource>();
+  const drillDownSources = reactive(new Map<string, DrillDownSource>());
   const pendingAction = ref<PendingAction>(null);
   const pendingPath = ref<string | null>(null);
   const pendingCloseKey = ref<string | null>(null);
@@ -197,7 +197,7 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
       }
       if (disposed || record.disposed) return false;
       record.hasDocument = true;
-      if (!records.value.includes(record)) records.value = [...records.value, record];
+      records.value = records.value.includes(record) ? [...records.value] : [...records.value, record];
       pathKeys.set(identity, record.key);
       syncRecentProjects();
       await activateRecord(record);
@@ -259,7 +259,27 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
     }
     if (disposed || record.disposed) return false;
     record.hasDocument = true;
-    if (!records.value.includes(record)) records.value = [...records.value, record];
+    records.value = records.value.includes(record) ? [...records.value] : [...records.value, record];
+    await activateRecord(record);
+    return true;
+  }
+
+  /** 把示例作为一份新的普通未保存文档加入标签集合，而不是替换或绕过协调器。 */
+  async function loadExampleDocument(): Promise<boolean> {
+    if (disposed) return false;
+    const current = active.value;
+    const record = current?.hasDocument === false ? current : createController();
+    await record.binding.bootstrap();
+    if (disposed || record.disposed) return false;
+    await record.binding.requestLoadExample();
+    if (disposed || record.disposed) return false;
+    if (record.binding.editorState.value === null) {
+      actionError.value = record.binding.openError.value ?? "加载示例失败。";
+      if (record !== current) void disposeController(record);
+      return false;
+    }
+    record.hasDocument = true;
+    records.value = records.value.includes(record) ? [...records.value] : [...records.value, record];
     await activateRecord(record);
     return true;
   }
@@ -478,7 +498,8 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
         const record = active.value;
         const value = record?.binding[name as keyof WorkspaceBinding] as unknown;
         if (name === "openError") return actionError.value ?? (value as Ref<unknown> | undefined)?.value ?? null;
-        return (value as Ref<unknown> | ComputedRef<unknown> | undefined)?.value ?? value;
+        if (value && typeof value === "object" && "value" in value) return (value as Ref<unknown> | ComputedRef<unknown>).value;
+        return value;
       },
       set: (value) => {
         const record = active.value;
@@ -525,6 +546,7 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
       if (property === "requestOpen") return requestOpen;
       if (property === "requestOpenRecent") return requestOpenRecent;
       if (property === "requestNew") return requestNew;
+      if (property === "requestLoadExample") return async () => { await loadExampleDocument(); };
       if (property === "confirmPendingFileAction") return confirmPendingFileAction;
       if (property === "cancelPendingFileAction") return cancelPendingFileAction;
       if (property === "pendingFileAction") return computed(() => pendingAction.value);

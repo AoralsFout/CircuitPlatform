@@ -13,7 +13,7 @@
 - Phase 4.5：多位 Port 与总线，已完成（七个交付切片全部落地，端到端回归与截图基准由 issue #32 收口；逐条记录见本文件 `### Phase 4.5` 的「已交付」各节，已知限制见其中「已交付（切片 7）」一节）；
 - Phase 5：波形和持久化，已完成（六个交付切片全部落地，规格 #34，票 #35–#42，逐条记录见本文件 `### Phase 5` 的「已交付」各节）；
 - Phase 5.5：层次化电路，已完成（按引用组合、递归展平、手动重载、历史事务、持久化与真实引擎回归已落地）；
-- Phase 5.6：多文档与下钻，运行时实现已落地，真实 E2E、视觉矩阵、1/5/10 性能矩阵和最终证据待集成验证；在证据补齐前不标记完成；
+- Phase 5.6：多文档与下钻，已完成（规格 #55，票 #56–#65；真实多文档 E2E、40 张视觉矩阵、DOM 事实探针和 1/5/10 性能矩阵均已验证）；
 - Phase 6：工程化和发布，未开始。
 
 Phase 0–2.5 已建立 C++ 电路模型、组合逻辑求值、组合环路检测，以及 Electron 与 C++ 引擎之间可复现的 JSON Lines 会话。Phase 3 已完成：切片 1、2、3 的全部工程步骤均已交付，画布是数据驱动的场景投影，AND 示例与用户搭建的电路走同一条通用文档路径，不再有专用仿真投影，指针与键盘两条路径都具备完整编辑能力。切片 3 的性能验收此前未达标，已于 2026-09-18 修复指针热路径的强制同步重排与信号层的排版动画，五种交互模式的 P95 从 60–94ms 降到 0.2–7.1ms，全部满足 20ms 预算。
@@ -420,9 +420,8 @@ issue #20 接上了 `tick` 的第 ④ 步：
 3. 下钻与来源：画布双击与检查器入口、来源记录与返回高亮、未解析禁用下钻、未保存改动不穿透、保存后的"需重新加载"提示；
 4. 实例内部实时信号：检查器中的只读信号表。
 
-上述四个代码切片在当前实现中已有对应模块和单元/集成 seam，但“切片完成”不等于
-Phase 5.6 已闭合：生产 BrowserWindow/preload/IPC 的多文档场景、视觉事实和文档数
-性能证据必须由下表命令补齐。
+上述四个代码切片及其生产链路证据均已闭合：BrowserWindow/preload/IPC 多文档场景、
+视觉事实、截图矩阵和文档数性能证据见下表。
 
 验收标准：
 
@@ -437,20 +436,20 @@ Phase 5.6 已闭合：生产 BrowserWindow/preload/IPC 的多文档场景、视�
 - 活动文档的帧耗时仍满足 Phase 3 的基准，且与打开的文档数无关；
 - 类型检查和非视觉自动化测试通过 `pnpm verify`。
 
-### Phase 5.6 验收证据矩阵（待集成填写）
+### Phase 5.6 验收证据矩阵（2026-09-21）
 
 不要用 headless coordinator、单文档 temporal E2E 或既有单文档性能数字替代下列证据。
-本分支未运行这些命令；命令成功、版本和结果由集成分支补录。
+以下结果均在 Windows 集成工作区、当前实现上实测。
 
 | 证据 | 命令 | 必须记录 | 当前状态 |
 | --- | --- | --- | --- |
-| 真实多文档 E2E | `pnpm --filter @circuit-platform/desktop test:multidocument-e2e` | 真实 Project 文件 → BrowserWindow/preload IPC → JSON Lines → C++；双 occurrence、显式重载、单文档 kill/recovery、关闭清理 | 待集成验证 |
-| 统一验证 | `pnpm verify` | 类型检查、非视觉自动化测试和构建结果 | 待集成验证 |
-| 视觉截图 | `pnpm --filter @circuit-platform/desktop visual:test -- --state=multi-tabs,multi-tabs-narrow,long-name,unnamed-tabs,unsaved-tab,needs-reload,unresolved-drill,engine-unavailable,internal-signals,source-return` | 深/浅色 × 普通/窄窗口截图供人工检查 | 待集成验证 |
-| 视觉事实 | `pnpm --filter @circuit-platform/desktop visual:probe` | tab/ARIA、dirty/stale/unresolved/unavailable、禁用下钻、来源居中、内部行和值 | 待集成验证 |
-| 1/5/10 平移 | `pnpm --filter @circuit-platform/desktop performance:benchmark --mode=pan --documents=1,5,10` | 每个文档数的 active P95 ≤ 20ms、`interacted`、inactiveWork | 待集成验证 |
-| 1/5/10 拖动 | `pnpm --filter @circuit-platform/desktop performance:benchmark --mode=drag --documents=1,5,10` | 同上，且真实 RAF 诊断字段保留 | 待集成验证 |
-| 内部信号 | `pnpm --filter @circuit-platform/desktop performance:benchmark --mode=internal-signals --documents=1,5,10` | hidden/visible/rapid/running：隐藏零读取、迟到 revision 丢弃、读取不阻塞帧 | 待集成验证 |
+| 真实多文档 E2E | `pnpm --filter @circuit-platform/desktop test:multidocument-e2e` | 真实 Project 文件 → BrowserWindow/preload IPC → JSON Lines → C++；双 occurrence、显式重载、单文档 kill/recovery、关闭清理 | 通过：`parentStep=4`、`peerStep=1`、`staleOccurrences=2`、`danglingConnectionIds=["u1-nq"]`、`recoveredParent=true`、关闭后 `tabs=0` |
+| 统一验证 | `pnpm verify` | 类型检查、非视觉自动化测试和构建结果 | 通过：Protocol 16、Desktop 361、C++ 4、真实引擎时序 E2E 9；类型检查与生产构建通过 |
+| 视觉截图 | `pnpm --filter @circuit-platform/desktop visual:test -- --state=multi-tabs,multi-tabs-narrow,long-name,unnamed-tabs,unsaved-tab,needs-reload,unresolved-drill,engine-unavailable,internal-signals,source-return` | 深/浅色 × 普通/窄窗口截图供人工检查 | 通过：10 个状态 × 2 个主题 × 2 个视口，共生成 40 张截图；抽查多标签、未命名标签、内部信号与来源返回无布局异常 |
+| 视觉事实 | `pnpm --filter @circuit-platform/desktop visual:probe` | tab/ARIA、dirty/stale/unresolved/unavailable、禁用下钻、来源居中、内部行和值 | 通过：21/21 状态断言通过 |
+| 1/5/10 平移 | `pnpm --filter @circuit-platform/desktop performance:benchmark --mode=pan --documents=1,5,10` | 每个文档数的 active P95 ≤ 20ms、`interacted`、inactiveWork | 通过：P95 `0.4 / 0.3 / 0.2ms`，全部 `interacted=true`、`inactiveWork=0` |
+| 1/5/10 拖动 | `pnpm --filter @circuit-platform/desktop performance:benchmark --mode=drag --documents=1,5,10` | 同上，且真实 RAF 诊断字段保留 | 通过：P95 `0.4 / 0.4 / 0.5ms`，全部 `interacted=true`、`inactiveWork=0` |
+| 内部信号 | `pnpm --filter @circuit-platform/desktop performance:benchmark --mode=internal-signals --documents=1,5,10` | hidden/visible/rapid/running：隐藏零读取、迟到 revision 丢弃、读取不阻塞帧 | 通过：P95 均 `0.1ms`；每档 `hiddenReads=0`、`visibleReads=8`、`staleResultsDropped=7`、`continuousRunReads=8`、`inactiveWork=0` |
 
 ### Phase 5.6 已知限制
 
