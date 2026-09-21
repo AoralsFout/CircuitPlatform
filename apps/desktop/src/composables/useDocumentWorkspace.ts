@@ -1,6 +1,6 @@
 import { computed, ref, shallowRef, watch, type ComputedRef, type Ref } from "vue";
 import type { ComponentKindName, PortSpec } from "@circuit-platform/protocol";
-import { projectPathIdentity } from "../project-file/paths.ts";
+import { projectPathIdentity, resolveProjectReference } from "../project-file/paths.ts";
 import { readRecentProjects, type RecentProject } from "../project-file/recent-projects.ts";
 import type { EditorComponentId, EditorSelection, Point, WireColorId } from "../editor/index.ts";
 import { useEditorState } from "./useEditorState.ts";
@@ -10,6 +10,12 @@ import type { DocumentTabSnapshot } from "../workspace/documentCoordinator.ts";
 
 type EditorBinding = ReturnType<typeof useEditorState>;
 type PendingAction = "open" | "new" | "load-example" | "close" | null;
+
+/** 下钻只记录最近一跳；父文档和来源元件都按运行时键/稳定 Editor ID 寻址。 */
+export interface DrillDownSource {
+  parentKey: string;
+  componentId: EditorComponentId;
+}
 
 /** 保存到另一标签已占用路径时冻结的、按运行时键寻址的冲突快照。 */
 export interface PendingSaveConflict {
@@ -61,6 +67,7 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
   const sequence = ref(1);
   const temporarySequence = ref(1);
   const pathKeys = new Map<string, string>();
+  const drillDownSources = new Map<string, DrillDownSource>();
   const pendingAction = ref<PendingAction>(null);
   const pendingPath = ref<string | null>(null);
   const pendingCloseKey = ref<string | null>(null);
@@ -188,6 +195,43 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
     try { return await operation; } finally { opening.delete(identity); }
   }
 
+  /**
+   * 从活动父文档的已解析 Subcircuit 打开普通子文档。
+   * 先完成普通 open/dedupe 流程，再写入来源，避免失败打开留下悬空记录。
+   */
+  async function openSubcircuit(componentId: EditorComponentId): Promise<boolean> {
+    const parent = active.value;
+    const parentPath = parent?.binding.projectPath.value;
+    const snapshot = parent?.binding.editorState.value;
+    const component = snapshot?.document.components.find((candidate) => candidate.id === componentId);
+    const subcircuit = component?.kind === "subcircuit" ? component.data?.subcircuit : undefined;
+    const status = subcircuit?.status ?? (subcircuit?.diagnostic ? "unresolved" : "resolved");
+    if (!parent || !parent.hasDocument || parentPath === null || !subcircuit || status !== "resolved") return false;
+    const childPath = resolveProjectReference(subcircuit.reference, parentPath);
+    const opened = await openProject(childPath);
+    if (!opened) return false;
+    const childKey = pathKeys.get(projectPathIdentity(childPath));
+    if (childKey === undefined || childKey === parent.key) return false;
+    drillDownSources.set(childKey, { parentKey: parent.key, componentId });
+    return true;
+  }
+
+  /** 将一个子文档切回其仍打开的父文档，并选择、居中、聚焦最近来源。 */
+  async function returnToParent(): Promise<boolean> {
+    const child = active.value;
+    const source = child ? drillDownSources.get(child.key) : undefined;
+    if (!child || !source) return false;
+    const parent = records.value.find((record) => record.key === source.parentKey && record.hasDocument);
+    if (!parent) {
+      drillDownSources.delete(child.key);
+      return false;
+    }
+    await activateRecord(parent);
+    const revealed = await parent.editor.revealComponent(source.componentId);
+    if (!revealed) drillDownSources.delete(child.key);
+    return true;
+  }
+
   async function createNewDocument(): Promise<boolean> {
     if (disposed) return false;
     const current = active.value;
@@ -258,6 +302,7 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
   }
 
   async function discardRecord(record: DocumentController): Promise<void> {
+    clearDrillDownSources(record.key);
     const next = records.value.filter((candidate) => candidate !== record);
     const path = record.binding.projectPath.value;
     if (path !== null && pathKeys.get(projectPathIdentity(path)) === record.key) {
@@ -266,6 +311,14 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
     const disposing = disposeController(record);
     records.value = next;
     await disposing;
+  }
+
+  /** 关闭确认通过后才调用：取消确认不会改变任何来源记录。 */
+  function clearDrillDownSources(key: string): void {
+    drillDownSources.delete(key);
+    for (const [childKey, source] of drillDownSources) {
+      if (source.parentKey === key) drillDownSources.delete(childKey);
+    }
   }
 
   /** 保存活动标签；无路径时统一走另存为，以便先检查已打开路径冲突。 */
@@ -352,6 +405,7 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
       pendingCloseKey.value = key;
       return;
     }
+    clearDrillDownSources(key);
     const next = records.value.filter((candidate) => candidate.key !== key);
     const identity = record.binding.projectPath.value;
     if (identity !== null && pathKeys.get(projectPathIdentity(identity)) === key) pathKeys.delete(projectPathIdentity(identity));
@@ -371,10 +425,17 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
     await disposing;
   }
 
-  function activateTab(key: string): Promise<void> {
+  async function activateTab(key: string): Promise<void> {
     if (disposed) return Promise.resolve();
     const record = records.value.find((candidate) => candidate.key === key && candidate.hasDocument);
-    return record ? activateRecord(record) : Promise.resolve();
+    if (!record) return;
+    const previous = active.value;
+    await activateRecord(record);
+    if (!previous || previous.key === record.key) return;
+    const source = drillDownSources.get(previous.key);
+    if (!source || source.parentKey !== record.key) return;
+    const revealed = await record.editor.revealComponent(source.componentId);
+    if (!revealed) drillDownSources.delete(previous.key);
   }
 
   const tabs = computed<readonly DocumentTabSnapshot[]>(() => records.value
@@ -428,6 +489,13 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
       if (property === "tabs") return tabs;
       if (property === "activeDocumentKey") return computed(() => activeKey.value);
       if (property === "activateTab") return activateTab;
+      if (property === "openSubcircuit") return openSubcircuit;
+      if (property === "returnToParent") return returnToParent;
+      if (property === "canReturnToParent") return computed(() => {
+        const record = active.value;
+        const source = record ? drillDownSources.get(record.key) : undefined;
+        return Boolean(source && records.value.some((candidate) => candidate.key === source.parentKey && candidate.hasDocument));
+      });
       if (property === "closeTab") return closeTab;
       if (property === "dispose") return disposeWorkspace;
       if (property === "save") return saveProject;
@@ -478,6 +546,7 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
     pendingSaveConflict.value = null;
     activeKey.value = null;
     pathKeys.clear();
+    drillDownSources.clear();
     for (const record of controllers) void disposeController(record);
     records.value = [];
     controllers.clear();

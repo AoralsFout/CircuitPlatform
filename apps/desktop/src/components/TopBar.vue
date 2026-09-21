@@ -26,6 +26,7 @@ const props = defineProps<{
   tabs?: readonly DocumentTabSnapshot[];
   /** 当前活动标签键。 */
   activeDocumentKey?: string | null;
+  canReturnToParent?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -43,6 +44,7 @@ const emit = defineEmits<{
   saveAs: [];
   activateTab: [key: string];
   closeTab: [key: string];
+  returnToParent: [];
 }>();
 
 /** 保存指示器的可见文案；脏标记与失败都必须让用户「看到」，不能只留在标题里。 */
@@ -124,6 +126,7 @@ function onTabKeydown(event: KeyboardEvent, index: number): void {
       <RecentProjectsMenu :projects="recentProjects" :disabled="!canSave" @open-project="emit('openRecentProject', $event)" />
       <button class="topbar-button topbar-button--text" type="button" :disabled="!canSave" title="保存 (Ctrl/Cmd+S)" @click="emit('save')">保存</button>
       <button class="topbar-button topbar-button--text" type="button" :disabled="!canSave" title="另存为 (Ctrl/Cmd+Shift+S)" @click="emit('saveAs')">另存为</button>
+      <button v-if="canReturnToParent" class="topbar-button topbar-button--text" type="button" title="返回父电路" @click="emit('returnToParent')">返回父电路</button>
       <span class="engine-chip" :class="`engine-chip--${engineState}`" aria-live="polite"><span class="pulse-dot" aria-hidden="true"></span>{{ engineStateLabel }}</span>
       <button class="topbar-button" type="button" @click="emit('cycleTheme')" :title="themeLabel"><span class="ui-icon ui-icon--sun" aria-hidden="true">◐</span></button>
       <button class="topbar-button" type="button" :disabled="isBusy" @click="emit('checkEngine')" title="重新检查引擎"><span class="ui-icon" aria-hidden="true">↻</span></button>
