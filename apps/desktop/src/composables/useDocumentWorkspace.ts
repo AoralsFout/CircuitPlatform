@@ -303,13 +303,14 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
       source?.binding.setSaveError("保存冲突目标已改变，请重新选择路径。");
       return false;
     }
-    activeKey.value = source.key;
+    // Re-enter the serialized activation chain in case the modal remained open
+    // while the user requested another tab; never publish a direct unsynchronized switch.
+    await activateRecord(source);
     const succeeded = await source.binding.saveToPath(conflict.targetPath);
     if (!succeeded) return false;
     pathKeys.set(projectPathIdentity(conflict.targetPath), source.key);
     syncRecentProjects();
     discardRecord(target);
-    activeKey.value = source.key;
     return true;
   }
 
