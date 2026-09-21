@@ -24,6 +24,8 @@ export interface PendingSaveConflict {
 interface DocumentController {
   key: string;
   hasDocument: boolean;
+  /** 关闭或工作区卸载后设为 true；迟到的文件/引擎响应不得重新挂回标签集合。 */
+  disposed: boolean;
   binding: WorkspaceBinding;
   editor: EditorBinding;
   stopPathWatch: () => void;
@@ -64,6 +66,8 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
   const pendingCloseKey = ref<string | null>(null);
   const actionError = ref<string | null>(null);
   const opening = new Map<string, Promise<boolean>>();
+  const controllers = new Set<DocumentController>();
+  let disposed = false;
   const pendingSaveConflict = ref<PendingSaveConflict | null>(null);
   function readSharedRecentProjects(): RecentProject[] {
     try { return readRecentProjects(window.localStorage); } catch { return []; }
@@ -106,7 +110,9 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
       if (previous !== null) pathKeys.delete(projectPathIdentity(previous));
       if (next !== null) pathKeys.set(projectPathIdentity(next), key);
     });
-    return { key, hasDocument: false, binding, editor, stopPathWatch };
+    const controller = { key, hasDocument: false, disposed: false, binding, editor, stopPathWatch };
+    controllers.add(controller);
+    return controller;
   }
 
   function ensureController(): DocumentController {
@@ -124,6 +130,7 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
   });
 
   function setActive(record: DocumentController): void {
+    if (disposed || record.disposed) return;
     activeKey.value = record.key;
     actionError.value = null;
   }
@@ -131,6 +138,7 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
   /** Pause the previous live document before publishing a new active document. */
   function activateRecord(record: DocumentController): Promise<void> {
     const operation = activationChain.then(async () => {
+      if (disposed || record.disposed) return;
       // The initial empty controller is projected while activeKey is null. It still
       // needs an explicit key when its first Project becomes a real document.
       if (activeKey.value === record.key) return;
@@ -138,6 +146,7 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
       if (previous?.hasDocument && previous.binding.state.value.simulationState === "running") {
         await previous.binding.pause();
       }
+      if (disposed || record.disposed) return;
       setActive(record);
     });
     activationChain = operation.catch(() => undefined);
@@ -145,6 +154,7 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
   }
 
   async function openProject(path: string): Promise<boolean> {
+    if (disposed) return false;
     const identity = projectPathIdentity(path);
     const existingKey = pathKeys.get(identity);
     if (existingKey !== undefined) {
@@ -158,12 +168,15 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
       const current = active.value;
       const record = current?.hasDocument === false ? current : createController(false);
       await record.binding.bootstrap();
+      if (disposed || record.disposed) return false;
       const opened = await record.binding.openProjectFromPath(path);
+      if (disposed || record.disposed) return false;
       if (!opened) {
         actionError.value = record.binding.openError.value;
-        if (record !== current) record.binding.dispose();
+        if (record !== current) void disposeController(record);
         return false;
       }
+      if (disposed || record.disposed) return false;
       record.hasDocument = true;
       if (!records.value.includes(record)) records.value = [...records.value, record];
       pathKeys.set(identity, record.key);
@@ -176,15 +189,19 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
   }
 
   async function createNewDocument(): Promise<boolean> {
+    if (disposed) return false;
     const current = active.value;
     const record = current?.hasDocument === false ? current : createController();
     await record.binding.bootstrap();
+    if (disposed || record.disposed) return false;
     await record.binding.requestNew();
+    if (disposed || record.disposed) return false;
     if (record.binding.editorState.value === null) {
       actionError.value = record.binding.openError.value ?? "新建文档失败。";
-      if (record !== current) record.binding.dispose();
+      if (record !== current) void disposeController(record);
       return false;
     }
+    if (disposed || record.disposed) return false;
     record.hasDocument = true;
     if (!records.value.includes(record)) records.value = [...records.value, record];
     await activateRecord(record);
@@ -233,15 +250,22 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
   }
 
   /** 只在写入成功后移除冲突目标，确保取消/失败不会丢失标签或引擎。 */
-  function discardRecord(record: DocumentController): void {
+  function disposeController(record: DocumentController): Promise<void> {
+    if (record.disposed) return Promise.resolve();
+    record.disposed = true;
+    record.stopPathWatch();
+    return record.binding.dispose();
+  }
+
+  async function discardRecord(record: DocumentController): Promise<void> {
     const next = records.value.filter((candidate) => candidate !== record);
     const path = record.binding.projectPath.value;
     if (path !== null && pathKeys.get(projectPathIdentity(path)) === record.key) {
       pathKeys.delete(projectPathIdentity(path));
     }
-    record.binding.dispose();
-    record.stopPathWatch();
+    const disposing = disposeController(record);
     records.value = next;
+    await disposing;
   }
 
   /** 保存活动标签；无路径时统一走另存为，以便先检查已打开路径冲突。 */
@@ -310,7 +334,7 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
     if (!succeeded) return false;
     pathKeys.set(projectPathIdentity(conflict.targetPath), source.key);
     syncRecentProjects();
-    discardRecord(target);
+    await discardRecord(target);
     return true;
   }
 
@@ -319,7 +343,7 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
   }
 
   async function closeTab(key: string, discard = false): Promise<void> {
-    if (pendingSaveConflict.value !== null) return;
+    if (disposed || pendingSaveConflict.value !== null) return;
     const index = records.value.findIndex((record) => record.key === key);
     const record = records.value[index];
     if (!record || !record.hasDocument) return;
@@ -331,17 +355,18 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
     const next = records.value.filter((candidate) => candidate.key !== key);
     const identity = record.binding.projectPath.value;
     if (identity !== null && pathKeys.get(projectPathIdentity(identity)) === key) pathKeys.delete(projectPathIdentity(identity));
-    record.binding.dispose();
-    record.stopPathWatch();
+    const disposing = disposeController(record);
     records.value = next;
     if (activeKey.value === key) {
       const replacement = next[index] ?? next[index - 1] ?? next[0];
       activeKey.value = replacement?.key ?? null;
     }
     if (records.value.length === 0) ensureController();
+    await disposing;
   }
 
   function activateTab(key: string): Promise<void> {
+    if (disposed) return Promise.resolve();
     const record = records.value.find((candidate) => candidate.key === key && candidate.hasDocument);
     return record ? activateRecord(record) : Promise.resolve();
   }
@@ -398,6 +423,7 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
       if (property === "activeDocumentKey") return computed(() => activeKey.value);
       if (property === "activateTab") return activateTab;
       if (property === "closeTab") return closeTab;
+      if (property === "dispose") return disposeWorkspace;
       if (property === "save") return saveProject;
       if (property === "saveAs") return saveProjectAs;
       if (property === "pendingSaveConflict") return computed(() => pendingSaveConflict.value);
@@ -432,5 +458,24 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
   }) as any;
 
   ensureController();
+
+  /**
+   * 释放整个文档集合。它与单标签关闭共用每个 controller 的 dispose 路径，
+   * 且只允许执行一次；卸载期间尚未完成的 open/new 在 await 后由 disposed guard 丢弃。
+   */
+  function disposeWorkspace(): void {
+    if (disposed) return;
+    disposed = true;
+    pendingAction.value = null;
+    pendingPath.value = null;
+    pendingCloseKey.value = null;
+    pendingSaveConflict.value = null;
+    activeKey.value = null;
+    pathKeys.clear();
+    for (const record of controllers) void disposeController(record);
+    records.value = [];
+    controllers.clear();
+  }
+
   return workspaceFacade;
 }

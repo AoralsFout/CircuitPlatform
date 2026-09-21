@@ -73,6 +73,7 @@ const {
   requestLoadExample,
   addSubcircuitFromDialog,
   reloadSubcircuit,
+  dispose: disposeDocumentWorkspace,
 } = documentWorkspace;
 const {
   selectedConnection,
@@ -226,7 +227,10 @@ onMounted(() => {
   void bootstrap();
 });
 
-onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
+onBeforeUnmount(() => {
+  window.removeEventListener("keydown", onEditorKeydown);
+  disposeDocumentWorkspace();
+});
 </script>
 
 <template>

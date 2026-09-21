@@ -124,7 +124,7 @@ type PendingFileActionKind = "open" | "new" | "load-example";
 
 export interface WorkspaceBinding {
   /** 释放此文档的恢复调度、编辑器订阅和按文档引擎进程。 */
-  dispose(): void;
+  dispose(): Promise<void>;
   state: DeepReadonly<Ref<WorkspaceSnapshot>>;
   editorState: DeepReadonly<Ref<EditorSnapshot | null>>;
   bootstrap(): Promise<void>;
@@ -359,8 +359,10 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   const workspace = createWorkspace(monitoredAdapter, { queue, scheduler: options.scheduler });
   const recoveryScheduler = options.recoveryScheduler ?? defaultRecoveryScheduler;
   const state = shallowRef(workspace.snapshot());
+  let disposed = false;
   // 连续运行的每一拍由工作区自行排定，因此界面靠订阅拿到那部分快照变化。
-  workspace.subscribe((snapshot) => {
+  const unsubscribeWorkspace = workspace.subscribe((snapshot) => {
+    if (disposed) return;
     state.value = snapshot;
     // 连续运行的 tick 不经过 reflect；因此引擎在后台推进期间死亡时，必须从订阅
     // 路径启动本运行时自己的恢复循环。恢复状态和编辑器冻结都留在此文档闭包内，
@@ -385,7 +387,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   let simulationRefreshRequested = false;
   /** 恢复循环是否在跑：防止同一次不可用触发多条并行的恢复路径。 */
   let recovering = false;
-  let disposed = false;
+  let recoveryWaitCancel: (() => void) | null = null;
 
   const projectPath = shallowRef<string | null>(null);
   const isDirty = shallowRef(false);
@@ -453,9 +455,12 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   }
 
   async function reflect(operation: () => Promise<WorkspaceSnapshot>): Promise<void> {
+    if (disposed) return;
     const pending = operation();
     state.value = workspace.snapshot();
-    state.value = await pending;
+    const next = await pending;
+    if (disposed) return;
+    state.value = next;
     if (state.value.engineState === "unavailable" || state.value.engineState === "error") {
       beginRecovery();
     }
@@ -464,6 +469,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   // EditorSession 的结构 settle 用于验证 Circuit；工作区仍需重新提交当前输入并读取可展示信号。
   // 这只是一次读数刷新，不推进电路，因此不增加步数、也不追加波形记录。
   async function refreshSimulationAfterBindingsChange(): Promise<void> {
+    if (disposed) return;
     if (!simulationRefreshRequested) {
       state.value = workspace.snapshot();
       return;
@@ -475,7 +481,18 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   /** 恢复循环里两次健康检查之间的一次等待。 */
   function waitRecoveryRetry(): Promise<void> {
     return new Promise((resolve) => {
-      recoveryScheduler.schedule(RECOVERY_RETRY_MS, resolve);
+      let settled = false;
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        recoveryWaitCancel = null;
+        resolve();
+      };
+      const cancel = recoveryScheduler.schedule(RECOVERY_RETRY_MS, finish);
+      recoveryWaitCancel = () => {
+        cancel();
+        finish();
+      };
     });
   }
 
@@ -774,7 +791,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
    * 期间编辑器结构事务保持冻结（ADR 0010 的不可用语义），恢复完成后解除。
    */
   function beginRecovery(): void {
-    if (recovering || editor === null) return;
+    if (disposed || recovering || editor === null) return;
     recovering = true;
     editor.setEngineAvailability(false);
     void recoverEngine();
@@ -794,10 +811,12 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
         } catch {
           // 健康检查自身抛出（桥接故障等一层异常）视作这次检查失败，等下一次重试。
           await waitRecoveryRetry();
+          if (disposed) return;
           continue;
         }
         if (health.status !== "ok") {
           await waitRecoveryRetry();
+          if (disposed) return;
           continue;
         }
         const sameProcess = !rebuildFailed && !rebuildLatched &&
@@ -805,6 +824,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
           lastKnownEngineEpoch === health.processEpoch;
         // 把 ready 状态与文案写进工作区快照；这次检查同时会刷新已记录的进程代号。
         await reflect(() => workspace.checkEngine());
+        if (disposed) return;
         if (sameProcess) {
           editor?.setEngineAvailability(true);
           return;
@@ -819,6 +839,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
         if (loaded.bindings === null) {
           rebuildFailed = true;
           await waitRecoveryRetry();
+          if (disposed) return;
           continue;
         }
         rebuildLatched = false;
@@ -829,6 +850,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
         // 不发布的话界面会停在恢复前的旧读数上（engineState 已是 ready，步数与信号却是旧的）。
         workspace.rebindSimulation(nextBindings);
         const rebuiltSnapshot = await workspace.refreshReadings();
+        if (disposed) return;
         editor?.adoptBindings(toEditorBindings(nextBindings));
         editor?.setEngineAvailability(true);
         // 最后才发布「第 0 步 + 新读数」完成标志：观察者看到完成时，编辑器绑定与可用性
@@ -916,6 +938,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     const document = createAndDemoDocument();
     // 初值省略：沿推送路径的既有规则沿用工作区当前输入值（与引擎重建同规则），示例不另立语义。
     const loaded = await workspace.openCircuit(circuitDocumentFrom(document));
+    if (disposed) return;
     if (loaded.bindings === null) {
       openError.value = loaded.snapshot.operationError ?? "加载示例失败。";
       return;
@@ -929,6 +952,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
 
   async function checkEngine(): Promise<void> {
     await reflect(() => workspace.checkEngine());
+    if (disposed) return;
     // 恢复循环进行中时不打扰它：可用性由恢复流程自己解除。
     if (recovering) return;
     editor?.setEngineAvailability(state.value.engineState === "ready");
@@ -971,8 +995,10 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     const pending = editor.dispatch(command);
     editorState.value = editor.snapshot();
     const result = await pending;
+    if (disposed) return null;
     editorState.value = result.snapshot;
     await refreshSimulationAfterBindingsChange();
+    if (disposed) return null;
     if (result.ok && (command.type === "undo" || command.type === "redo")) {
       restoreAdoptedProjectionRevision();
     }
@@ -1363,17 +1389,21 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
       root: parsed.file,
       reader: hierarchyProjectReader(projectFiles, true),
     });
+    if (disposed) return false;
     const circuit = circuitFromHierarchy(hierarchy);
     const loaded = await workspace.openCircuit(circuit, {
       inputValues: parsed.inputValues,
     });
+    if (disposed) return false;
     if (loaded.bindings === null) {
       openError.value = loaded.snapshot.operationError ?? "打开项目失败。";
       return false;
     }
     const projectedBindings = hierarchyBindings(loaded.bindings, hierarchy);
     state.value = workspace.rebindSimulation(projectedBindings);
-    state.value = await workspace.refreshReadings();
+    const refreshed = await workspace.refreshReadings();
+    if (disposed) return false;
+    state.value = refreshed;
     // 解析出的端点 point 是占位零点（#35 契约）：端口清单此刻已由引擎回传，先用元件位置
     // 与端口几何重建端点与 Route，再把文档交给会话；占位值不能带进后续编辑。
     const document = rebuildLoadedDocumentGeometry(
@@ -1456,6 +1486,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   async function openProjectFromPath(path: string): Promise<boolean> {
     // 首启空状态（#40）没有编辑器会话也必须能打开：会话由这次成功加载的 attachEditor 建立。
     const file = await adapter.readProjectFile(path);
+    if (disposed) return false;
     if (!file.ok) {
       openError.value = file.reason;
       // 目标文件已不存在的最近项目条目立刻移出列表：留着它只会让用户反复撞上同一个错误。
@@ -1502,6 +1533,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
       return;
     }
     const loaded = await workspace.openCircuit({ components: [], connections: [] });
+    if (disposed) return;
     if (loaded.bindings === null) {
       openError.value = loaded.snapshot.operationError ?? "新建文档失败。";
       return;
@@ -1623,13 +1655,23 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     return createConnection(left, right, route, connectionId);
   }
 
+  let disposePromise: Promise<void> | null = null;
   return {
-    dispose() {
+    async dispose(): Promise<void> {
+      if (disposePromise !== null) return disposePromise;
       disposed = true;
+      recoveryWaitCancel?.();
+      recoveryWaitCancel = null;
+      unsubscribeWorkspace();
       unsubscribeEditor?.();
       unsubscribeEditor = null;
-      workspace.pause();
-      void adapter.closeDocument?.();
+      disposePromise = (async () => {
+        // Stop the scheduler before closing the keyed engine. Awaiting pause also
+        // makes closeTab's completion a reliable lifecycle boundary for callers.
+        await workspace.pause();
+        await adapter.closeDocument?.();
+      })();
+      return disposePromise;
     },
     state: readonly(state),
     editorState: readonly(editorState),
