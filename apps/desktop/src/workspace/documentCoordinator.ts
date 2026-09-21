@@ -45,13 +45,19 @@ export type DocumentRuntimeFactory = (context: DocumentRuntimeFactoryContext) =>
  */
 export function createWindowDocumentRuntimeFactory(): DocumentRuntimeFactory {
   return ({ documentKey, path, parsed }) => {
-    const bridge = window.circuitPlatform.forDocument(documentKey) as unknown as EngineAdapter & {
+    const bridge = (window as unknown as {
+      circuitPlatform: {
+        forDocument(key: string): unknown;
+      };
+    }).circuitPlatform.forDocument(documentKey) as EngineAdapter & {
       closeDocument(): Promise<{ ok: true }>;
     };
     return createDocumentRuntime({
       adapter: bridge,
       runtimeId: documentKey,
-      disposeEngine: () => bridge.closeDocument(),
+      disposeEngine: async () => {
+        await bridge.closeDocument();
+      },
       project: path === null ? undefined : { path },
       initialEditor: {
         document: parsed?.document ?? { components: [], connections: [] },

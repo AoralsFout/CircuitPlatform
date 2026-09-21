@@ -52,7 +52,7 @@ function fakeRuntime(key: string): DocumentRuntime {
     setActiveRailPage: () => current,
     setBottomTab: () => current,
     destroy() { current = { ...current, active: false }; listeners.clear(); },
-    dispose() { this.destroy(); },
+    dispose() { current = { ...current, active: false }; listeners.clear(); },
   } as unknown as DocumentRuntime;
   return runtime;
 }
@@ -100,7 +100,9 @@ test("coordinator pauses on activation and closes only the requested runtime", a
   assert.equal((coordinator.snapshot().tabs.find((tab) => tab.key === firstKey))?.simulationState, "paused");
   assert.equal((await coordinator.close(secondKey, { discard: true })).ok, true);
   assert.equal(coordinator.snapshot().activeKey, firstKey);
-  assert.equal((await coordinator.close(firstKey, { discard: true })).activeKey, null);
+  const closed = await coordinator.close(firstKey, { discard: true });
+  assert.equal(closed.ok, true);
+  assert.equal(closed.ok ? closed.activeKey : null, null);
 });
 
 test("document tab resolver supports arrows, Home/End, and activation keys", () => {

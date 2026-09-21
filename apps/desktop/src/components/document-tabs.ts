@@ -23,4 +23,3 @@ export function resolveDocumentTabKey(key: string, current: number, count: numbe
   if (key === "Enter" || key === " ") return { action: "activate", index: bounded };
   return { action: "none", index: bounded };
 }
-
