@@ -1,6 +1,7 @@
 import { computed, ref, shallowRef, watch, type ComputedRef, type Ref } from "vue";
 import type { ComponentKindName, PortSpec } from "@circuit-platform/protocol";
 import { projectPathIdentity } from "../project-file/paths.ts";
+import { readRecentProjects, type RecentProject } from "../project-file/recent-projects.ts";
 import type { EditorComponentId, EditorSelection, Point, WireColorId } from "../editor/index.ts";
 import { useEditorState } from "./useEditorState.ts";
 import { useWorkspace, type WorkspaceBinding } from "./useWorkspace.ts";
@@ -8,6 +9,16 @@ import type { DocumentTabSnapshot } from "../workspace/documentCoordinator.ts";
 
 type EditorBinding = ReturnType<typeof useEditorState>;
 type PendingAction = "open" | "new" | "load-example" | "close" | null;
+
+/** 保存到另一标签已占用路径时冻结的、按运行时键寻址的冲突快照。 */
+export interface PendingSaveConflict {
+  sourceKey: string;
+  targetKey: string;
+  targetPath: string;
+  sourceDisplayName: string;
+  targetDisplayName: string;
+  targetIsDirty: boolean;
+}
 
 interface DocumentController {
   key: string;
@@ -34,20 +45,33 @@ export function useDocumentWorkspace(): any {
   const records = shallowRef<DocumentController[]>([]);
   const activeKey = ref<string | null>(null);
   const sequence = ref(1);
+  const temporarySequence = ref(1);
   const pathKeys = new Map<string, string>();
   const pendingAction = ref<PendingAction>(null);
   const pendingPath = ref<string | null>(null);
   const pendingCloseKey = ref<string | null>(null);
   const actionError = ref<string | null>(null);
   const opening = new Map<string, Promise<boolean>>();
+  const pendingSaveConflict = ref<PendingSaveConflict | null>(null);
+  function readSharedRecentProjects(): RecentProject[] {
+    try { return readRecentProjects(window.localStorage); } catch { return []; }
+  }
+
+  const recentProjects = shallowRef<RecentProject[]>(readSharedRecentProjects());
+
+  function syncRecentProjects(): void {
+    recentProjects.value = readSharedRecentProjects();
+  }
 
   function platform(): Window["circuitPlatform"] {
     return window.circuitPlatform;
   }
 
-  function createController(): DocumentController {
+  function createController(assignTemporaryName = true): DocumentController {
     const key = `document-${sequence.value++}`;
-    const binding = useWorkspace({ documentKey: key });
+    const temporaryName = assignTemporaryName ? `未命名 ${temporarySequence.value++}` : undefined;
+    // 保持现有按文档键的公开 seam：useWorkspace({ documentKey: key })。
+    const binding = useWorkspace({ documentKey: key, temporaryName });
     const editor = useEditorState(
       binding.state,
       binding.editorState,
@@ -96,7 +120,7 @@ export function useDocumentWorkspace(): any {
     if (waiting !== undefined) return waiting;
     const operation = (async () => {
       const current = active.value;
-      const record = current?.hasDocument === false ? current : createController();
+      const record = current?.hasDocument === false ? current : createController(false);
       await record.binding.bootstrap();
       const opened = await record.binding.openProjectFromPath(path);
       if (!opened) {
@@ -107,6 +131,7 @@ export function useDocumentWorkspace(): any {
       record.hasDocument = true;
       if (!records.value.includes(record)) records.value = [...records.value, record];
       pathKeys.set(identity, record.key);
+      syncRecentProjects();
       setActive(record);
       return true;
     })();
@@ -131,33 +156,16 @@ export function useDocumentWorkspace(): any {
   }
 
   async function requestOpen(): Promise<void> {
-    const current = active.value;
-    if (current?.binding.isDirty.value) {
-      pendingAction.value = "open";
-      pendingPath.value = null;
-      return;
-    }
     const picked = await platform().pickOpenPath();
     if (picked.ok) await openProject(picked.path);
     else if (picked.reason !== "canceled") actionError.value = picked.reason;
   }
 
   async function requestOpenRecent(path: string): Promise<void> {
-    const current = active.value;
-    if (current?.binding.isDirty.value) {
-      pendingAction.value = "open";
-      pendingPath.value = path;
-      return;
-    }
     await openProject(path);
   }
 
   async function requestNew(): Promise<void> {
-    if (active.value?.binding.isDirty.value) {
-      pendingAction.value = "new";
-      pendingPath.value = null;
-      return;
-    }
     await createNewDocument();
   }
 
@@ -184,7 +192,97 @@ export function useDocumentWorkspace(): any {
     pendingCloseKey.value = null;
   }
 
+  function findRecord(key: string): DocumentController | undefined {
+    return records.value.find((record) => record.key === key && record.hasDocument);
+  }
+
+  /** 只在写入成功后移除冲突目标，确保取消/失败不会丢失标签或引擎。 */
+  function discardRecord(record: DocumentController): void {
+    const next = records.value.filter((candidate) => candidate !== record);
+    const path = record.binding.projectPath.value;
+    if (path !== null && pathKeys.get(projectPathIdentity(path)) === record.key) {
+      pathKeys.delete(projectPathIdentity(path));
+    }
+    record.binding.dispose();
+    record.stopPathWatch();
+    records.value = next;
+  }
+
+  /** 保存活动标签；无路径时统一走另存为，以便先检查已打开路径冲突。 */
+  async function saveProject(): Promise<boolean> {
+    if (pendingSaveConflict.value !== null) return false;
+    const record = active.value;
+    if (!record?.hasDocument) return false;
+    if (record.binding.projectPath.value === null) return saveProjectAs();
+    return record.binding.save();
+  }
+
+  /** 打开另存为对话框并在任何写盘前检查路径身份冲突。 */
+  async function saveProjectAs(): Promise<boolean> {
+    if (pendingSaveConflict.value !== null) return false;
+    const record = active.value;
+    if (!record?.hasDocument) return false;
+    const dialog = await platform().pickSavePath({
+      defaultPath: record.binding.projectPath.value ?? record.binding.projectName.value ?? "未命名电路.circuit.json",
+    });
+    if (!dialog.ok) {
+      if (dialog.reason !== "canceled") record.binding.setSaveError(dialog.reason);
+      return false;
+    }
+    const targetIdentity = projectPathIdentity(dialog.path);
+    const target = records.value.find((candidate) =>
+      candidate.hasDocument && candidate.key !== record.key && candidate.binding.projectPath.value !== null &&
+      projectPathIdentity(candidate.binding.projectPath.value) === targetIdentity);
+    if (target !== undefined) {
+      pendingSaveConflict.value = {
+        sourceKey: record.key,
+        targetKey: target.key,
+        targetPath: dialog.path,
+        sourceDisplayName: record.binding.projectName.value ?? `未命名 ${record.key}`,
+        targetDisplayName: target.binding.projectName.value ?? target.key,
+        targetIsDirty: target.binding.isDirty.value,
+      };
+      return false;
+    }
+    const succeeded = await record.binding.saveToPath(dialog.path);
+    if (succeeded) {
+      pathKeys.set(targetIdentity, record.key);
+      syncRecentProjects();
+    }
+    return succeeded;
+  }
+
+  /**
+   * 确认已打开路径的覆盖合并；源/目标均按运行时键重新解析，标签切换不会重定向操作。
+   * 写盘失败时目标仍保留，只有成功后才提交身份切换后的标签删除。
+   */
+  async function confirmSaveConflict(): Promise<boolean> {
+    const conflict = pendingSaveConflict.value;
+    if (conflict === null) return false;
+    pendingSaveConflict.value = null;
+    const source = findRecord(conflict.sourceKey);
+    const target = findRecord(conflict.targetKey);
+    if (!source || !target || target.binding.projectPath.value === null ||
+      projectPathIdentity(target.binding.projectPath.value) !== projectPathIdentity(conflict.targetPath)) {
+      source?.binding.setSaveError("保存冲突目标已改变，请重新选择路径。");
+      return false;
+    }
+    activeKey.value = source.key;
+    const succeeded = await source.binding.saveToPath(conflict.targetPath);
+    if (!succeeded) return false;
+    pathKeys.set(projectPathIdentity(conflict.targetPath), source.key);
+    syncRecentProjects();
+    discardRecord(target);
+    activeKey.value = source.key;
+    return true;
+  }
+
+  function cancelSaveConflict(): void {
+    pendingSaveConflict.value = null;
+  }
+
   async function closeTab(key: string, discard = false): Promise<void> {
+    if (pendingSaveConflict.value !== null) return;
     const index = records.value.findIndex((record) => record.key === key);
     const record = records.value[index];
     if (!record || !record.hasDocument) return;
@@ -195,7 +293,7 @@ export function useDocumentWorkspace(): any {
     }
     const next = records.value.filter((candidate) => candidate.key !== key);
     const identity = record.binding.projectPath.value;
-    if (identity !== null) pathKeys.delete(projectPathIdentity(identity));
+    if (identity !== null && pathKeys.get(projectPathIdentity(identity)) === key) pathKeys.delete(projectPathIdentity(identity));
     record.binding.dispose();
     record.stopPathWatch();
     records.value = next;
@@ -263,6 +361,12 @@ export function useDocumentWorkspace(): any {
       if (property === "activeDocumentKey") return computed(() => activeKey.value);
       if (property === "activateTab") return activateTab;
       if (property === "closeTab") return closeTab;
+      if (property === "save") return saveProject;
+      if (property === "saveAs") return saveProjectAs;
+      if (property === "pendingSaveConflict") return computed(() => pendingSaveConflict.value);
+      if (property === "recentProjects") return recentProjects;
+      if (property === "confirmSaveConflict") return confirmSaveConflict;
+      if (property === "cancelSaveConflict") return cancelSaveConflict;
       if (property === "requestOpen") return requestOpen;
       if (property === "requestOpenRecent") return requestOpenRecent;
       if (property === "requestNew") return requestNew;

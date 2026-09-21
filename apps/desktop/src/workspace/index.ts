@@ -26,6 +26,8 @@ export {
   type CoordinatorNewDocumentResult,
   type CoordinatorOpenResult,
   type CoordinatorProjectReader,
+  type CoordinatorProjectWriter,
+  type CoordinatorSaveConflict,
   type DocumentCoordinator,
   type DocumentCoordinatorOptions,
   type DocumentCoordinatorSnapshot,

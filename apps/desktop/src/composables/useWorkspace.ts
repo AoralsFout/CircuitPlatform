@@ -188,6 +188,8 @@ export interface WorkspaceBinding {
   isDirty: DeepReadonly<Ref<boolean>>;
   /** 最近一次保存失败的展示原因；没有失败时为 null，成功的保存会清除它。 */
   saveError: DeepReadonly<Ref<string | null>>;
+  /** 设置由协调器产生的可展示保存错误，不改动文档内容或路径身份。 */
+  setSaveError(message: string | null): void;
   /** 编辑器就绪时可以保存；保存不依赖引擎在线。 */
   canSave: ComputedRef<boolean>;
   /** 顶栏显示的项目名：已保存文档的文件名，未保存文档为 null（界面回退到占位名）。 */
@@ -204,6 +206,11 @@ export interface WorkspaceBinding {
    * @returns 保存成功返回 true；用户取消对话框或保存失败返回 false。
    */
   saveAs(): Promise<boolean>;
+  /**
+   * 把当前活动文档写入调用方已经确认的路径；不弹对话框，供多文档协调器在冲突确认后提交。
+   * @param path 目标文件路径；成功后切换文档路径身份，失败不改变任何文档状态。
+   */
+  saveToPath(path: string): Promise<boolean>;
   /** 最近一次打开或新建失败的可展示原因；没有失败时为 null，成功的打开/新建会清除它。 */
   openError: DeepReadonly<Ref<string | null>>;
   /**
@@ -281,6 +288,8 @@ export interface UseWorkspaceOptions {
   recoveryScheduler?: TickScheduler;
   /** 文档引擎键；省略时保留单文档兼容桥接。 */
   documentKey?: string;
+  /** 未保存文档的标签名称；省略时保持单文档兼容行为（项目名为 null）。 */
+  temporaryName?: string;
 }
 
 /**
@@ -387,7 +396,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   // 上一次落盘内容（序列化后的项目文件文本）；置脏就是拿当前内容与它比较。
   let savedFileSnapshot: string | null = null;
   const canSave = computed(() => editorState.value !== null);
-  const projectName = computed(() => projectPath.value === null ? null : projectDisplayName(projectPath.value));
+  const projectName = computed(() => projectPath.value === null ? (options.temporaryName ?? null) : projectDisplayName(projectPath.value));
   const saveState = computed<ProjectSaveState>(() => {
     if (saveError.value !== null) return "error";
     return isDirty.value ? "dirty" : "saved";
@@ -426,7 +435,9 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   /** 保存成功后把该路径记录进最近项目并刷新界面列表；记录失败不影响已完成的保存。 */
   function recordRecentProject(path: string): void {
     const storage = preferenceStorage();
-    recentProjects.value = rememberRecentProject(storage, recentProjects.value, path);
+    // 多标签各自拥有一个 binding，但最近项目是工作区级持久化；每次写入前读取最新存储，
+    // 避免第二份 binding 用旧内存副本覆盖第一份标签刚记录的路径。
+    recentProjects.value = rememberRecentProject(storage, readRecentProjects(storage), path);
   }
 
   /** 把一条最近项目从列表与存储中移除；存储不可用时安静降级。 */
@@ -1293,15 +1304,27 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     }
     const current = editor.snapshot();
     const file = serializeProjectFile({ document: current.document, inputValues: state.value.inputValues });
-    if (projectPath.value === null || projectPathIdentity(projectPath.value) === projectPathIdentity(dialog.path)) {
-      return commitSave(dialog.path, file);
+    return saveToPath(dialog.path, file);
+  }
+
+  /**
+   * 将当前文档保存到指定路径；路径重定位和往返校验都在原子写入前完成。
+   * @param path 目标路径。
+   * @param preparedFile 可选的已序列化文件，内部另存为流程用于避免重复取快照。
+   * @returns 写入成功返回 true；任何计算或 IO 失败均保留原身份和脏状态。
+   */
+  async function saveToPath(path: string, preparedFile?: ProjectFileData): Promise<boolean> {
+    if (!editor) return false;
+    const current = preparedFile ?? serializeProjectFile({ document: editor.snapshot().document, inputValues: state.value.inputValues });
+    if (projectPath.value === null || projectPathIdentity(projectPath.value) === projectPathIdentity(path)) {
+      return commitSave(path, current);
     }
-    const rebased = rebaseProjectFileReferences(file, projectPath.value, dialog.path);
+    const rebased = rebaseProjectFileReferences(current, projectPath.value, path);
     if (!rebased.ok) {
       saveError.value = rebased.error.message;
       return false;
     }
-    return commitSave(dialog.path, rebased.value);
+    return commitSave(path, rebased.value);
   }
 
   async function save(): Promise<boolean> {
@@ -1640,11 +1663,13 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     projectPath: readonly(projectPath),
     isDirty: readonly(isDirty),
     saveError: readonly(saveError),
+    setSaveError(message) { saveError.value = message; },
     canSave,
     projectName,
     saveState,
     save,
     saveAs,
+    saveToPath,
     openError: readonly(openError),
     pendingFileAction: readonly(pendingFileAction),
     requestOpen,
