@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createComponentDefinitionRegistry, hitTestCanvas, type CanvasPort, type CanvasScene } from "../src/canvas/index.ts";
 import { contextActionsFor } from "../src/editor/context-menu.ts";
-import { createInspectorModel } from "../src/editor/inspector.ts";
+import { createInspectorModel, createSubcircuitSignalTable } from "../src/editor/inspector.ts";
 import { defaultPortsFor } from "../src/editor/bus-ports.ts";
 import { BUILT_IN_PORTS } from "./fake-ports.ts";
 
@@ -227,4 +227,27 @@ test("inspector projects subcircuit reference and resolution diagnostics without
   });
   assert.equal(model.ports.length, 2);
   assert.equal("components" in model, false);
+});
+
+test("subcircuit signal table uses occurrence-stable rows and stays read-only", () => {
+  const descriptor = {
+    ownerId: "unit-a",
+    flatId: "unit-a/state",
+    kind: "d_flip_flop" as const,
+    displayName: "状态寄存器",
+    path: ["unit-a", "state"],
+    ports: [
+      { name: "q", direction: "output" as const, width: 1 },
+      { name: "clock", direction: "input" as const, width: 1 },
+    ],
+  };
+  const table = createSubcircuitSignalTable("unit-a", {
+    descriptors: [descriptor, { ...descriptor, ownerId: "unit-b", flatId: "unit-b/state", path: ["unit-b", "state"] }],
+    signals: { "unit-a/state:q": "1", "unit-b/state:q": "0" },
+  });
+  assert.equal(table?.components.length, 1);
+  assert.equal(table?.components[0]?.id, "unit-a/state");
+  assert.equal(table?.components[0]?.ports.find((port) => port.name === "q")?.signal, "1");
+  assert.equal(table?.components[0]?.ports.find((port) => port.name === "clock")?.signal, "X");
+  assert.equal("componentId" in (table?.components[0]?.ports[0] ?? {}), false);
 });

@@ -7,7 +7,7 @@ import { nextTick, onBeforeUnmount, onMounted, ref } from "vue";
  */
 const props = defineProps<{
   /** 挂起的文件操作；文案随它变化。 */
-  action: "open" | "new" | "load-example";
+  action: "open" | "new" | "load-example" | "close";
 }>();
 
 const emit = defineEmits<{
@@ -23,6 +23,7 @@ const COPY = {
   open: { title: "打开项目文件？", description: "当前文档有未保存的改动，打开后这些改动将丢失。", confirm: "放弃改动并打开" },
   new: { title: "新建文档？", description: "当前文档有未保存的改动，新建后这些改动将丢失。", confirm: "放弃改动并新建" },
   "load-example": { title: "加载示例？", description: "当前文档有未保存的改动，加载示例后这些改动将丢失。", confirm: "放弃改动并加载示例" },
+  close: { title: "关闭项目？", description: "当前项目有未保存的改动，关闭后这些改动将丢失。", confirm: "放弃改动并关闭" },
 } as const;
 
 function onDialogKeydown(event: KeyboardEvent): void {

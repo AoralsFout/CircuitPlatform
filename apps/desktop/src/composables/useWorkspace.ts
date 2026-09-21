@@ -9,6 +9,7 @@ import {
   type EditorComponent,
   type EditorComponentKind,
   type EditorComponentId,
+  type InternalComponentDescriptor,
   type EditorDocument,
   type EditorProjectionInput,
   type Point,
@@ -29,6 +30,7 @@ import {
   type SimulationBindings,
   type TickScheduler,
   type WorkspaceSnapshot,
+  type InternalSignalRead,
 } from "../workspace/index.ts";
 import { createEngineCallQueue } from "../workspace/engineQueue.ts";
 import {
@@ -79,8 +81,27 @@ interface ProjectFileBridge {
   readProjectFile(filePath: string): Promise<{ ok: true; content: string } | { ok: false; reason: string; code?: string }>;
 }
 
+interface DocumentEngineBridge extends EngineAdapter {
+  closeDocument?: () => Promise<{ ok: true }>;
+}
+
+interface PlatformBridge extends DocumentEngineBridge, ProjectFileBridge {
+  forDocument?: (documentKey: string) => DocumentEngineBridge;
+}
+
 /** 顶栏保存状态的三个可见语义：已保存、有未保存改动、最近一次保存失败。 */
 export type ProjectSaveState = "saved" | "dirty" | "error";
+
+/** 父文档中一个 Subcircuit occurrence 的采用版本与独立重载状态。 */
+export interface SubcircuitOccurrenceSnapshot {
+  componentId: EditorComponentId;
+  reference: string;
+  targetIdentity: string;
+  adoptedVersion: string | null;
+  needsReload: boolean;
+  status: "resolved" | "unresolved" | "resolving";
+  diagnostic: string | null;
+}
 
 /** 未保存文档在另存为对话框里的默认文件名；与顶栏占位名一致。 */
 const UNTITLED_PROJECT_NAME = "未命名电路.circuit.json";
@@ -92,6 +113,15 @@ const PROJECT_FILE_NOT_FOUND_CODE = "PROJECT_FILE_NOT_FOUND";
 function hierarchyCacheKey(identity: string, occurrencePath: readonly string[] = []): string {
   const normalized = projectPathIdentity(identity);
   return occurrencePath.length === 0 ? normalized : `${normalized}\u0001${occurrencePath.join("/")}`;
+}
+
+/** ProjectFileData 的内容 token；保存成功事件与各 occurrence 共享这份稳定身份。 */
+function projectVersionOf(file: ProjectFileData): string {
+  return JSON.stringify(file);
+}
+
+function occurrenceVersionKey(targetIdentity: string, componentId: string): string {
+  return `${projectPathIdentity(targetIdentity)}\u0001${componentId}`;
 }
 
 /** 丢弃一个 occurrence 的完整递归缓存树，避免失败重载留下不可见的旧子 Project。 */
@@ -114,7 +144,9 @@ interface HierarchyRefreshRoot {
 /** 置脏确认挂起的文件操作种类；`open` 可能携带最近项目入口挂起的路径。 */
 type PendingFileActionKind = "open" | "new" | "load-example";
 
-interface WorkspaceBinding {
+export interface WorkspaceBinding {
+  /** 释放此文档的恢复调度、编辑器订阅和按文档引擎进程。 */
+  dispose(): Promise<void>;
   state: DeepReadonly<Ref<WorkspaceSnapshot>>;
   editorState: DeepReadonly<Ref<EditorSnapshot | null>>;
   bootstrap(): Promise<void>;
@@ -131,6 +163,8 @@ interface WorkspaceBinding {
   reset(): Promise<void>;
   /** 设置某个 Input 某一位的取值；运行中只提交 `set_input`，停止或暂停时提交后立刻求值。 */
   setInputBit(key: InputKey, index: number, bit: InputBit): Promise<void>;
+  /** 设置只读内部信号表的可见性；隐藏时不会发起内部 Port 读取。 */
+  setInternalSignalTableVisible(visible: boolean): void;
   select(selection: EditorSelection): Promise<void>;
   moveComponent(componentId: EditorComponentId, position: Point): Promise<void>;
   editRoute(connectionId: string, route: readonly Point[]): Promise<void>;
@@ -172,12 +206,22 @@ interface WorkspaceBinding {
   addSubcircuitFromDialog(center?: Point): Promise<boolean>;
   /** 显式重新读取并采用一个 Subcircuit 及其递归依赖；磁盘变化不会自动传播。 */
   reloadSubcircuit(componentId: EditorComponentId): Promise<boolean>;
+  /** 当前父文档的 occurrence-local 旧版本列表；不会把 stale 混入 isDirty。 */
+  staleSubcircuits: ComputedRef<readonly SubcircuitOccurrenceSnapshot[]>;
+  /** 当前文档是否至少有一个 Subcircuit occurrence 需要显式重载。 */
+  needsReload: ComputedRef<boolean>;
+  /** 保存成功后由多文档协调器调用；只更新状态，不读取磁盘、不创建历史。 */
+  markSubcircuitsStale(targetIdentity: string, savedVersion: string): void;
+  /** 当前文档最近一次成功保存的内容 token。 */
+  projectVersion: DeepReadonly<Ref<string | null>>;
   /** 当前文档已保存到的路径原始写法；从未保存过时为 null。 */
   projectPath: DeepReadonly<Ref<string | null>>;
   /** 文档内容（结构与 Input 当前值）自上次保存以来是否有改动。 */
   isDirty: DeepReadonly<Ref<boolean>>;
   /** 最近一次保存失败的展示原因；没有失败时为 null，成功的保存会清除它。 */
   saveError: DeepReadonly<Ref<string | null>>;
+  /** 设置由协调器产生的可展示保存错误，不改动文档内容或路径身份。 */
+  setSaveError(message: string | null): void;
   /** 编辑器就绪时可以保存；保存不依赖引擎在线。 */
   canSave: ComputedRef<boolean>;
   /** 顶栏显示的项目名：已保存文档的文件名，未保存文档为 null（界面回退到占位名）。 */
@@ -194,6 +238,11 @@ interface WorkspaceBinding {
    * @returns 保存成功返回 true；用户取消对话框或保存失败返回 false。
    */
   saveAs(): Promise<boolean>;
+  /**
+   * 把当前活动文档写入调用方已经确认的路径；不弹对话框，供多文档协调器在冲突确认后提交。
+   * @param path 目标文件路径；成功后切换文档路径身份，失败不改变任何文档状态。
+   */
+  saveToPath(path: string): Promise<boolean>;
   /** 最近一次打开或新建失败的可展示原因；没有失败时为 null，成功的打开/新建会清除它。 */
   openError: DeepReadonly<Ref<string | null>>;
   /**
@@ -264,11 +313,17 @@ const defaultRecoveryScheduler: TickScheduler = {
 };
 
 export interface UseWorkspaceOptions {
+  /** 连续推进的调度器；生产环境省略时使用工作区默认定时器。 */
+  scheduler?: TickScheduler;
   /**
    * 引擎不可用期间健康检查重试的调度器；省略时使用 `setTimeout`。
    * 测试注入手动点火的假实现即可无头驱动恢复循环。
    */
   recoveryScheduler?: TickScheduler;
+  /** 文档引擎键；省略时保留单文档兼容桥接。 */
+  documentKey?: string;
+  /** 未保存文档的标签名称；省略时保持单文档兼容行为（项目名为 null）。 */
+  temporaryName?: string;
 }
 
 /**
@@ -276,7 +331,28 @@ export interface UseWorkspaceOptions {
  * @returns 只读仿真/编辑器快照，以及基于稳定 editor ID 的界面操作。
  */
 export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBinding {
-  const adapter = (window as unknown as { circuitPlatform: EngineAdapter & ProjectFileBridge }).circuitPlatform;
+  const platform = (window as unknown as { circuitPlatform: PlatformBridge }).circuitPlatform;
+  const engine = options.documentKey !== undefined && typeof platform.forDocument === "function"
+    ? platform.forDocument(options.documentKey)
+    : platform;
+  const adapter: DocumentEngineBridge & ProjectFileBridge = {
+    checkEngine: () => engine.checkEngine(),
+    addComponent: (kind, ports) => engine.addComponent(kind, ports),
+    setPortWidth: (componentId, ports) => engine.setPortWidth(componentId, ports),
+    addConnection: (source, target) => engine.addConnection(source, target),
+    removeComponent: (componentId) => engine.removeComponent(componentId),
+    removeConnection: (connectionId) => engine.removeConnection(connectionId),
+    setInput: (componentId, value) => engine.setInput(componentId, value),
+    settle: () => engine.settle(),
+    tick: () => engine.tick(),
+    reset: () => engine.reset(),
+    getSignal: (componentId, port) => engine.getSignal(componentId, port),
+    ...(engine.closeDocument ? { closeDocument: () => engine.closeDocument!() } : {}),
+    pickSavePath: (options) => platform.pickSavePath(options),
+    writeProjectFile: (filePath, content) => platform.writeProjectFile(filePath, content),
+    pickOpenPath: () => platform.pickOpenPath(),
+    readProjectFile: (filePath) => platform.readProjectFile(filePath),
+  };
   // 记录每次健康检查看到的引擎进程代号：恢复流程靠「代号是否变化」区分「进程真的换了」
   // 与「一次超时之类的传输故障误伤了结构事务」——后者引擎还在，电路不需要重建。
   let lastKnownEngineEpoch: number | null = null;
@@ -312,33 +388,100 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   };
   // 一条队列同时交给工作区与编辑器端口：运行中的推进、输入提交与结构提交因此排在同一个队里。
   const queue = createEngineCallQueue();
-  const workspace = createWorkspace(monitoredAdapter, { queue });
+  const workspace = createWorkspace(monitoredAdapter, { queue, scheduler: options.scheduler });
   const recoveryScheduler = options.recoveryScheduler ?? defaultRecoveryScheduler;
   const state = shallowRef(workspace.snapshot());
+  let disposed = false;
   // 连续运行的每一拍由工作区自行排定，因此界面靠订阅拿到那部分快照变化。
-  workspace.subscribe((snapshot) => {
+  const unsubscribeWorkspace = workspace.subscribe((snapshot) => {
+    if (disposed) return;
     state.value = snapshot;
+    // 连续运行的 tick 不经过 reflect；因此引擎在后台推进期间死亡时，必须从订阅
+    // 路径启动本运行时自己的恢复循环。恢复状态和编辑器冻结都留在此文档闭包内，
+    // 不会暂停或重建其他标签。
+    if (snapshot.engineState === "unavailable" || snapshot.engineState === "error") beginRecovery();
   });
   const editorState = shallowRef<EditorSnapshot | null>(null);
   let editor: EditorSession | null = null;
   let unsubscribeEditor: (() => void) | null = null;
   /** 当前文档已经显式采用的层次投影；引擎重建只复用它，绝不重新读取磁盘。 */
   let adoptedHierarchy: FlattenProjectResult | null = null;
+  /** 层次投影事务成功发布前，供绑定回调使用的新稳定描述。 */
+  let pendingHierarchyForBindings: FlattenProjectResult | null = null;
   /** 与 `adoptedHierarchy` 对应、可直接重建到空引擎的扁平 Circuit。 */
   let adoptedCircuit: CircuitDocument | null = null;
   /** 当前显式采用的 Project 图快照；普通编辑与引擎重建只读这份内存图。 */
   let adoptedProjectFiles: Map<string, ProjectFileData> | null = null;
+  /** 每个顶层 Subcircuit occurrence 独立记录它实际采用的磁盘快照版本。 */
+  const adoptedOccurrenceVersions = new Map<string, string>();
+  /** 只存 occurrence key，不把 stale 合并到文档 dirty 或解析 status。 */
+  const staleOccurrences = new Set<string>();
   /** 投影历史只保存不含引擎 ID 的采用快照；接口不变的重载也靠 revision 区分。 */
   const adoptedProjectionRevisions = new Map<string, {
     hierarchy: FlattenProjectResult;
     projectFiles: Map<string, ProjectFileData>;
+    occurrenceVersions: Map<string, string>;
+    staleOccurrences: Set<string>;
   }>();
   let nextProjectionRevision = 1;
   let simulationRefreshRequested = false;
+  let internalSignalTableVisible = false;
+  let internalReadRevision = 0;
+  let internalReadInFlight: Promise<void> | null = null;
+  let internalReadQueued = false;
   /** 恢复循环是否在跑：防止同一次不可用触发多条并行的恢复路径。 */
   let recovering = false;
+  let recoveryWaitCancel: (() => void) | null = null;
+
+  /** 只为当前活动、已解析的 Subcircuit 组装按需读取计划。 */
+  function visibleInternalReads(): InternalSignalRead[] {
+    if (!internalSignalTableVisible || editor === null || state.value.engineState !== "ready") return [];
+    const selection = editor.snapshot().selection;
+    if (selection?.kind !== "component") return [];
+    const selected = editor.snapshot().document.components.find((component) => component.id === selection.id);
+    if (selected?.kind !== "subcircuit" || selected.data?.subcircuit?.status !== "resolved") return [];
+    return (state.value.internalComponents ?? [])
+      .filter((descriptor) => descriptor.ownerId === selected.id)
+      .flatMap((descriptor) => descriptor.ports.map((port) => ({
+        key: `${descriptor.flatId}:${port.name}`,
+        flatId: descriptor.flatId,
+        port: port.name,
+      })));
+  }
+
+  /**
+   * 可见性驱动的读取调度。一次读取结束前的重复请求只留下最后目标，
+   * 结果携带的 revision 失配时不发布到当前文档/选择。
+   */
+  function refreshVisibleInternalSignals(): void {
+    const revision = ++internalReadRevision;
+    const reads = visibleInternalReads();
+    if (reads.length === 0) return;
+    if (internalReadInFlight !== null) {
+      internalReadQueued = true;
+      return;
+    }
+    internalReadInFlight = (async () => {
+      const result = await workspace.readInternalSignals(reads);
+      if (disposed || revision !== internalReadRevision || !internalSignalTableVisible) return;
+      state.value = result.snapshot;
+    })().finally(() => {
+      internalReadInFlight = null;
+      if (internalReadQueued) {
+        internalReadQueued = false;
+        refreshVisibleInternalSignals();
+      }
+    });
+  }
+
+  function setInternalSignalTableVisible(visible: boolean): void {
+    internalSignalTableVisible = visible;
+    internalReadRevision += 1;
+    if (visible) refreshVisibleInternalSignals();
+  }
 
   const projectPath = shallowRef<string | null>(null);
+  const projectVersion = shallowRef<string | null>(null);
   const isDirty = shallowRef(false);
   const saveError = shallowRef<string | null>(null);
   const openError = shallowRef<string | null>(null);
@@ -353,7 +496,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   // 上一次落盘内容（序列化后的项目文件文本）；置脏就是拿当前内容与它比较。
   let savedFileSnapshot: string | null = null;
   const canSave = computed(() => editorState.value !== null);
-  const projectName = computed(() => projectPath.value === null ? null : projectDisplayName(projectPath.value));
+  const projectName = computed(() => projectPath.value === null ? (options.temporaryName ?? null) : projectDisplayName(projectPath.value));
   const saveState = computed<ProjectSaveState>(() => {
     if (saveError.value !== null) return "error";
     return isDirty.value ? "dirty" : "saved";
@@ -380,6 +523,111 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     isDirty.value = savedFileSnapshot === null ? current !== null : current !== savedFileSnapshot;
   }
 
+  /** 在编辑器快照上叠加运行时 stale 元数据；该叠加不会进入撤销栈或项目文件。 */
+  function snapshotWithStaleMetadata(snapshot: EditorSnapshot): EditorSnapshot {
+    return {
+      ...snapshot,
+      document: {
+        ...snapshot.document,
+        components: snapshot.document.components.map((component) => {
+          const data = component.data?.subcircuit;
+          if (component.kind !== "subcircuit" || data === undefined) return component;
+          const target = data.targetIdentity ?? (projectPath.value === null
+            ? null
+            : projectPathIdentity(resolveProjectReference(data.reference, projectPath.value)));
+          const key = target === null ? null : occurrenceVersionKey(target, component.id);
+          const adoptedVersion = key === null ? undefined : adoptedOccurrenceVersions.get(key);
+          const needsReload = key !== null && staleOccurrences.has(key);
+          return {
+            ...component,
+            data: {
+              ...component.data,
+              subcircuit: {
+                ...data,
+                adoptedVersion,
+                ...(needsReload ? { needsReload: true } : { needsReload: false }),
+              },
+            },
+          };
+        }),
+      },
+    };
+  }
+
+  /** 重新计算一份层次投影后，记录每个可见 occurrence 对应的采用版本。 */
+  function captureOccurrenceVersions(hierarchy: FlattenProjectResult, projectFiles: Map<string, ProjectFileData>): void {
+    for (const component of hierarchy.document.components) {
+      if (component.kind !== "subcircuit" || component.data?.subcircuit === undefined) continue;
+      const data = component.data.subcircuit;
+      const target = projectPathIdentity(data.targetIdentity ?? resolveProjectReference(data.reference, projectPath.value ?? ""));
+      const file = projectFiles.get(hierarchyCacheKey(target, [component.id])) ?? projectFiles.get(target);
+      const key = occurrenceVersionKey(target, component.id);
+      if (file !== undefined) adoptedOccurrenceVersions.set(key, projectVersionOf(file));
+      else adoptedOccurrenceVersions.delete(key);
+    }
+  }
+
+  /** 同步投影快照中的 stale 字段，供画布和检查器观察而不制造编辑历史。 */
+  function publishStaleMetadata(): void {
+    if (editor !== null) editorState.value = snapshotWithStaleMetadata(editor.snapshot());
+  }
+
+  const staleSubcircuits = computed<readonly SubcircuitOccurrenceSnapshot[]>(() => {
+    const snapshot = editorState.value;
+    const path = projectPath.value;
+    if (snapshot === null || path === null) return [];
+    return snapshot.document.components.flatMap((component) => {
+      if (component.kind !== "subcircuit" || component.data?.subcircuit === undefined) return [];
+      const data = component.data.subcircuit;
+      const targetIdentity = projectPathIdentity(data.targetIdentity ?? resolveProjectReference(data.reference, path));
+      const key = occurrenceVersionKey(targetIdentity, component.id);
+      if (!staleOccurrences.has(key)) return [];
+      return [{
+        componentId: component.id,
+        reference: data.reference,
+        targetIdentity,
+        adoptedVersion: adoptedOccurrenceVersions.get(key) ?? null,
+        needsReload: true,
+        status: data.status ?? (data.diagnostic ? "unresolved" : "resolved"),
+        diagnostic: data.diagnostic?.message ?? null,
+      }];
+    });
+  });
+  const needsReload = computed(() => staleSubcircuits.value.length > 0);
+
+  /**
+   * 将保存成功事件投影到本父文档的 adopted occurrence；此操作只改运行时标记，
+   * 不读取文件、不触碰引擎绑定，也不创建父文档历史帧。
+   * @param targetIdentity 已规范化的子 Project 路径身份。
+   * @param savedVersion 子 Project 写盘成功后的内容 token。
+   */
+  function markSubcircuitsStale(targetIdentity: string, savedVersion: string): void {
+    const normalized = projectPathIdentity(targetIdentity);
+    const path = projectPath.value;
+    if (editor === null || path === null) return;
+    let changed = false;
+    for (const component of editor.snapshot().document.components) {
+      if (component.kind !== "subcircuit" || component.data?.subcircuit === undefined) continue;
+      const data = component.data.subcircuit;
+      const resolved = projectPathIdentity(data.targetIdentity ?? resolveProjectReference(data.reference, path));
+      if (resolved !== normalized) continue;
+      const key = occurrenceVersionKey(resolved, component.id);
+      const adoptedVersion = adoptedOccurrenceVersions.get(key);
+      if (adoptedVersion !== undefined && adoptedVersion !== savedVersion && !staleOccurrences.has(key)) {
+        staleOccurrences.add(key);
+        changed = true;
+      }
+    }
+    if (changed) {
+      const revision = editor.projection()?.revision;
+      if (revision !== undefined) {
+        const adopted = adoptedProjectionRevisions.get(revision);
+        if (adopted !== undefined) adopted.staleOccurrences = new Set(staleOccurrences);
+      }
+      publishStaleMetadata();
+    }
+  }
+
   /** 读取本地偏好存储；浏览器禁用持久化时返回 null，记录最近项目安静降级。 */
   function preferenceStorage(): KeyValueStorage | null {
     try {
@@ -392,7 +640,9 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   /** 保存成功后把该路径记录进最近项目并刷新界面列表；记录失败不影响已完成的保存。 */
   function recordRecentProject(path: string): void {
     const storage = preferenceStorage();
-    recentProjects.value = rememberRecentProject(storage, recentProjects.value, path);
+    // 多标签各自拥有一个 binding，但最近项目是工作区级持久化；每次写入前读取最新存储，
+    // 避免第二份 binding 用旧内存副本覆盖第一份标签刚记录的路径。
+    recentProjects.value = rememberRecentProject(storage, readRecentProjects(storage), path);
   }
 
   /** 把一条最近项目从列表与存储中移除；存储不可用时安静降级。 */
@@ -402,9 +652,13 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   }
 
   async function reflect(operation: () => Promise<WorkspaceSnapshot>): Promise<void> {
+    if (disposed) return;
     const pending = operation();
     state.value = workspace.snapshot();
-    state.value = await pending;
+    const next = await pending;
+    if (disposed) return;
+    state.value = next;
+    refreshVisibleInternalSignals();
     if (state.value.engineState === "unavailable" || state.value.engineState === "error") {
       beginRecovery();
     }
@@ -413,6 +667,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   // EditorSession 的结构 settle 用于验证 Circuit；工作区仍需重新提交当前输入并读取可展示信号。
   // 这只是一次读数刷新，不推进电路，因此不增加步数、也不追加波形记录。
   async function refreshSimulationAfterBindingsChange(): Promise<void> {
+    if (disposed) return;
     if (!simulationRefreshRequested) {
       state.value = workspace.snapshot();
       return;
@@ -424,7 +679,18 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   /** 恢复循环里两次健康检查之间的一次等待。 */
   function waitRecoveryRetry(): Promise<void> {
     return new Promise((resolve) => {
-      recoveryScheduler.schedule(RECOVERY_RETRY_MS, resolve);
+      let settled = false;
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        recoveryWaitCancel = null;
+        resolve();
+      };
+      const cancel = recoveryScheduler.schedule(RECOVERY_RETRY_MS, finish);
+      recoveryWaitCancel = () => {
+        cancel();
+        finish();
+      };
     });
   }
 
@@ -464,9 +730,16 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     const components: Record<string, number | readonly number[]> = {};
     const connections: Record<string, number | readonly number[]> = {};
     const componentKinds: Record<string, EditorComponentKind> = {};
-    const ports: Record<string, readonly PortSpec[]> = {};
+    // 隐藏的扁平元件不会出现在顶层 Editor 文档里，但实例信号表仍要使用引擎回传的
+    // 权威端口清单。把这些 flat ID 一并保留在绑定中，后续 EditorSession 发布绑定时
+    // 才不会只剩顶层 Subcircuit 端口、把内部行投影成空表。
+    const ports: Record<string, readonly PortSpec[]> = Object.fromEntries(
+      Object.entries(flatBindings.ports ?? {}).flatMap(([flatId, portList]) =>
+        portList === undefined ? [] : [[flatId, portList] as const]),
+    );
     const componentFlatIds: Record<string, readonly string[]> = {};
     const connectionFlatIds: Record<string, readonly string[]> = {};
+    const internalComponents = internalComponentsFromHierarchy(hierarchy, flatBindings);
 
     for (const component of hierarchy.document.components) {
       const flatIds = hierarchy.sources.components[component.id] ?? [];
@@ -510,7 +783,21 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
       componentFlatIds,
       connectionFlatIds,
       portSources,
+      internalComponents,
     };
+  }
+
+  /** 在编辑器局部事务重新发布绑定时，继续携带当前采用层次的内部描述。 */
+  function internalComponentsFromHierarchy(
+    hierarchy: FlattenProjectResult,
+    flatBindings: SimulationBindings,
+  ): InternalComponentDescriptor[] {
+    return Object.values(hierarchy.sources.internalComponents)
+      .flatMap((descriptors) => descriptors.map((descriptor) => ({
+        ...descriptor,
+        path: [...descriptor.path],
+        ports: flatBindings.ports?.[descriptor.flatId] ?? descriptor.ports,
+      })));
   }
 
   /** 把层次解析器的稳定来源映射转换成编辑器事务所需的扁平投影。 */
@@ -590,12 +877,15 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     adoptedHierarchy = { ...flattened, document: editor.snapshot().document };
     adoptedCircuit = circuitFromHierarchy(flattened);
     adoptedProjectFiles = cache;
+    captureOccurrenceVersions(adoptedHierarchy, cache);
     const revision = editor.projection()?.revision;
     editor.adoptProjection(editorProjectionFromHierarchy(adoptedHierarchy, undefined, revision));
     if (revision !== undefined) {
       adoptedProjectionRevisions.set(revision, {
         hierarchy: adoptedHierarchy,
         projectFiles: new Map(cache),
+        occurrenceVersions: new Map(adoptedOccurrenceVersions),
+        staleOccurrences: new Set(staleOccurrences),
       });
     }
   }
@@ -611,8 +901,14 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   ): Promise<boolean> {
     if (editor === null) return false;
     const revision = `hierarchy-${nextProjectionRevision++}`;
-    const result = await editor.replaceProjection(editorProjectionFromHierarchy(hierarchy, forceReplaceOwner, revision));
-    editorState.value = result.snapshot;
+    pendingHierarchyForBindings = hierarchy;
+    let result: CommandResult;
+    try {
+      result = await editor.replaceProjection(editorProjectionFromHierarchy(hierarchy, forceReplaceOwner, revision));
+    } finally {
+      pendingHierarchyForBindings = null;
+    }
+    editorState.value = snapshotWithStaleMetadata(result.snapshot);
     await refreshSimulationAfterBindingsChange();
     if (!result.ok) {
       if (ENGINE_TRANSPORT_ERROR_CODES.includes(result.error.code)) beginRecovery();
@@ -621,7 +917,14 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     adoptedHierarchy = hierarchy;
     adoptedCircuit = circuitFromHierarchy(hierarchy);
     adoptedProjectFiles = projectFiles;
-    adoptedProjectionRevisions.set(revision, { hierarchy, projectFiles: new Map(projectFiles) });
+    captureOccurrenceVersions(hierarchy, projectFiles);
+    adoptedProjectionRevisions.set(revision, {
+      hierarchy,
+      projectFiles: new Map(projectFiles),
+      occurrenceVersions: new Map(adoptedOccurrenceVersions),
+      staleOccurrences: new Set(staleOccurrences),
+    });
+    publishStaleMetadata();
     refreshDirtyMarker();
     return true;
   }
@@ -635,6 +938,11 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     adoptedHierarchy = { ...adopted.hierarchy, document: editor!.snapshot().document };
     adoptedCircuit = circuitFromHierarchy(adopted.hierarchy);
     adoptedProjectFiles = new Map(adopted.projectFiles);
+    adoptedOccurrenceVersions.clear();
+    for (const [key, version] of adopted.occurrenceVersions) adoptedOccurrenceVersions.set(key, version);
+    staleOccurrences.clear();
+    for (const key of adopted.staleOccurrences) staleOccurrences.add(key);
+    publishStaleMetadata();
   }
 
   /** 层次解析结果的扁平 Circuit 适配；协议类型在这个 seam 之后保持闭合。 */
@@ -650,6 +958,13 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
         source: { ...connection.source },
         target: { ...connection.target },
       })),
+      ...(Object.values(hierarchy.sources.internalComponents).flat().length > 0
+        ? { internalComponents: Object.values(hierarchy.sources.internalComponents).flat().map((descriptor) => ({
+          ...descriptor,
+          path: [...descriptor.path],
+          ports: descriptor.ports.map((port) => ({ ...port, ...(port.bitRange ? { bitRange: { ...port.bitRange } } : {}) })),
+        })) }
+        : {}),
     };
   }
 
@@ -723,7 +1038,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
    * 期间编辑器结构事务保持冻结（ADR 0010 的不可用语义），恢复完成后解除。
    */
   function beginRecovery(): void {
-    if (recovering || editor === null) return;
+    if (disposed || recovering || editor === null) return;
     recovering = true;
     editor.setEngineAvailability(false);
     void recoverEngine();
@@ -734,6 +1049,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     let rebuildFailed = false;
     try {
       for (;;) {
+        if (disposed) return;
         // 恢复期间的检查走原始 adapter：包装层会顺手刷新「最近确认在线的进程代号」，
         // 而这里的比较恰恰要拿「恢复开始之前」记录的代号来判断进程有没有换过。
         let health: EngineHealth;
@@ -742,10 +1058,12 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
         } catch {
           // 健康检查自身抛出（桥接故障等一层异常）视作这次检查失败，等下一次重试。
           await waitRecoveryRetry();
+          if (disposed) return;
           continue;
         }
         if (health.status !== "ok") {
           await waitRecoveryRetry();
+          if (disposed) return;
           continue;
         }
         const sameProcess = !rebuildFailed && !rebuildLatched &&
@@ -753,6 +1071,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
           lastKnownEngineEpoch === health.processEpoch;
         // 把 ready 状态与文案写进工作区快照；这次检查同时会刷新已记录的进程代号。
         await reflect(() => workspace.checkEngine());
+        if (disposed) return;
         if (sameProcess) {
           editor?.setEngineAvailability(true);
           return;
@@ -767,6 +1086,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
         if (loaded.bindings === null) {
           rebuildFailed = true;
           await waitRecoveryRetry();
+          if (disposed) return;
           continue;
         }
         rebuildLatched = false;
@@ -777,6 +1097,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
         // 不发布的话界面会停在恢复前的旧读数上（engineState 已是 ready，步数与信号却是旧的）。
         workspace.rebindSimulation(nextBindings);
         const rebuiltSnapshot = await workspace.refreshReadings();
+        if (disposed) return;
         editor?.adoptBindings(toEditorBindings(nextBindings));
         editor?.setEngineAvailability(true);
         // 最后才发布「第 0 步 + 新读数」完成标志：观察者看到完成时，编辑器绑定与可用性
@@ -806,15 +1127,29 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     adoptedHierarchy = adopted;
     adoptedCircuit = circuit;
     adoptedProjectFiles = projectFiles;
+    adoptedOccurrenceVersions.clear();
+    staleOccurrences.clear();
+    projectPath.value = path;
     state.value = loaded.snapshot;
     if (adopted !== null && projectFiles !== null) {
       const revision = `hierarchy-${nextProjectionRevision++}`;
-      adoptedProjectionRevisions.set(revision, { hierarchy: adopted, projectFiles: new Map(projectFiles) });
+      captureOccurrenceVersions(adopted, projectFiles);
+      adoptedProjectionRevisions.set(revision, {
+        hierarchy: adopted,
+        projectFiles: new Map(projectFiles),
+        occurrenceVersions: new Map(adoptedOccurrenceVersions),
+        staleOccurrences: new Set(staleOccurrences),
+      });
       attachEditor(document, bindings, editorProjectionFromHierarchy(adopted, undefined, revision));
     } else {
       attachEditor(document, bindings);
     }
-    projectPath.value = path;
+    projectVersion.value = projectFiles === null || path === null
+      ? null
+      : projectVersionOf(projectFiles.get(projectPathIdentity(path))!);
+    if (adopted !== null && projectFiles !== null) captureOccurrenceVersions(adopted, projectFiles);
+    publishStaleMetadata();
+    refreshVisibleInternalSignals();
     saveError.value = null;
     openError.value = null;
   }
@@ -834,14 +1169,29 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
         // EditorSession 只询问一个布尔可用性 seam；引擎状态仍留在 Workspace 快照中。
         isEngineAvailable: () => workspace.snapshot().engineState === "ready",
         onBindingsChanged(nextBindings) {
-          state.value = workspace.rebindSimulation(nextBindings);
+          const hierarchyForBindings = pendingHierarchyForBindings ?? adoptedHierarchy;
+          const projected = hierarchyForBindings === null
+            ? nextBindings
+            : {
+                ...nextBindings,
+                // EditorSession keeps componentKinds as a non-enumerable compatibility
+                // property on its callback projection. Re-state it explicitly when
+                // adding hierarchy-only internal descriptors so runtime derivation
+                // still recognizes Input/Output components.
+                ...(nextBindings.componentKinds !== undefined ? { componentKinds: nextBindings.componentKinds } : {}),
+                internalComponents: internalComponentsFromHierarchy(hierarchyForBindings, nextBindings),
+              };
+          state.value = workspace.rebindSimulation(projected);
           simulationRefreshRequested = true;
         },
       },
     );
-    editorState.value = editor.snapshot();
+    editorState.value = snapshotWithStaleMetadata(editor.snapshot());
     unsubscribeEditor = editor.subscribe((snapshot) => {
-      editorState.value = snapshot;
+      editorState.value = snapshotWithStaleMetadata(snapshot);
+      // Selection/projection changes invalidate any in-flight instance read. A
+      // visible inspector is refreshed only for the latest resolved owner.
+      refreshVisibleInternalSignals();
     });
     // 新会话的初始文档就是脏标记的基线：加载（示例或项目）之后是干净的，改动才置脏。
     savedFileSnapshot = serializeCurrentProjectFile();
@@ -864,6 +1214,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     const document = createAndDemoDocument();
     // 初值省略：沿推送路径的既有规则沿用工作区当前输入值（与引擎重建同规则），示例不另立语义。
     const loaded = await workspace.openCircuit(circuitDocumentFrom(document));
+    if (disposed) return;
     if (loaded.bindings === null) {
       openError.value = loaded.snapshot.operationError ?? "加载示例失败。";
       return;
@@ -877,6 +1228,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
 
   async function checkEngine(): Promise<void> {
     await reflect(() => workspace.checkEngine());
+    if (disposed) return;
     // 恢复循环进行中时不打扰它：可用性由恢复流程自己解除。
     if (recovering) return;
     editor?.setEngineAvailability(state.value.engineState === "ready");
@@ -917,10 +1269,12 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   async function runEditorCommand(command: EditorCommand): Promise<CommandResult | null> {
     if (!editor) return null;
     const pending = editor.dispatch(command);
-    editorState.value = editor.snapshot();
+    editorState.value = snapshotWithStaleMetadata(editor.snapshot());
     const result = await pending;
-    editorState.value = result.snapshot;
+    if (disposed) return null;
+    editorState.value = snapshotWithStaleMetadata(result.snapshot);
     await refreshSimulationAfterBindingsChange();
+    if (disposed) return null;
     if (result.ok && (command.type === "undo" || command.type === "redo")) {
       restoreAdoptedProjectionRevision();
     }
@@ -1096,11 +1450,20 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     clearHierarchyOccurrenceCache(cache, occurrencePath);
     const hierarchy = await flattenVisibleDocument(editor.snapshot().document, cache, true, [{ identity: target, occurrencePath }]);
     if (hierarchy === null) {
-      editorState.value = editor.snapshot();
+      editorState.value = snapshotWithStaleMetadata(editor.snapshot());
       return false;
     }
     const succeeded = await replaceHierarchyProjection(hierarchy, cache, componentId);
     if (succeeded) {
+      // 只有这个 occurrence 真正采用了新投影才清除提示；同一文件的兄弟 occurrence
+      // 以及其他父文档仍保留各自的旧版本状态。
+      staleOccurrences.delete(occurrenceVersionKey(target, componentId));
+      const revision = editor.projection()?.revision;
+      if (revision !== undefined) {
+        const adopted = adoptedProjectionRevisions.get(revision);
+        if (adopted !== undefined) adopted.staleOccurrences = new Set(staleOccurrences);
+      }
+      publishStaleMetadata();
       const diagnostic = hierarchy.diagnostics.find((item) => item.componentId === componentId);
       openError.value = diagnostic?.message ?? null;
     } else {
@@ -1223,6 +1586,8 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
               document: documentWithReferences(adopted.hierarchy.document, historicalReferences),
             },
             projectFiles,
+            occurrenceVersions: new Map(adopted.occurrenceVersions),
+            staleOccurrences: new Set(adopted.staleOccurrences),
           });
         }
       }
@@ -1239,6 +1604,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
       adoptedProjectFiles = cache;
     }
     saveError.value = null;
+    projectVersion.value = content;
     // 基线取序列化时刻的内容：写文件期间用户又做了编辑的话，保存结束后仍然是脏的。
     savedFileSnapshot = content;
     refreshDirtyMarker();
@@ -1258,15 +1624,27 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     }
     const current = editor.snapshot();
     const file = serializeProjectFile({ document: current.document, inputValues: state.value.inputValues });
-    if (projectPath.value === null || projectPathIdentity(projectPath.value) === projectPathIdentity(dialog.path)) {
-      return commitSave(dialog.path, file);
+    return saveToPath(dialog.path, file);
+  }
+
+  /**
+   * 将当前文档保存到指定路径；路径重定位和往返校验都在原子写入前完成。
+   * @param path 目标路径。
+   * @param preparedFile 可选的已序列化文件，内部另存为流程用于避免重复取快照。
+   * @returns 写入成功返回 true；任何计算或 IO 失败均保留原身份和脏状态。
+   */
+  async function saveToPath(path: string, preparedFile?: ProjectFileData): Promise<boolean> {
+    if (!editor) return false;
+    const current = preparedFile ?? serializeProjectFile({ document: editor.snapshot().document, inputValues: state.value.inputValues });
+    if (projectPath.value === null || projectPathIdentity(projectPath.value) === projectPathIdentity(path)) {
+      return commitSave(path, current);
     }
-    const rebased = rebaseProjectFileReferences(file, projectPath.value, dialog.path);
+    const rebased = rebaseProjectFileReferences(current, projectPath.value, path);
     if (!rebased.ok) {
       saveError.value = rebased.error.message;
       return false;
     }
-    return commitSave(dialog.path, rebased.value);
+    return commitSave(path, rebased.value);
   }
 
   async function save(): Promise<boolean> {
@@ -1299,17 +1677,21 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
       root: parsed.file,
       reader: hierarchyProjectReader(projectFiles, true),
     });
+    if (disposed) return false;
     const circuit = circuitFromHierarchy(hierarchy);
     const loaded = await workspace.openCircuit(circuit, {
       inputValues: parsed.inputValues,
     });
+    if (disposed) return false;
     if (loaded.bindings === null) {
       openError.value = loaded.snapshot.operationError ?? "打开项目失败。";
       return false;
     }
     const projectedBindings = hierarchyBindings(loaded.bindings, hierarchy);
     state.value = workspace.rebindSimulation(projectedBindings);
-    state.value = await workspace.refreshReadings();
+    const refreshed = await workspace.refreshReadings();
+    if (disposed) return false;
+    state.value = refreshed;
     // 解析出的端点 point 是占位零点（#35 契约）：端口清单此刻已由引擎回传，先用元件位置
     // 与端口几何重建端点与 Route，再把文档交给会话；占位值不能带进后续编辑。
     const document = rebuildLoadedDocumentGeometry(
@@ -1392,6 +1774,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   async function openProjectFromPath(path: string): Promise<boolean> {
     // 首启空状态（#40）没有编辑器会话也必须能打开：会话由这次成功加载的 attachEditor 建立。
     const file = await adapter.readProjectFile(path);
+    if (disposed) return false;
     if (!file.ok) {
       openError.value = file.reason;
       // 目标文件已不存在的最近项目条目立刻移出列表：留着它只会让用户反复撞上同一个错误。
@@ -1438,6 +1821,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
       return;
     }
     const loaded = await workspace.openCircuit({ components: [], connections: [] });
+    if (disposed) return;
     if (loaded.bindings === null) {
       openError.value = loaded.snapshot.operationError ?? "新建文档失败。";
       return;
@@ -1559,7 +1943,24 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     return createConnection(left, right, route, connectionId);
   }
 
+  let disposePromise: Promise<void> | null = null;
   return {
+    async dispose(): Promise<void> {
+      if (disposePromise !== null) return disposePromise;
+      disposed = true;
+      recoveryWaitCancel?.();
+      recoveryWaitCancel = null;
+      unsubscribeWorkspace();
+      unsubscribeEditor?.();
+      unsubscribeEditor = null;
+      disposePromise = (async () => {
+        // Stop the scheduler before closing the keyed engine. Awaiting pause also
+        // makes closeTab's completion a reliable lifecycle boundary for callers.
+        await workspace.pause();
+        await adapter.closeDocument?.();
+      })();
+      return disposePromise;
+    },
     state: readonly(state),
     editorState: readonly(editorState),
     bootstrap: checkEngine,
@@ -1570,6 +1971,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     step,
     reset,
     setInputBit,
+    setInternalSignalTableVisible,
     select: (selection) => dispatch({ type: "select", selection }),
     moveComponent: (componentId, position) => dispatch({ type: "move-component", componentId, position }),
     editRoute: (connectionId, route) => dispatch({ type: "edit-route", connectionId, route }),
@@ -1595,14 +1997,20 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     duplicateComponent,
     addSubcircuitFromDialog,
     reloadSubcircuit,
+    staleSubcircuits,
+    needsReload,
+    markSubcircuitsStale,
+    projectVersion: readonly(projectVersion),
     projectPath: readonly(projectPath),
     isDirty: readonly(isDirty),
     saveError: readonly(saveError),
+    setSaveError(message) { saveError.value = message; },
     canSave,
     projectName,
     saveState,
     save,
     saveAs,
+    saveToPath,
     openError: readonly(openError),
     pendingFileAction: readonly(pendingFileAction),
     requestOpen,

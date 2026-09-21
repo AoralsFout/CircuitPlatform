@@ -62,7 +62,17 @@ const COLLECT = `(async () => {
   const hierarchyInspector = document.querySelector(".inspector-subcircuit");
   const hierarchyStatus = hierarchyInspector?.querySelector('[role="status"]');
   const hierarchyDiagnostic = hierarchyInspector?.querySelector('[role="alert"]');
-  const hierarchyReload = hierarchyInspector?.querySelector("button");
+  const hierarchyReload = hierarchyInspector?.querySelector('button[aria-label^="重新加载子电路"]');
+  const tabs = [...document.querySelectorAll('.document-tabs [role="tab"]')].map((tab) => ({
+    label: text(tab),
+    selected: tab.getAttribute("aria-selected") === "true",
+    ariaLabel: tab.getAttribute("aria-label"),
+  }));
+  const drillButton = hierarchyInspector?.querySelector('button[aria-label^="打开子电路"]') ?? null;
+  const internalTable = document.querySelector(".inspector-internal-table");
+  const internalRows = [...document.querySelectorAll(".inspector-internal-component .inspector-port-row")].map((row) => text(row));
+  const returnButton = document.querySelector('[title="返回父电路"]');
+  const engineChip = document.querySelector(".engine-chip");
   const recentItems = [...document.querySelectorAll(".recent-projects-item")].map((item) => ({
     name: text(item.querySelector(".recent-projects-name")),
   }));
@@ -101,7 +111,22 @@ const COLLECT = `(async () => {
           reloadDisabled: hierarchyReload?.hasAttribute("disabled") ?? false,
           diagnosticId: hierarchyDiagnostic?.id ?? null,
           reloadDescription: hierarchyReload?.getAttribute("aria-describedby") ?? null,
-        },
+          },
+    tabs,
+    internalSignals: {
+      present: internalTable !== null,
+      rows: internalRows,
+      readonly: internalTable?.getAttribute("aria-readonly") === "true",
+    },
+    drill: drillButton === null ? null : {
+      disabled: drillButton.hasAttribute("disabled"),
+      label: drillButton.getAttribute("aria-label"),
+    },
+    sourceReturn: returnButton !== null,
+    engine: {
+      className: engineChip?.className ?? null,
+      text: text(engineChip),
+    },
   };
 })()`;
 
@@ -195,8 +220,8 @@ const interactions = {
 /** 每个状态一条断言集：只断言「这个状态确实渲染成了它该有的样子」。 */
 const expectations = {
   "unsaved-confirm": (facts, failures) => {
-    check(failures, facts.unsavedDialog !== null, "置脏后新建应呈现未保存确认对话框");
-    check(failures, facts.unsavedDialog?.title === "新建文档？", `对话框标题不符：${facts.unsavedDialog?.title}`);
+    check(failures, facts.unsavedDialog !== null, "关闭脏标签应呈现未保存确认对话框");
+    check(failures, facts.unsavedDialog?.title === "关闭项目？", `对话框标题不符：${facts.unsavedDialog?.title}`);
     check(failures, typeof facts.unsavedDialog?.confirmText === "string" && facts.unsavedDialog.confirmText.length > 0, "对话框缺少放弃操作的确认按钮");
   },
   "first-start-recent": (facts, failures) => {
@@ -216,6 +241,49 @@ const expectations = {
     check(failures, facts.hierarchy?.reloadLabel === "重新加载子电路 ./child.circuit.json", `重载按钮可访问名称不符：${facts.hierarchy?.reloadLabel}`);
     check(failures, facts.hierarchy?.reloadDisabled === false, "未解析子电路仍应允许键盘重载");
     check(failures, facts.hierarchy?.diagnosticId === facts.hierarchy?.reloadDescription, "重载命令未通过 aria-describedby 关联诊断");
+  },
+  "multi-tabs": (facts, failures) => {
+    check(failures, facts.tabs.length === 2, `多文档状态应有 2 个标签，实际有 ${facts.tabs.length}`);
+    check(failures, facts.tabs.filter((tab) => tab.selected).length === 1, "多文档状态必须只有一个活动标签");
+    check(failures, facts.tabs.every((tab) => tab.ariaLabel), "标签缺少可访问名称");
+  },
+  "multi-tabs-narrow": (facts, failures) => {
+    check(failures, facts.tabs.length === 2, `窄窗口多文档状态应有 2 个标签，实际有 ${facts.tabs.length}`);
+    check(failures, facts.tabs.filter((tab) => tab.selected).length === 1, "窄窗口必须只有一个活动标签");
+  },
+  "long-name": (facts, failures) => {
+    check(failures, facts.tabs.length === 1, "长文件名状态应有一个标签");
+    check(failures, (facts.tabs[0]?.ariaLabel ?? "").includes("this-is-a-deliberately-long"), "标签没有保留长文件名可访问文本");
+  },
+  "unnamed-tabs": (facts, failures) => {
+    check(failures, facts.tabs.length === 3, `多个未命名标签状态应有 3 个标签，实际有 ${facts.tabs.length}`);
+    check(failures, facts.tabs.filter((tab) => tab.label.includes("未命名")).length >= 2, "未命名标签没有显示占位名称");
+  },
+  "unsaved-tab": (facts, failures) => {
+    check(failures, facts.tabs.some((tab) => (tab.ariaLabel ?? "").includes("有未保存改动")), "未保存标签缺少脏状态可访问文案");
+  },
+  "needs-reload": (facts, failures) => {
+    check(failures, facts.tabs.some((tab) => (tab.ariaLabel ?? "").includes("需重新加载子电路")), "父标签没有显示需重新加载标记");
+    check(failures, facts.hierarchy?.status === "状态：已解析", "需重新加载状态应保留已解析子电路");
+    check(failures, facts.hierarchy?.diagnostic === null, "需重新加载状态不应伪装成解析失败");
+  },
+  "unresolved-drill": (facts, failures) => {
+    check(failures, facts.hierarchy?.status === "状态：未解析", "未解析下钻状态不符");
+    check(failures, facts.drill?.disabled === true, "未解析下钻按钮必须禁用");
+    check(failures, facts.hierarchy?.diagnostic?.includes("找不到"), "未解析下钻缺少诊断");
+  },
+  "engine-unavailable": (facts, failures) => {
+    check(failures, facts.engine.text?.includes("不可用"), `引擎不可用状态文案不符：${facts.engine.text}`);
+    check(failures, facts.engine.className?.includes("engine-chip--unavailable"), "引擎不可用状态缺少语义 class");
+  },
+  "internal-signals": (facts, failures) => {
+    check(failures, facts.internalSignals.present, "内部信号状态缺少只读表");
+    check(failures, facts.internalSignals.readonly, "内部信号表必须声明 aria-readonly");
+    check(failures, facts.internalSignals.rows.length > 0, "内部信号表没有端口行");
+  },
+  "source-return": (facts, failures) => {
+    check(failures, facts.sourceReturn, "子文档活动标签缺少返回父电路命令");
+    check(failures, facts.tabs.length === 2, `来源返回状态应保留父子两个标签，实际有 ${facts.tabs.length}`);
   },
   "bus-canvas": (facts, failures) => {
     check(failures, facts.nodeKinds.includes("SPLITTER"), "画布上没有拆线器");
@@ -313,8 +381,8 @@ const expectations = {
 };
 
 async function main() {
-  // 与视觉截图（4175）和性能基准（4176–4180）都错开，两者同时跑也不会抢端口。
-  const port = 4181;
+  // 与视觉截图（4175）和性能基准（4176–4181）都错开，两者同时跑也不会抢端口。
+  const port = 4191;
   // 这三项必须在 app ready 之前设置，否则会被忽略或直接报错。
   app.disableHardwareAcceleration();
   app.commandLine.appendSwitch("disable-gpu");
@@ -332,15 +400,25 @@ async function main() {
       height: 900,
       webPreferences: { sandbox: true, backgroundThrottling: false },
     });
+    window.webContents.on("console-message", (_event, level, message) => console.error(`[visual probe console ${level}] ${message}`));
+    window.webContents.on("did-fail-load", (_event, code, description) => console.error(`[visual probe load ${code}] ${description}`));
     const results = [];
     const failures = [];
-    for (const [state, expect] of Object.entries(expectations)) {
+    const requestedState = process.argv.find((argument) => argument.startsWith("--state="))?.slice("--state=".length);
+    const selectedExpectations = requestedState === undefined
+      ? Object.entries(expectations)
+      : Object.entries(expectations).filter(([state]) => state === requestedState);
+    if (requestedState !== undefined && selectedExpectations.length === 0) {
+      throw new Error(`未知视觉状态：${requestedState}`);
+    }
+    for (const [state, expect] of selectedExpectations) {
+      console.log(`Probing visual state ${state}`);
       await window.loadURL(`${baseUrl}/visual-regression.html?state=${state}&theme=dark`);
       await window.webContents.executeJavaScript(
         "new Promise((resolve, reject) => { const started = Date.now(); const check = () => {"
         + " if (window.__visualError) return reject(new Error(`视觉夹具准备失败：${window.__visualError}`));"
         + " if (document.querySelector('.app-shell') && window.__visualReady) return resolve(true);"
-        + " if (Date.now() - started > 20000) return reject(new Error('真实 Vue App 未完成准备'));"
+        + " if (Date.now() - started > 30000) return reject(new Error(`真实 Vue App 未完成准备：${document.body.innerText.slice(0, 1600)}`));"
         + " setTimeout(check, 50); }; check(); })",
       );
       const interaction = interactions[state];
@@ -349,6 +427,7 @@ async function main() {
       Object.assign(facts, measurements[state] ?? {});
       const stateFailures = [];
       expect(facts, stateFailures);
+      if (stateFailures.length > 0) console.error(`Visual state ${state} facts: ${JSON.stringify(facts)}`);
       results.push({ state, ok: stateFailures.length === 0, failures: stateFailures });
       failures.push(...stateFailures.map((message) => `${state}：${message}`));
     }

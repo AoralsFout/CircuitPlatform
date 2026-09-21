@@ -1,6 +1,6 @@
 import type { ComponentKindName, PortSpec } from "@circuit-platform/protocol";
 import type { SubcircuitComponentData, SubcircuitDiagnostic } from "../editor/component.ts";
-import type { EditorComponent, EditorConnection, EditorDocument, Point } from "../editor/index.ts";
+import type { EditorComponent, EditorConnection, EditorDocument, InternalComponentDescriptor, Point } from "../editor/index.ts";
 import type { ProjectFileComponent, ProjectFileData } from "./index.ts";
 import { projectPathIdentity, resolveProjectReference, type PathPlatform } from "./paths.ts";
 
@@ -37,6 +37,8 @@ export interface HierarchySourceMap {
     inputTargets?: readonly { componentId: string; port: string }[];
     outputSources?: readonly { componentId: string; port: string }[];
   }>>>>;
+  /** 每个顶层 Subcircuit 使用处拥有的稳定内部 Component 描述。 */
+  internalComponents: Readonly<Record<string, readonly InternalComponentDescriptor[]>>;
 }
 
 /** 一次稳定层次解析失败的类别与中文文案。 */
@@ -95,6 +97,7 @@ interface MutableOutput {
   connectionSources: Record<string, string[]>;
   ownedConnections: Record<string, string[]>;
   portSources: Record<string, Record<string, { inputTargets?: FlatEndpoint[]; outputSources?: FlatEndpoint[] }>>;
+  internalComponents: Record<string, InternalComponentDescriptor[]>;
   visibleSubcircuits: Record<string, SubcircuitComponentData>;
   diagnostics: HierarchyDiagnostic[];
 }
@@ -107,6 +110,7 @@ function createMutableOutput(): MutableOutput {
     connectionSources: {},
     ownedConnections: {},
     portSources: {},
+    internalComponents: {},
     visibleSubcircuits: {},
     diagnostics: [],
   };
@@ -121,6 +125,14 @@ function mergeOutput(target: MutableOutput, source: MutableOutput): void {
   for (const [componentId, ports] of Object.entries(source.portSources)) {
     const targetPorts = target.portSources[componentId] ??= {};
     for (const [port, sourceValue] of Object.entries(ports)) targetPorts[port] = sourceValue;
+  }
+  for (const [ownerId, descriptors] of Object.entries(source.internalComponents)) {
+    const targetDescriptors = target.internalComponents[ownerId] ??= [];
+    for (const descriptor of descriptors) {
+      if (!targetDescriptors.some((candidate) => candidate.flatId === descriptor.flatId)) {
+        targetDescriptors.push({ ...descriptor, path: [...descriptor.path], ports: clonePorts(descriptor.ports) });
+      }
+    }
   }
   Object.assign(target.visibleSubcircuits, source.visibleSubcircuits);
   target.diagnostics.push(...source.diagnostics);
@@ -141,6 +153,7 @@ export async function flattenProjectHierarchy(input: FlattenProjectInput): Promi
     connectionSources: {},
     ownedConnections: {},
     portSources: {},
+    internalComponents: {},
     visibleSubcircuits: {},
     diagnostics: [],
   };
@@ -155,6 +168,7 @@ export async function flattenProjectHierarchy(input: FlattenProjectInput): Promi
       connections: output.connectionSources,
       ownedConnections: output.ownedConnections,
       ports: output.portSources,
+      internalComponents: output.internalComponents,
     },
     diagnostics: output.diagnostics,
   };
@@ -323,7 +337,20 @@ async function flattenOccurrence(
       output.components.push({ id: flatId, kind: component.kind, ...(component.ports ? { ports: clonePorts(component.ports) } : {}) });
       projection.components.push(flatId);
       if (occurrencePath.length === 0) addSource(output.componentSources, component.id, flatId);
-      for (const ownerId of ownerIds) addSource(output.componentSources, ownerId, flatId);
+      for (const ownerId of ownerIds) {
+        addSource(output.componentSources, ownerId, flatId);
+        const descriptors = output.internalComponents[ownerId] ??= [];
+        if (!descriptors.some((descriptor) => descriptor.flatId === flatId)) {
+          descriptors.push({
+            ownerId,
+            flatId,
+            kind: component.kind,
+            displayName: component.displayName,
+            path: [...occurrencePath, component.id],
+            ports: clonePorts(component.ports ?? []),
+          });
+        }
+      }
       const ports = component.ports ?? [];
       for (const port of ports) {
         const endpoint = { componentId: flatId, port: port.name };

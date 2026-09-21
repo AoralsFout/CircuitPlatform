@@ -2,11 +2,15 @@
 
 ## 文档状态
 
-- 版本：0.1
-- 状态：已确认方向，待随实现迭代
+- 版本：1.0
+- 状态：已实现并完成验收
 - 适用范围：`apps/desktop`（Vue 渲染进程 + Electron 主进程）
-- 依赖：[ADR 0014](../decisions/0014-subcircuit-by-reference-flattened-simulation.md)、[ADR 0018](../decisions/0018-subproject-changes-do-not-propagate-automatically.md)、[ADR 0007](../decisions/0007-editor-session-and-stable-editor-ids.md)
+- 依赖：[ADR 0014](../decisions/0014-subcircuit-by-reference-flattened-simulation.md)、[ADR 0018](../decisions/0018-subproject-changes-do-not-propagate-automatically.md)、[ADR 0007](../decisions/0007-editor-session-and-stable-editor-ids.md)、[ADR 0023](../decisions/0023-document-keyed-engine-client-pool.md)、[ADR 0024](../decisions/0024-multi-document-coordinator.md)、[ADR 0025](../decisions/0025-subcircuit-save-staleness.md)、[ADR 0026](../decisions/0026-readonly-subcircuit-signal-projection.md)
 - 对应阶段：[Phase 5.6](../roadmap.md)
+
+本文的运行时边界已经落到 `createDocumentCoordinator`（无头测试 seam）和
+`useDocumentWorkspace`（生产 live facade）。下文描述的是当前实现契约；真实
+Electron/IPC、视觉和 1/5/10 文档性能证据已记录在 [Phase 5.6 路线图](../roadmap.md)。
 
 ## 1. 目标与边界
 
@@ -85,6 +89,12 @@
 - 关闭父标签时，子标签的来源记录**直接清除**，它退回成"从文件打开"的样子。不级联关闭子标签（用户可能正在子电路里工作），也不保留指向已关闭文档的悬空来源——保留它会让"返回父电路"变成"重新打开一个你刚亲手关掉的文档"。
 - 关闭子 Project 的标签**不影响任何使用它的父电路**：父电路跑的是展平副本，本来就独立。之后在父电路上再下钻该实例，会重新打开一份干净的标签。
 
+实现中的来源是运行时 `childKey → { parentKey, sourceComponentId }`，不进入 Project 文件。
+普通打开和下钻打开共用路径去重；如果目标子文档已经在标签栏中，下钻会复用该标签并更新
+最近一跳来源。关闭父文档时清理所有指向它的 child links，关闭子文档时只清理自身记录；
+来源不存在时返回操作只清理记录，不重新读取或重新打开文件。`useDocumentWorkspace` 的
+live facade 负责来源的选择、居中和聚焦；无头协调器只负责稳定选择，不持有 DOM 或视口引用。
+
 ## 4. 引擎承载
 
 ### 每份文档一个引擎进程
@@ -127,6 +137,12 @@ Electron 主进程的 `EngineClient` 从模块级单例改为**按文档键索�
 - 端口匹配沿用 ADR 0014：按名字匹配，对不上的成为 DanglingConnection；
 - **未解析**的 Subcircuit 禁止下钻，给出可展示的原因。没有文件就没有可打开的文档；"用缓存端口现场造一份空文档"更糟，它会造出一份与磁盘不一致、用户却以为能保存回去的写回对象。
 
+保存广播只发生在子文档原子写盘成功且版本状态更新之后。父文档以“规范化目标路径 +
+occurrence Editor ID”定位自己的采用版本；只有落后 occurrence 标记 `needsReload`。
+广播不会读取子文件、调用引擎或创建历史帧。显式重载读取选中的 occurrence 及递归依赖，
+沿用已有局部 projection 事务；成功后只清除该 occurrence 的 stale 标记，其他 occurrence
+继续提示重载。未保存、未重载、未解析仍是三个互相独立的状态。
+
 ### 三个不能合并的状态
 
 界面需要同时表达三个**互相独立**的状态位：
@@ -163,11 +179,29 @@ Electron 主进程的 `EngineClient` 从模块级单例改为**按文档键索�
 
 信号表面板不提供任何改变父电路结构的操作。
 
-### 待确认：信号的采集方式
+### 已确定：可见性驱动的只读采集
 
-协议里没有批量读取信号的请求，`get_signal` 一次只取一个 Port。因此本节「不碰性能预算」的判断还缺一个前提：采样时机（每次 settle 后全量读取，还是只在面板可见时读取）与读取范围（整棵子树，还是只读可见行）。这两点必须在实现前定下来，否则这一节可能推翻活动文档的帧耗时验收。
+协议里没有批量读取信号的请求，`get_signal` 仍一次只取一个 Port。工作区因此只为当前
+活动文档中选中的、已解析 Subcircuit 且可见的信号表建立读取计划；隐藏面板产生零次
+读取。计划按 `flatId:port` 合并，并复用该文档的 `EngineCallQueue`，不增加 JSON Lines
+或 C++ 请求类型。一次读取期间的重复刷新只保留最新目标。
 
-## 8. 对相邻阶段的接口要求
+读取结果带文档、选择和 projection revision。选择变化、文档切换、projection 替换、
+重载/恢复或面板隐藏都会推进 revision；迟到结果只在 revision 仍匹配时发布。失败作为
+可恢复诊断展示，不清空 Circuit、撤销历史或上一份有效读数。连续运行的 tick 不等待
+内部读取，内部表只读且不改变电路。
+
+### 实现 seam 与证据边界
+
+`createDocumentCoordinator` 验证标签、路径身份和来源生命周期；它的 runtime factory
+注入窄的 `DocumentRuntime`。生产 `createWindowDocumentRuntimeFactory` 才把每个文档键
+接到 `preload.forDocument(key)` 和对应的 `EngineClientPool` 客户端，
+`useDocumentWorkspace` 再将这些独立运行时投影为现有 Vue facade。因此无头协调器测试
+不能替代真实 BrowserWindow/preload/IPC 验收；真实场景必须使用路线图登记的
+`test:multidocument-e2e` 命令。视觉截图只供人工检查，自动事实由 `visual:probe` 断言；
+性能证据必须同时记录活动 P95、非活动工作和内部信号隐藏/显示读取数。
+
+## 9. 对相邻阶段的接口要求
 
 ### 给 Phase 5 的两条要求
 
@@ -181,7 +215,7 @@ Electron 主进程的 `EngineClient` 从模块级单例改为**按文档键索�
 
 本设计完全建立在 Phase 5.5 已经交付的 Subcircuit 引用、展平函数和一对多的 Editor ID → Engine ID 映射之上，不要求 Phase 5.5 做任何改动。
 
-## 9. 明确不做
+## 10. 明确不做
 
 - 分屏并列显示两份电路；
 - 同一份 Project 开多个标签；

@@ -6,6 +6,7 @@ const args = Object.fromEntries(process.argv.slice(2).map((arg) => {
 }));
 const duration = Number(args.duration || 5000);
 const mode = args.mode || "pan";
+const isInternalSignals = mode === "internal-signals";
 
 // 每种交互的驱动方式：pointerdown 落在哪个元素、用哪个按键、是否需要按住。
 // pointermove 一律派发到画布，事件冒泡到 Canvas 的 pointermove 处理器，与真实指针一致。
@@ -15,6 +16,7 @@ const MODES = {
   place: { selector: ".circuit-canvas", button: 0, holds: false },
   wire: { selector: ".node-port--right", button: 0, holds: true },
   route: { selector: ".route-waypoint-handle", button: 0, holds: true },
+  "internal-signals": { selector: ".circuit-canvas", button: 0, holds: false },
 };
 const config = MODES[mode];
 if (!config) throw new Error(`未知的基准模式：${mode}`);
@@ -31,6 +33,7 @@ app.whenReady().then(async () => {
     await window.webContents.executeJavaScript("new Promise(resolve => { const check = () => window.__benchmarkReady ? resolve(true) : setTimeout(check, 20); check(); })");
     const result = await window.webContents.executeJavaScript(`(async () => {
       const config = ${JSON.stringify(config)};
+      const isInternalSignals = ${JSON.stringify(isInternalSignals)};
       const canvas = document.querySelector('.circuit-canvas');
       const origin = document.querySelector(config.selector);
       if (!canvas || !origin) throw new Error('基准缺少交互目标元素：' + config.selector);
@@ -42,6 +45,33 @@ app.whenReady().then(async () => {
 
       if (config.holds) origin.dispatchEvent(pointer('pointerdown', startX, startY));
       const initial = window.__benchmarkState();
+      let internalSignals = null;
+      if (isInternalSignals) {
+        window.__resetInternalSignalMetrics();
+        window.__setInternalSignalMode('hidden');
+        for (let index = 0; index < 4; index += 1) await window.__driveInternalSignalFrame();
+        await window.__flush();
+        const hidden = window.__internalSignalMetrics();
+        window.__setInternalSignalMode('visible');
+        for (let index = 0; index < 8; index += 1) await window.__driveInternalSignalFrame();
+        await window.__flush();
+        const visible = window.__internalSignalMetrics();
+        window.__setInternalSignalMode('rapid-selection');
+        for (let index = 0; index < 8; index += 1) await window.__driveInternalSignalFrame();
+        await window.__flush();
+        const rapidSelection = window.__internalSignalMetrics();
+        window.__setInternalSignalMode('continuous-run');
+        for (let index = 0; index < 8; index += 1) await window.__driveInternalSignalFrame();
+        await window.__flush();
+        const continuousRun = window.__internalSignalMetrics();
+        internalSignals = {
+          hiddenReads: hidden.reads,
+          visibleReads: visible.reads - hidden.reads,
+          rapidSelectionReads: rapidSelection.reads - visible.reads,
+          staleResultsDropped: rapidSelection.staleResultsDropped,
+          continuousRunReads: continuousRun.reads - rapidSelection.reads,
+        };
+      }
 
       // 每个动画帧只推进一步交互，并把「更新状态 → Vue 渲染完成」计为该帧耗时，
       // 因此样本覆盖投影器几何重算与 DOM patch，而不只是事件处理器本身。
@@ -61,7 +91,8 @@ app.whenReady().then(async () => {
           const frameStarted = performance.now();
           const x = startX + (tick % 240);
           const y = startY + (tick % 240);
-          canvas.dispatchEvent(pointer('pointermove', x, y));
+          if (isInternalSignals) await window.__driveInternalSignalFrame();
+          else canvas.dispatchEvent(pointer('pointermove', x, y));
           await window.__flush();
           samples.push(performance.now() - frameStarted);
           tick += 3;
@@ -85,6 +116,7 @@ app.whenReady().then(async () => {
         frameP95Ms: Number(percentileOf(frameDeltas, .95).toFixed(3)),
         initial,
         final,
+        internalSignals,
       };
     })()`);
     process.stdout.write(`BENCHMARK_RESULT ${JSON.stringify(result)}\n`);

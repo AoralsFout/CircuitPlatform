@@ -36,7 +36,42 @@ pnpm --filter @circuit-platform/desktop performance:benchmark --mode=route
 
 ## 层次夹具
 
-`src/project-file/performance-fixture.ts` 生成根 → wrapper → core 三层 Project。core 内有 498 个普通 Component 和 998 条内部 Connection，根层的两条跨层边界连接经生产递归展平后得到精确的 500 / 1,000 规模。`benchmark.html` 不再直接构造平面元件或连线；它用内存 `HierarchyProjectReader` 读取同一夹具，要求零诊断后才挂载 Canvas。`tests/performance.test.ts` 也会对这条生产展平路径做 500 / 1,000 计数断言。
+`src/project-file/performance-fixture.ts` 生成根 → wrapper → core 三层 Project。core 内有 498 个普通 Component 和 998 条内部 Connection，根层的两条跨层边界连接经生产递归展平后得到精确的 500 / 1,000 规模。`benchmark.html` 先用生产 `HierarchyProjectReader` 做零诊断展平，再通过 `useDocumentWorkspace` 为每个文档创建独立 runtime/controller；交互文档打开同一份生产展平结果，内部信号场景保留层次 Project。`tests/performance.test.ts` 会断言运行时 adapter 数量、文档键、真实 `getSignal` 计数和 scheduler/refresh/frame 计数来源。
+
+## Phase 5.6 文档数与内部信号矩阵
+
+Phase 5.6 使用同一份生产 500 Component / 1,000 Connection 展平夹具，为每个文档创建
+独立的 runtime/controller；只有活动文档接收 pointer 交互。`--documents=1,5,10` 表示
+同时打开的文档数量，不是把 5 或 10 份电路拼成一个更大的画布。每个单元至少记录：
+
+- `p95FrameMs`：活动画布的主线程工作耗时，必须 `<= 20ms`；
+- `interacted`、`flattenedComponents=500`、`flattenedWires=1000`：确认测到的是目标
+  场景而不是空转或错误夹具；
+- `frameP50Ms` / `frameP95Ms`：真实 RAF 间隔，仅作诊断；
+- `inactiveWork`：非活动文档的 scheduler/refresh/frame 工作量，不得随文档数成比例增加；
+- 内部信号模式的 `reads`、`staleResultsDropped` 和 `frameSamples`。
+
+| 场景 | 文档数 | 模式 | 通过条件 | 证据 |
+| --- | ---: | --- | --- | --- |
+| 活动画布平移 | 1 / 5 / 10 | `pan` | 每个 N 的活动 P95 ≤ 20ms、`interacted=true` | 通过：P95 `0.2 / 0.2 / 0.2ms`，`inactiveWork=0` |
+| 活动画布拖动 | 1 / 5 / 10 | `drag` | 每个 N 的活动 P95 ≤ 20ms、`interacted=true` | 通过：P95 `0.2 / 0.2 / 0.2ms`，`inactiveWork=0` |
+| 内部表隐藏 | 1 / 5 / 10 | `internal-signals-hidden` | `reads=0`，画布帧样本不因 N 增长而阻塞 | 通过：每档 `hiddenReads=0`、P95 `0.1ms` |
+| 内部表显示 | 1 / 5 / 10 | `internal-signals-visible` | 只读选中 occurrence，读取不阻塞画布帧 | 通过：每档 `visibleReads=25`、P95 `3.4–3.5ms` |
+| 快速切换 occurrence | 1 / 5 / 10 | `internal-signals-rapid` | 迟到 revision 结果丢弃，不发布到新选择 | 通过：每档 `rapidSelectionReads=25`、`staleResultsDropped=8` |
+| 连续运行 | 1 / 5 / 10 | `internal-signals-running` | tick 只由活动文档推进，表刷新不引入逐帧读取 | 通过：每档 `continuousRunReads=73`、`inactiveWork=0` |
+
+2026-09-21 已在同一 Windows 集成工作区运行以下矩阵；上表记录的是命令 JSON 输出，
+不是由既有单文档结果外推：
+
+```powershell
+pnpm --filter @circuit-platform/desktop performance:benchmark --mode=pan --documents=1,5,10
+pnpm --filter @circuit-platform/desktop performance:benchmark --mode=drag --documents=1,5,10
+pnpm --filter @circuit-platform/desktop performance:benchmark --mode=internal-signals --documents=1,5,10
+```
+
+如果 runner 将内部信号拆成多个 mode，应保持上表四个语义（hidden、visible、rapid、
+running）并在 JSON 中输出同名或等价字段。隐藏面板的零读取与 revision 丢弃属于通过条件，
+不是仅供解释的日志。
 
 ## 端口清单的来源（Phase 4.5 的一次修复）
 

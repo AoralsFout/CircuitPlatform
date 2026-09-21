@@ -1,20 +1,21 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from "vue";
+import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import BottomPanel from "./components/BottomPanel.vue";
 import CircuitCanvas from "./components/CircuitCanvas.vue";
 import ClearCanvasDialog from "./components/ClearCanvasDialog.vue";
 import EditorToolbar from "./components/EditorToolbar.vue";
 import EmptyStatePanel from "./components/EmptyStatePanel.vue";
 import SettingsPage from "./components/SettingsPage.vue";
+import SaveConflictDialog from "./components/SaveConflictDialog.vue";
 import ToolRail from "./components/ToolRail.vue";
 import TopBar from "./components/TopBar.vue";
 import UnsavedChangesDialog from "./components/UnsavedChangesDialog.vue";
 import WorkspaceSidebar from "./components/WorkspaceSidebar.vue";
-import { useEditorState } from "./composables/useEditorState";
+import { useDocumentWorkspace } from "./composables/useDocumentWorkspace";
 import { useThemePreference } from "./composables/useThemePreference";
-import { useWorkspace } from "./composables/useWorkspace";
 import { isEditableKeyboardTarget, resolveEditorShortcut } from "./editor/keyboard";
 
+const documentWorkspace = useDocumentWorkspace();
 const {
   state,
   editorState,
@@ -26,6 +27,7 @@ const {
   step,
   reset,
   setInputBit,
+  setInternalSignalTableVisible,
   select,
   moveComponent,
   deleteSelection,
@@ -54,6 +56,9 @@ const {
   canSave,
   save: saveProject,
   saveAs: saveProjectAs,
+  pendingSaveConflict,
+  confirmSaveConflict,
+  cancelSaveConflict,
   openError,
   pendingFileAction,
   requestOpen,
@@ -62,10 +67,18 @@ const {
   cancelPendingFileAction,
   recentProjects,
   requestOpenRecent,
+  tabs,
+  activeDocumentKey,
+  canReturnToParent,
+  activateTab,
+  closeTab,
+  openSubcircuit,
+  returnToParent,
   requestLoadExample,
   addSubcircuitFromDialog,
   reloadSubcircuit,
-} = useWorkspace();
+  dispose: disposeDocumentWorkspace,
+} = documentWorkspace;
 const {
   selectedConnection,
   sidebarComponents,
@@ -120,7 +133,7 @@ const {
   focusCanvasObject,
   setPortWidth,
   setBitRanges,
-} = useEditorState(state, editorState, select, moveComponent, updatePlacement, editRoute, createConnection, setPortWidthCommand);
+} = documentWorkspace.editor;
 const {
   preference: themePreference,
   label: themeLabel,
@@ -133,6 +146,14 @@ const {
 const ZOOM_STEP = 10;
 
 const isBottomPanelExpanded = ref(true);
+
+// Internal instance reads are visibility-driven. The document binding keeps the
+// latest selection/projection revision and cancels publication of stale results.
+watch(
+  [isBottomPanelExpanded, bottomTab, () => editorState.value?.selection],
+  () => setInternalSignalTableVisible(isBottomPanelExpanded.value && bottomTab.value === "inspector"),
+  { immediate: true, deep: true },
+);
 
 function toggleBottomPanel(): void {
   isBottomPanelExpanded.value = !isBottomPanelExpanded.value;
@@ -177,6 +198,7 @@ function onEditorKeydown(event: KeyboardEvent): void {
   if (shortcut === "cancel") {
     // Esc 只取消当前最上层状态：文件操作确认 → 清空确认框 → 恢复提示 → 草稿 → 拖动预览 → 选择。
     if (pendingFileAction.value) cancelPendingFileAction();
+    else if (pendingSaveConflict.value) cancelSaveConflict();
     else if (editorState.value?.confirmation) void cancelCurrentOperation();
     else if (editorState.value?.operation === "recovery-required") return;
     else if (interaction.value.connectionDraft) cancelConnection();
@@ -217,7 +239,10 @@ onMounted(() => {
   void bootstrap();
 });
 
-onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
+onBeforeUnmount(() => {
+  window.removeEventListener("keydown", onEditorKeydown);
+  disposeDocumentWorkspace();
+});
 </script>
 
 <template>
@@ -232,6 +257,9 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
       :save-error="saveError"
       :can-save="canSave"
       :recent-projects="recentProjects"
+      :tabs="tabs"
+      :active-document-key="activeDocumentKey"
+      :can-return-to-parent="canReturnToParent"
       @cycle-theme="cycleTheme"
       @check-engine="checkEngine"
       @new-document="requestNew"
@@ -239,6 +267,9 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
       @open-recent-project="requestOpenRecent"
       @save="saveProject"
       @save-as="saveProjectAs"
+      @activate-tab="activateTab"
+      @close-tab="closeTab"
+      @return-to-parent="returnToParent"
     />
 
     <section class="editor-layout" :class="{ 'editor-layout--sidebar-collapsed': !showSidebar || activeRailPage === 'settings' }">
@@ -332,6 +363,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           @connection-waypoint-remove-or-cancel="removeConnectionWaypointOrCancel"
           @connection-cancel="cancelConnection"
           @focus-change="focusCanvasObject"
+          @open-subcircuit="openSubcircuit"
           @viewport-change="setViewport"
           @resize="resizeCanvas"
           @placement-move="placementMoved"
@@ -356,6 +388,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
           @set-port-width="setPortWidth"
           @set-bit-ranges="setBitRanges"
           @reload-subcircuit="reloadSubcircuit"
+          @open-subcircuit="openSubcircuit"
           :waveform="state.waveform"
           :waveform-rows="waveformRows"
           @select-tab="bottomTab = $event"
@@ -393,6 +426,13 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onEditorKeydown));
       :action="pendingFileAction"
       @confirm="confirmPendingFileAction"
       @cancel="cancelPendingFileAction"
+    />
+
+    <SaveConflictDialog
+      v-if="pendingSaveConflict"
+      :conflict="pendingSaveConflict"
+      @confirm="confirmSaveConflict"
+      @cancel="cancelSaveConflict"
     />
   </main>
 </template>

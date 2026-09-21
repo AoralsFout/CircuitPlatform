@@ -1,7 +1,7 @@
 const { app, BrowserWindow, Menu, dialog, ipcMain } = require("electron");
 const fs = require("node:fs");
 const path = require("node:path");
-const { EngineClient } = require("./engine-client.cjs");
+const { EngineClientPool, DEFAULT_DOCUMENT_KEY, requireDocumentKey } = require("./engine-client-pool.cjs");
 const { requirePositiveId, requireNonEmptyString, requireSaveDialogOptions } = require("./request-validation.cjs");
 const { writeTextFileAtomically, readTextFile } = require("./project-file-io.cjs");
 
@@ -12,38 +12,18 @@ function getEnginePath() {
   return process.env.CIRCUIT_ENGINE_PATH || path.resolve(__dirname, "../../../engine/build", engineFileName);
 }
 
-const engineClient = new EngineClient(getEnginePath());
+const engineClients = new EngineClientPool(getEnginePath());
 
 // 健康检查复用正式长连接，确保检查成功后下一次业务请求不会重新启动进程。
 // 它同时是进程死亡后的唯一恢复入口：restart() 清除死亡记录后，下一次请求才会重新拉起进程；
 // 业务请求在死亡记录清除前一律失败，不会悄悄换一个空电路的新进程。
-async function checkEngineHealth() {
-  engineClient.restart();
-  try {
-    const response = await engineClient.request({ type: "health_check" });
-    if (response.type === "health_check_result") {
-      return {
-        status: "ok",
-        engine: response.engine,
-        // 进程代号让渲染层能判断「进程是否真的换过」：换过才需要按文档重建，没换过（例如
-        // 一次请求超时误伤）只解除冻结，避免把同一份电路重复推送到还在服务的进程上。
-        processEpoch: engineClient.epoch,
-      };
-    }
-    return { status: "error", message: response.message || "C++ 引擎返回了错误" };
-  } catch (error) {
-    return {
-      status: error?.code === "ENOENT" ? "unavailable" : "error",
-      message: error?.code === "ENOENT"
-        ? "尚未找到 C++ 引擎，请先执行 pnpm build:engine"
-        : error instanceof Error ? error.message : "无法连接到 C++ 引擎",
-    };
-  }
+async function checkEngineHealth(documentKey) {
+  return engineClients.checkHealth(documentKey);
 }
 
-// 只把协议业务操作转发给 EngineClient；领域规则仍由 C++ 引擎负责。
-function requestEngine(message) {
-  return engineClient.request(message);
+// 只把协议业务操作转发给指定文档的 EngineClient；领域规则仍由 C++ 引擎负责。
+function requestEngine(documentKey, message) {
+  return engineClients.request(requireDocumentKey(documentKey), message);
 }
 
 function createWindow() {
@@ -72,7 +52,10 @@ function createWindow() {
     }
   });
 
-  if (app.isPackaged || process.env.CIRCUIT_PLATFORM_PRODUCTION === "1") {
+  if (process.env.CIRCUIT_PLATFORM_E2E_URL) {
+    // 专用真实 E2E 页面仍使用本文件注册的 IPC handler 与 preload，只替换渲染入口。
+    window.loadURL(process.env.CIRCUIT_PLATFORM_E2E_URL);
+  } else if (app.isPackaged || process.env.CIRCUIT_PLATFORM_PRODUCTION === "1") {
     window.loadFile(path.resolve(__dirname, "../dist/index.html"));
   } else {
     window.loadURL("http://127.0.0.1:5173");
@@ -80,41 +63,52 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
-  ipcMain.handle("engine:health", checkEngineHealth);
-  ipcMain.handle("engine:add-component", (_event, kind, ports) =>
-    requestEngine({ type: "add_component", kind, ports }));
-  ipcMain.handle("engine:add-connection", (_event, source, target) =>
-    requestEngine({
+  ipcMain.handle("engine:health", (_event, documentKey) => checkEngineHealth(documentKey));
+  ipcMain.handle("engine:add-component", (_event, documentKey, kind, ports) =>
+    requestEngine(documentKey, { type: "add_component", kind, ports }));
+  ipcMain.handle("engine:add-connection", (_event, documentKey, source, target) =>
+    requestEngine(documentKey, {
       type: "add_connection",
       sourceComponentId: source.componentId,
       sourcePort: source.port,
       targetComponentId: target.componentId,
       targetPort: target.port,
     }));
-  ipcMain.handle("engine:remove-component", (_event, componentId) =>
-    requestEngine({
+  ipcMain.handle("engine:remove-component", (_event, documentKey, componentId) =>
+    requestEngine(documentKey, {
       type: "remove_component",
       componentId: requirePositiveId(componentId, "componentId"),
     }));
-  ipcMain.handle("engine:remove-connection", (_event, connectionId) =>
-    requestEngine({
+  ipcMain.handle("engine:remove-connection", (_event, documentKey, connectionId) =>
+    requestEngine(documentKey, {
       type: "remove_connection",
       connectionId: requirePositiveId(connectionId, "connectionId"),
     }));
-  ipcMain.handle("engine:set-input", (_event, componentId, value) =>
-    requestEngine({ type: "set_input", componentId, value }));
-  ipcMain.handle("engine:settle", () => requestEngine({ type: "settle" }));
+  ipcMain.handle("engine:set-input", (_event, documentKey, componentId, value) =>
+    requestEngine(documentKey, { type: "set_input", componentId, value }));
+  ipcMain.handle("engine:settle", (_event, documentKey) => requestEngine(documentKey, { type: "settle" }));
   // 推进是无参请求，与 settle 一样不需要走 requirePositiveId。
-  ipcMain.handle("engine:tick", () => requestEngine({ type: "tick" }));
-  ipcMain.handle("engine:reset", () => requestEngine({ type: "reset" }));
-  ipcMain.handle("engine:get-signal", (_event, componentId, port) =>
-    requestEngine({ type: "get_signal", componentId, port }));
-  ipcMain.handle("engine:set-port-width", (_event, componentId, ports) =>
-    requestEngine({
+  ipcMain.handle("engine:tick", (_event, documentKey) => requestEngine(documentKey, { type: "tick" }));
+  ipcMain.handle("engine:reset", (_event, documentKey) => requestEngine(documentKey, { type: "reset" }));
+  ipcMain.handle("engine:get-signal", (_event, documentKey, componentId, port) =>
+    requestEngine(documentKey, { type: "get_signal", componentId, port }));
+  ipcMain.handle("engine:set-port-width", (_event, documentKey, componentId, ports) =>
+    requestEngine(documentKey, {
       type: "set_port_width",
       componentId: requirePositiveId(componentId, "componentId"),
       ports,
     }));
+  ipcMain.handle("engine:close-document", (_event, documentKey) => {
+    engineClients.closeDocument(documentKey);
+    return { ok: true };
+  });
+  if (process.env.CIRCUIT_PLATFORM_E2E === "1") {
+    ipcMain.handle("engine:e2e-kill", (_event, documentKey) => {
+      const client = engineClients.clientFor(requireDocumentKey(documentKey));
+      const processHandle = client.engine;
+      return { ok: processHandle !== null && processHandle.kill() };
+    });
+  }
   // 项目文件通道只做对话框与 IO：序列化与校验在渲染层，校验规则只有一份实现（规格 #34）。
   // 参数校验失败按既有通道惯例抛 TypeError；文件系统失败进结果对象，让渲染层拿到可展示原因。
   ipcMain.handle("project:pick-save-path", async (event, options) => {
@@ -173,4 +167,10 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
 
-app.on("before-quit", () => engineClient.close());
+app.on("before-quit", () => engineClients.closeAll());
+
+module.exports = {
+  DEFAULT_DOCUMENT_KEY,
+  checkEngineHealth,
+  requestEngine,
+};

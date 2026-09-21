@@ -1,58 +1,36 @@
 <!doctype html>
 <html lang="zh-CN"><head><meta charset="UTF-8" /><title>Canvas performance benchmark</title></head>
 <body><div id="app"></div>
+<style>.benchmark-document--inactive { position: absolute; inset: 0; visibility: hidden; pointer-events: none; }</style>
 <script type="module">
-  // 性能基准挂载真实 CircuitCanvas，并按 useEditorState 的同一条路径投影场景：
-  // EditorSnapshot + 交互预览 → createCanvasSceneProjector → CircuitCanvas。
-  // 交互状态由真实 DOM PointerEvent 驱动，不直接改写场景几何。
-  import { createApp, computed, h, nextTick, ref } from "vue";
+  // 这条基准挂载生产 useDocumentWorkspace：每个标签都创建独立的 useWorkspace、EditorSession、
+  // 队列和 scheduler。Fake EngineAdapter 只替代 C++ 边界，所有组合层、队列、刷新和 revision
+  // 丢弃逻辑仍然走生产实现；画布事件仍由真实 DOM PointerEvent 驱动。
+  import { createApp, h, nextTick } from "vue";
   import CircuitCanvas from "/src/components/CircuitCanvas.vue";
-  import {
-    componentGeometryFor,
-    createCanvasSceneProjector,
-    createComponentDefinitionRegistry,
-    createFrameCoalescer,
-    portLayoutFor,
-  } from "/src/canvas/index.ts";
-  import { createRouteEditController } from "/src/canvas/route-edit.ts";
-  import { createConnectionDraft, connectionDraftRoute, reduceConnectionDraft } from "/src/editor/connection-draft.ts";
-  import { positionFromPlacementCenter } from "/src/editor/placement.ts";
-  import { createDefaultOrthogonalRoute } from "/src/editor/route.ts";
+  import { useDocumentWorkspace } from "/src/composables/useDocumentWorkspace.ts";
+  import { BUILT_IN_PORTS } from "/tests/fake-ports.ts";
   import { flattenProjectHierarchy } from "/src/project-file/hierarchy.ts";
   import { createHierarchyPerformanceFixture } from "/src/project-file/performance-fixture.ts";
-  // 这一页不连引擎，端口清单必须有个本地来源。它扮演的就是引擎，因此用的正是假引擎那份内置
-  // 定义——前端源码里不该再有第二份，端口清单的唯一权威来源是引擎（ADR 0020）。
-  // 本页不进入生产构建（`vite build` 只出 index.html），因此引入测试夹不会把 tests/ 带进产品。
-  import { BUILT_IN_PORTS } from "/tests/fake-ports.ts";
 
   const params = new URLSearchParams(location.search);
   const mode = params.get("mode") || "pan";
   const expectedComponents = Number(params.get("components") || 500);
   const expectedWires = Number(params.get("wires") || 1000);
-  const registry = createComponentDefinitionRegistry();
-  const projector = createCanvasSceneProjector(registry);
-
-  // 端口位宽默认 1（与既有基线逐像素一致）；`--width=8` 把每个端口都变成多位总线，
-  // 用来量多位电路的成本——位区间标注与二进制信号文本比 1 位端口更长，是唯一随位宽变化的
-  // 渲染成本（线路外观不随位宽改变，ADR 0013）。
+  const documentCount = Math.max(1, Number(params.get("documents") || 1));
   const busWidth = Math.max(1, Number(params.get("width") || 1));
-  const portsForKind = (kind) =>
-    busWidth > 1 ? BUILT_IN_PORTS[kind].map((port) => ({ ...port, width: busWidth })) : BUILT_IN_PORTS[kind];
-
-  // 基准必须先走生产层次展平器，再将其 flat Circuit 投影到 Canvas；这里不接受合成平面数组。
   const fixture = createHierarchyPerformanceFixture();
   const hierarchy = await flattenProjectHierarchy({
     rootIdentity: fixture.rootIdentity,
     root: fixture.root,
     platform: "posix",
-    reader: {
-      read: async (identity) => {
-        const value = fixture.files.get(identity);
-        return value === undefined
-          ? { ok: false, code: "project-read-failed", message: `性能夹具缺少 Project：${identity}` }
-          : { ok: true, value };
-      },
-    },
+    reader: { read: async (identity) => {
+      const name = identity.slice(identity.lastIndexOf("/") + 1);
+      const value = name === "budget-root.circuit.json" ? (mode === "internal-signals" ? fixture.root : flatFixture) : fixture.files.get(`/benchmark/${name}`);
+      return value === undefined
+        ? { ok: false, code: "project-read-failed", message: `性能夹具缺少 Project：${identity}` }
+        : { ok: true, value };
+    } },
   });
   const flattenedComponents = hierarchy.circuit.components.length;
   const flattenedWires = hierarchy.circuit.connections.length;
@@ -60,168 +38,182 @@
   if (flattenedComponents !== expectedComponents || flattenedWires !== expectedWires) {
     throw new Error(`层次性能夹具规模错误：${flattenedComponents}/${flattenedWires}，预期 ${expectedComponents}/${expectedWires}`);
   }
-  const count = flattenedComponents;
-  const wireCount = flattenedWires;
-  const components = hierarchy.circuit.components.map((component, index) => {
-    const kind = component.kind;
-    return {
-      id: component.id,
-      kind,
-      displayName: component.id,
-      position: { x: 32 + (index % 25) * 74, y: 32 + Math.floor(index / 25) * 58 },
-      lifecycle: "active",
-      // 端口清单不再来自展示定义：展示定义只有元数据，端口由引擎回传（ADR 0020）。这一页
-      // 不连引擎，因此由它自己的引擎替身给出，与真实引擎的回退规则同源。
-      ports: component.ports ?? portsForKind(kind),
-    };
-  });
-  /**
-   * 一个端口相对元件左上角的偏移。
-   *
-   * 用投影器自己的排布规则算，不另抄一份几何：端口画在哪由 `componentGeometryFor` 与
-   * `portLayoutFor` 决定，基准若自己算一套，连线端点迟早会与端口错位。
-   */
-  const portOffsetFor = (component, port, side) => {
-    const definition = registry.get(component.kind);
-    const geometry = componentGeometryFor(definition, component.ports);
-    const layout = portLayoutFor(definition, port.name, port.direction, side.indexOf(port), side.length, geometry);
-    return layout.offset;
+  // 生产打开路径仍负责解析/校验/推送；交互模式把同一份生产展平结果作为顶层 Project，
+  // 这样生产 EditorSession/Canvas 也确实拥有 500/1,000 个可命中的实体。内部信号模式保留
+  // 原始层次 Project，以验证 occurrence-local 读取和 revision 丢弃。
+  const flatFixture = {
+    version: 1,
+    circuit: {
+      components: hierarchy.circuit.components.map((component, index) => ({
+        id: component.id,
+        kind: component.kind,
+        displayName: component.id,
+        position: { x: 32 + (index % 25) * 74, y: 32 + Math.floor(index / 25) * 58 },
+        ...(component.ports ? { ports: component.ports } : {}),
+      })),
+      connections: hierarchy.circuit.connections.map((connection) => ({
+        id: connection.id,
+        source: { component: connection.source.componentId, port: connection.source.port },
+        target: { component: connection.target.componentId, port: connection.target.port },
+      })),
+    },
   };
-  const portPoint = (component, direction) => {
-    const ports = component.ports;
-    // 优先取该方向的端口；没有时退回第一个，保持展平夹具端点几何的稳定性。
-    const port = ports.find((candidate) => candidate.direction === direction) ?? ports[0];
-    const side = ports.filter((candidate) => candidate.direction === port.direction);
-    const offset = portOffsetFor(component, port, side);
-    return { port, point: { x: component.position.x + offset.x, y: component.position.y + offset.y } };
-  };
-  const componentsById = new Map(components.map((component) => [component.id, component]));
-  const connections = hierarchy.circuit.connections.map((connection) => {
-    const source = componentsById.get(connection.source.componentId);
-    const target = componentsById.get(connection.target.componentId);
-    if (source === undefined || target === undefined) throw new Error(`层次性能夹具端点缺失：${connection.id}`);
-    const from = portPoint(source, "output");
-    const to = portPoint(target, "input");
+
+  const adapters = new Map();
+  const schedulers = new Map();
+  const rootPaths = Array.from({ length: documentCount }, (_, index) => `/benchmark/doc-${index}/budget-root.circuit.json`);
+  const portsFor = (kind, requested) => (requested ?? BUILT_IN_PORTS[kind]).map((port) => busWidth > 1 ? { ...port, width: busWidth } : { ...port });
+  function createManualScheduler(metrics) {
+    const pending = new Set();
     return {
-      id: connection.id,
-      source: { componentId: source.id, port: connection.source.port, point: from.point },
-      target: { componentId: target.id, port: connection.target.port, point: to.point },
-      lifecycle: "visible",
-      danglingEndpoints: [],
-      route: createDefaultOrthogonalRoute(from.point, to.point),
+      schedule(_delayMs, run) { pending.add(run); return () => pending.delete(run); },
+      async flush() { const runs = [...pending]; pending.clear(); for (const run of runs) { metrics.schedulerRuns += 1; run(); } await Promise.resolve(); await Promise.resolve(); },
+      pending,
     };
-  });
-
-  // route 模式需要一条已选中且带折点的 Wire，Canvas 才会渲染折点手柄。
-  const snapshot = ref({
-    document: { components, connections },
-    selection: mode === "route" ? { kind: "connection", id: connections[0]?.id ?? "" } : null,
-    operation: "idle",
-    canUndo: false,
-    canRedo: false,
-    confirmation: null,
-    error: null,
-  });
-  const simulation = { signals: {} };
-  const viewport = ref({ x: 0, y: 0, zoom: 1, visibleRect: { width: 1920, height: 1080 } });
-
-  const draggingComponentId = ref(null);
-  const dragPreview = ref(null);
-  const dragCoalescer = createFrameCoalescer((preview) => { dragPreview.value = preview; });
-
-  const pendingPlacement = ref(null);
-  const placementDefinition = registry.get("and");
-
-  const draft = ref(createConnectionDraft());
-  const draftCoalescer = createFrameCoalescer(({ point, altKey }) => {
-    draft.value = reduceConnectionDraft(draft.value, { type: "move", point, altKey });
-  });
-
-  const routeEditPreview = ref(null);
-  const routeEditController = createRouteEditController({
-    onPreview: (preview) => { routeEditPreview.value = preview; },
-    onCommit: () => {},
-    onCancel: () => { routeEditPreview.value = null; },
-  });
-
-  const previewPositions = computed(() => dragPreview.value ? { [dragPreview.value.componentId]: dragPreview.value.position } : {});
-  const previewRoutes = computed(() => routeEditPreview.value ? { [routeEditPreview.value.connectionId]: routeEditPreview.value.route } : undefined);
-  const scene = computed(() => projector.project(snapshot.value, simulation, previewPositions.value, previewRoutes.value));
-
-  const interaction = computed(() => ({
-    focusedId: null,
-    draggingComponentId: draggingComponentId.value,
-    dragPreview: dragPreview.value,
-    connectionDraft: draft.value.origin ? connectionDraftRoute(draft.value) : null,
-    routeEditPreview: routeEditPreview.value,
-    pendingPlacement: pendingPlacement.value
-      ? {
-          kind: pendingPlacement.value.kind,
-          position: positionFromPlacementCenter(pendingPlacement.value.center, placementDefinition.size, pendingPlacement.value.altKey),
-          size: placementDefinition.size,
-          error: null,
+  }
+  function adapterFor(documentKey) {
+    let adapter = adapters.get(documentKey);
+    if (adapter) return adapter;
+    const metrics = { work: 0, schedulerRuns: 0, refreshes: 0, frameWork: 0, getSignalCalls: 0 };
+    let nextComponent = 1;
+    let nextConnection = 1;
+    let nextSignalGate = null;
+    const response = (type, value = {}) => ({ type, requestId: `benchmark-${documentKey}`, ...value });
+    adapter = {
+      metrics,
+      blockNextSignal() { return new Promise((resolve) => { nextSignalGate = resolve; }); },
+      checkEngine: async () => ({ status: "ok", engine: "fake-cpp-boundary", processEpoch: 1 }),
+      addComponent: async (kind, ports) => { metrics.work += 1; return response("component_added", { componentId: nextComponent++, ports: portsFor(kind, ports) }); },
+      setPortWidth: async (_componentId, ports) => { metrics.work += 1; return response("port_width_set", { componentId: 0, ports, danglingConnectionIds: [] }); },
+      addConnection: async () => { metrics.work += 1; return response("connection_added", { connectionId: nextConnection++ }); },
+      removeComponent: async (componentId) => { metrics.work += 1; return response("component_removed", { componentId }); },
+      removeConnection: async (connectionId) => { metrics.work += 1; return response("connection_removed", { connectionId }); },
+      setInput: async () => { metrics.work += 1; return response("input_set"); },
+      settle: async () => { metrics.work += 1; metrics.refreshes += 1; return response("settled", { status: "ok" }); },
+      tick: async () => { metrics.work += 1; metrics.frameWork += 1; return response("ticked", { step: metrics.frameWork, signals: [] }); },
+      reset: async () => { metrics.work += 1; return response("reset_done"); },
+      getSignal: async () => {
+        metrics.work += 1; metrics.getSignalCalls += 1;
+        if (nextSignalGate) {
+          const release = nextSignalGate;
+          nextSignalGate = null;
+          await new Promise((resolve) => { release(() => resolve()); });
         }
-      : null,
-  }));
-
-  const controller = {
-    componentDefinitions: registry.list(),
-    recentComponentKinds: [],
-    addComponent: async () => false,
-    rememberComponentKind: () => undefined,
-    duplicateComponent: async () => false,
-    deleteComponent: async () => undefined,
-    resetRoute: async () => undefined,
-    setWireColor: async () => undefined,
-    deleteWaypoint: async () => undefined,
-    deleteConnection: async () => undefined,
+        return response("signal_result", { value: "0" });
+      },
+      closeDocument: async () => ({ ok: true }),
+    };
+    adapters.set(documentKey, adapter);
+    return adapter;
+  }
+  // 文件 IO 仍由生产 openProjectFromPath / flattenProjectHierarchy 完成；每个别名只保证路径身份独立。
+  window.circuitPlatform = {
+    ...adapterFor("legacy"),
+    forDocument: (documentKey) => adapterFor(documentKey),
+    readProjectFile: async (path) => {
+      const name = path.slice(path.lastIndexOf("/") + 1);
+      const value = name === "budget-root.circuit.json" ? (mode === "internal-signals" ? fixture.root : flatFixture) : fixture.files.get(`/benchmark/${name}`);
+      return value === undefined ? { ok: false, reason: "性能夹具缺少 Project", code: "PROJECT_FILE_NOT_FOUND" } : { ok: true, content: JSON.stringify(value) };
+    },
+    writeProjectFile: async () => ({ ok: true }),
+    pickOpenPath: async () => ({ ok: false, reason: "canceled" }),
+    pickSavePath: async () => ({ ok: false, reason: "canceled" }),
   };
-
-  // 基准 runner 用它把「状态更新 → Vue 完成渲染」纳入同一帧的计时。
+  const workspace = useDocumentWorkspace({ schedulerFactory: (key) => {
+    const scheduler = createManualScheduler(adapterFor(key).metrics); schedulers.set(key, scheduler); return scheduler;
+  } });
+  for (const path of rootPaths) {
+    await workspace.requestOpenRecent(path);
+    if (workspace.openError.value) throw new Error(workspace.openError.value);
+  }
+  // 加载成本不属于交互样本；之后的 inactiveWork 只来自真实 scheduler/refresh/tick/get_signal。
+  for (const adapter of adapters.values()) Object.assign(adapter.metrics, { work: 0, schedulerRuns: 0, refreshes: 0, frameWork: 0, getSignalCalls: 0 });
+  const activeKey = () => workspace.activeDocumentKey.value;
+  const activeAdapter = () => adapters.get(activeKey());
+  const activeScheduler = () => schedulers.get(activeKey());
+  const activeEditor = workspace.editor;
+  const controller = {
+    get componentDefinitions() { return activeEditor.componentDefinitions.value; },
+    get recentComponentKinds() { return activeEditor.recentComponentKinds.value; },
+    addComponent: (kind, center, altKey, continuous) => workspace.addComponent(kind, center, altKey, continuous),
+    rememberComponentKind: (kind) => activeEditor.rememberComponentKind(kind),
+    duplicateComponent: (id) => workspace.duplicateComponent(id),
+    deleteComponent: (id) => workspace.deleteComponent(id),
+    resetRoute: (id) => workspace.resetRoute(id),
+    setWireColor: (id, color) => workspace.setWireColor(id, color),
+    deleteWaypoint: (id, index) => workspace.deleteWaypoint(id, index),
+    deleteConnection: (id) => workspace.deleteConnection(id),
+  };
+  let internalMode = "hidden";
+  let staleResultsDropped = 0;
+  const sceneState = () => activeEditor.canvasScene.value;
   window.__flush = () => nextTick();
-  // 基准 runner 用它确认交互真的发生了；只测到空转的基准必须失败而不是给出好看的数字。
-  window.__benchmarkState = () => ({
-    sceneNodes: scene.value.nodes.length,
-    sceneWires: scene.value.wires.length,
-    visibleComponents: count,
-    visibleWires: wireCount,
-    flattenedComponents,
-    flattenedWires,
-    hierarchyFixture: true,
-    hierarchyDiagnostics: hierarchy.diagnostics.length,
-    elements: document.querySelectorAll("*").length,
-    animated: document.querySelectorAll("animate").length,
-    viewport: { x: viewport.value.x, y: viewport.value.y },
-    placementCenter: pendingPlacement.value ? { ...pendingPlacement.value.center } : null,
-    draftPoints: draft.value.origin ? connectionDraftRoute(draft.value).length : 0,
-    dragPreview: dragPreview.value ? { ...dragPreview.value.position } : null,
-    routeEditPoints: routeEditPreview.value ? routeEditPreview.value.route.length : 0,
+  window.__resetInternalSignalMetrics = () => { staleResultsDropped = 0; activeAdapter().metrics.getSignalCalls = 0; };
+  window.__setInternalSignalMode = (next) => { internalMode = next; workspace.setInternalSignalTableVisible(next !== "hidden"); };
+  window.__driveInternalSignalFrame = async () => {
+    if (internalMode === "hidden") { workspace.setInternalSignalTableVisible(false); return; }
+    if (internalMode === "rapid-selection") {
+      const before = JSON.stringify(workspace.state.value.internalSignals);
+      const blocked = activeAdapter().blockNextSignal();
+      workspace.setInternalSignalTableVisible(true);
+      await Promise.resolve();
+      workspace.setInternalSignalTableVisible(false);
+      const release = await blocked;
+      release();
+      await Promise.resolve(); await Promise.resolve();
+      if (JSON.stringify(workspace.state.value.internalSignals) === before) staleResultsDropped += 1;
+      workspace.setInternalSignalTableVisible(true);
+      return;
+    }
+    workspace.setInternalSignalTableVisible(true);
+    if (internalMode === "continuous-run") { await workspace.start(); await activeScheduler().flush(); }
+    await Promise.resolve(); await Promise.resolve();
+  };
+  window.__internalSignalMetrics = () => ({ mode: internalMode, reads: activeAdapter().metrics.getSignalCalls, staleResultsDropped });
+  window.__benchmarkState = () => {
+    const scene = sceneState();
+    const viewport = activeEditor.viewport.value;
+    const dragPreview = activeEditor.interaction.value.dragPreview;
+    const inactiveWork = [...adapters.entries()].filter(([key]) => key !== activeKey())
+      .reduce((total, [, adapter]) => total + adapter.metrics.work + adapter.metrics.schedulerRuns + adapter.metrics.refreshes + adapter.metrics.frameWork, 0);
+    return {
+      sceneNodes: scene.nodes.length, sceneWires: scene.wires.length,
+      visibleComponents: scene.nodes.length, visibleWires: scene.wires.length,
+      flattenedComponents, flattenedWires, documentCount, inactiveWork,
+      runtimeAdapterCount: [...adapters.keys()].filter((key) => key.startsWith("document-")).length,
+      runtimeAdapterKeys: [...adapters.keys()].filter((key) => key.startsWith("document-")).sort(),
+      hierarchyFixture: true, hierarchyDiagnostics: hierarchy.diagnostics.length,
+      elements: document.querySelectorAll("*").length, animated: document.querySelectorAll("animate").length,
+      viewport: { x: viewport.x, y: viewport.y, zoom: viewport.zoom, visibleRect: { ...viewport.visibleRect } },
+      placementCenter: workspace.editor.interaction.value.pendingPlacement ? { ...workspace.editor.interaction.value.pendingPlacement.position } : null,
+      draftPoints: workspace.editor.interaction.value.connectionDraft?.length ?? 0,
+      dragPreview: dragPreview ? { componentId: dragPreview.componentId, position: { ...dragPreview.position } } : null,
+      routeEditPoints: workspace.editor.interaction.value.routeEditPreview?.route.length ?? 0,
+    };
+  };
+  const activeCanvasProps = () => ({
+    scene: sceneState(), viewport: activeEditor.viewport.value, interaction: activeEditor.interaction.value, controller,
+    onViewportChange: (next) => activeEditor.setViewport(next),
+    onNodeDragStart: ({ nodeId, pointerWorld }) => activeEditor.startNodeDrag(nodeId, pointerWorld),
+    onNodeDragMove: ({ pointerWorld, altKey }) => activeEditor.moveNodeDrag(pointerWorld, altKey),
+    onNodeDragEnd: () => activeEditor.endNodeDrag(), onNodeDragCancel: () => activeEditor.cancelNodeDrag(),
+    onPlacementMove: (center, altKey) => activeEditor.placementMoved(center, altKey),
+    onConnectionStart: (port) => activeEditor.startConnection(port),
+    onConnectionMove: ({ point, altKey }) => activeEditor.moveConnection(point, altKey),
+    onConnectionEnd: (port) => activeEditor.finishConnection(port), onConnectionCancel: () => activeEditor.cancelConnection(),
+    onRouteEditStart: ({ connectionId, route, target, pointerWorld }) => activeEditor.startRouteEdit(connectionId, route, target, pointerWorld),
+    onRouteEditMove: ({ pointerWorld, altKey }) => activeEditor.moveRouteEdit(pointerWorld, altKey),
+    onRouteEditEnd: () => activeEditor.endRouteEdit(), onRouteEditCancel: () => activeEditor.cancelRouteEdit(),
   });
-
-  createApp({
-    setup: () => () => h(CircuitCanvas, {
-      scene: scene.value,
-      viewport: viewport.value,
-      interaction: interaction.value,
-      controller,
-      onViewportChange: (next) => { viewport.value = next; },
-      onNodeDragStart: ({ nodeId }) => { draggingComponentId.value = nodeId; },
-      onNodeDragMove: ({ pointerWorld }) => { dragCoalescer.schedule({ componentId: draggingComponentId.value, position: pointerWorld }); },
-      onNodeDragEnd: () => { draggingComponentId.value = null; dragPreview.value = null; },
-      onNodeDragCancel: () => { draggingComponentId.value = null; dragPreview.value = null; },
-      onPlacementMove: (center, altKey) => { pendingPlacement.value = { kind: "and", center, altKey }; },
-      onConnectionStart: (port) => { draft.value = reduceConnectionDraft(draft.value, { type: "start", port }); },
-      onConnectionMove: ({ point, altKey }) => { draftCoalescer.schedule({ point, altKey }); },
-      onConnectionEnd: (port) => { draft.value = reduceConnectionDraft(draft.value, { type: "end", port }); },
-      onConnectionCancel: () => { draftCoalescer.cancel(); draft.value = createConnectionDraft(); },
-      onRouteEditStart: ({ connectionId, route, target, pointerWorld }) => { routeEditController.start(connectionId, route, target, pointerWorld); },
-      onRouteEditMove: ({ pointerWorld, altKey }) => { routeEditController.move(pointerWorld, altKey); },
-      onRouteEditEnd: () => { routeEditController.end(); },
-      onRouteEditCancel: () => { routeEditController.cancel(); },
-    }),
+  createApp({ setup: () => () => h("div", { class: "benchmark-documents", "data-document-count": documentCount },
+    Array.from({ length: documentCount }, (_, index) => h("div", {
+      class: index === documentCount - 1 ? "benchmark-document benchmark-document--active" : "benchmark-document benchmark-document--inactive",
+      "data-document-index": index,
+    }, index === documentCount - 1 ? [h(CircuitCanvas, activeCanvasProps())] : []))),
   }).mount("#app");
-
-  // route / place 模式需要一个已激活的交互起点，否则 Canvas 不会派发 Move 事件。
-  if (mode === "place") pendingPlacement.value = { kind: "and", center: { x: 200, y: 200 }, altKey: false };
+  if (mode === "internal-signals") await workspace.select({ kind: "component", id: "wrapper" });
+  if (mode === "route") await workspace.editor.selectConnection("source-to-wrapper");
+  if (mode === "place") await workspace.beginPlacement("and");
+  await nextTick();
   window.__benchmarkReady = true;
 </script></body></html>

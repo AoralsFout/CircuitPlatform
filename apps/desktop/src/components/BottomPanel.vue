@@ -41,6 +41,7 @@ const emit = defineEmits<{
   setPortWidth: [componentId: string, portName: string, width: number];
   setBitRanges: [componentId: string, ranges: readonly BitRange[]];
   reloadSubcircuit: [componentId: string];
+  openSubcircuit: [componentId: string];
 }>();
 
 /**
@@ -80,6 +81,10 @@ function subcircuitStatusLabel(status: "resolved" | "resolving" | "unresolved"):
   return "未解析";
 }
 
+function subcircuitStaleLabel(needsReload: boolean | undefined): string {
+  return needsReload ? "需重新加载：磁盘版本已变化，当前仍使用旧展平副本" : "已采用当前磁盘版本";
+}
+
 // 记录按信号键索引，行的键直接用来取值；某个信号在记录这一点时还不存在就是未知。
 // 多位信号以逐位文本原样显示（`1010`、`X1X0`），因此每一位都读得出来。
 function waveformValue(point: WaveformPoint, key: string): Signal {
@@ -116,8 +121,15 @@ const waveformRange = computed(() => {
         <div class="inspector-copy"><p>{{ inspector.behavior }}</p><span>类型：{{ inspector.type }}</span></div>
         <p v-if="inspector.hint" class="inspector-hint">{{ inspector.hint }}</p>
         <div v-if="inspector.subcircuit" class="inspector-subcircuit" aria-label="子电路状态">
-          <div class="inspector-details"><span>引用：{{ inspector.subcircuit.relativePath }}</span><span role="status">状态：{{ subcircuitStatusLabel(inspector.subcircuit.status) }}</span></div>
+          <div class="inspector-details"><span>引用：{{ inspector.subcircuit.relativePath }}</span><span role="status">状态：{{ subcircuitStatusLabel(inspector.subcircuit.status) }}</span><span role="status">{{ subcircuitStaleLabel(inspector.subcircuit.needsReload) }}</span></div>
           <p v-if="inspector.subcircuit.diagnostic" :id="`subcircuit-diagnostic-${inspector.id}`" class="inspector-hint" role="alert">{{ inspector.subcircuit.diagnostic }}</p>
+          <button
+            type="button"
+            :disabled="inspector.subcircuit.status !== 'resolved'"
+            :aria-describedby="inspector.subcircuit.diagnostic ? `subcircuit-diagnostic-${inspector.id}` : undefined"
+            :aria-label="`打开子电路 ${inspector.subcircuit.relativePath}`"
+            @click="emit('openSubcircuit', inspector.id)"
+          >打开子电路</button>
           <button type="button" :disabled="inspector.subcircuit.status === 'resolving'" :aria-describedby="inspector.subcircuit.diagnostic ? `subcircuit-diagnostic-${inspector.id}` : undefined" :aria-label="`重新加载子电路 ${inspector.subcircuit.relativePath}`" @click="emit('reloadSubcircuit', inspector.id)">重新加载子电路</button>
         </div>
         <div class="inspector-value"><span>当前信号</span><strong :class="signalStateClass(inspector.signal)">{{ inspector.signal }}</strong></div>
@@ -131,6 +143,15 @@ const waveformRange = computed(() => {
         <div class="inspector-port-list" aria-label="端口信号">
           <span v-for="port in inspector.ports" :key="port.id" class="inspector-port-row"><span>{{ port.direction === 'input' ? '输入' : '输出' }} · {{ port.label }}（{{ port.width }} 位）</span><strong :class="signalStateClass(port.signal)">{{ port.signal }}</strong><small>{{ port.connectionState === 'connected' ? '已连接' : port.connectionState === 'dangling' ? '悬空' : '未连接' }}</small></span>
         </div>
+        <section v-if="inspector.internalTable" class="inspector-internal-table" aria-label="子电路内部实时信号" aria-readonly="true">
+          <div class="inspector-internal-heading"><strong>使用处内部信号</strong><span>父电路展平副本 · 只读</span></div>
+          <p v-if="inspector.internalTable.diagnostic" class="inspector-hint" role="alert">{{ inspector.internalTable.diagnostic }}</p>
+          <div v-for="component in inspector.internalTable.components" :key="component.id" class="inspector-internal-component">
+            <div class="inspector-internal-component-heading"><span>{{ component.displayName }}</span><small>{{ component.kind }} · {{ component.path.join(' / ') }}</small></div>
+            <div v-for="port in component.ports" :key="port.id" class="inspector-port-row"><span>{{ port.direction === 'input' ? '输入' : '输出' }} · {{ port.label }}（{{ port.width }} 位）</span><strong :class="signalStateClass(port.signal)">{{ port.signal }}</strong></div>
+          </div>
+          <span v-if="inspector.internalTable.components.length === 0" class="inspector-empty">当前使用处没有可展示的内部元件。</span>
+        </section>
       </template>
       <template v-else-if="inspector?.kind === 'wire'">
         <div class="bottom-inspector-heading"><div><span class="eyebrow">WIRE</span><strong>选中 Wire</strong></div><span class="inspector-kind">{{ inspector.status === 'dangling' ? '悬空' : '正常' }}</span></div>

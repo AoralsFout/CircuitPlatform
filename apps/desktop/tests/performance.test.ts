@@ -81,6 +81,31 @@ test("performance benchmark asserts the production hierarchy fixture before rend
   assert.match(runner, /flattenedObjects/);
 });
 
+test("multidocument benchmark uses production runtimes and adapter-observed work", async () => {
+  const desktopRoot = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+  const benchmark = await readFile(join(desktopRoot, "benchmark.html"), "utf8");
+  const runner = await readFile(join(desktopRoot, "scripts", "performance-benchmark-runner.cjs"), "utf8");
+  const benchmarkScript = await readFile(join(desktopRoot, "scripts", "performance-benchmark.mjs"), "utf8");
+  assert.match(benchmark, /useDocumentWorkspace\(\{ schedulerFactory/);
+  assert.match(benchmark, /forDocument: \(documentKey\) => adapterFor\(documentKey\)/);
+  assert.match(benchmark, /rootPaths = Array\.from\(\{ length: documentCount/);
+  assert.match(benchmark, /metrics\.getSignalCalls/);
+  assert.match(benchmark, /setInternalSignalTableVisible\(/);
+  assert.match(benchmark, /await workspace\.start\(\)/);
+  assert.match(benchmark, /schedulerRuns \+= 1/);
+  assert.match(benchmark, /filter\(\(\[key\]\) => key !== activeKey\(\)\)/);
+  assert.match(benchmark, /adapter\.metrics\.work \+ adapter\.metrics\.schedulerRuns/);
+  assert.match(benchmark, /runtimeAdapterCount/);
+  assert.match(benchmark, /runtimeAdapterKeys/);
+  assert.doesNotMatch(benchmark, /const snapshot = ref\(/);
+  assert.doesNotMatch(benchmark, /internalSignalReads\s*\+=/);
+  assert.match(runner, /await window\.__driveInternalSignalFrame\(\)/);
+  assert.match(benchmarkScript, /measured\.final\.runtimeAdapterCount === documentCount/);
+  assert.match(benchmarkScript, /runtimeAdapterKeys\.length === documentCount/);
+  assert.match(benchmarkScript, /new Set\(measured\.final\.runtimeAdapterKeys\)\.size === documentCount/);
+  assert.match(benchmarkScript, /&& runtimeAdapters/);
+});
+
 test("hierarchy performance fixture reaches the production flattener at 500/1000 scale", async () => {
   const fixture = createHierarchyPerformanceFixture();
   const flattened = await flattenProjectHierarchy({

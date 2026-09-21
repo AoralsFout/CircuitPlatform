@@ -170,6 +170,19 @@ export function fitViewportToBounds(
   };
 }
 
+/**
+ * 将一个世界坐标点放到当前视口中心，同时保留当前缩放比例。
+ * 这是标签切换后定位来源 Subcircuit 的纯视口操作，不创建编辑历史或动画。
+ */
+export function centerViewportOnPoint(state: ViewportState, point: Point): ViewportState {
+  return {
+    ...state,
+    x: state.visibleRect.width / 2 - point.x * state.zoom,
+    y: state.visibleRect.height / 2 - point.y * state.zoom,
+    visibleRect: { ...state.visibleRect },
+  };
+}
+
 /** `fitViewportToBounds` 的窗口操作别名；不会修改传入的视口对象。 */
 export const fitToWindow = fitViewportToBounds;
 
