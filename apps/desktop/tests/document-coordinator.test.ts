@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { CommandResult, EditorSnapshot } from "../src/editor/index.ts";
 import { createDocumentCoordinator } from "../src/workspace/documentCoordinator.ts";
 import type { DocumentRuntime, DocumentRuntimeSnapshot } from "../src/workspace/documentRuntime.ts";
 import type { WorkspaceSnapshot } from "../src/workspace/index.ts";
@@ -7,7 +8,7 @@ import { resolveDocumentTabKey } from "../src/components/document-tabs.ts";
 
 const emptyProject = JSON.stringify({ version: 1, circuit: { components: [], connections: [] } });
 
-function fakeSnapshot(key: string): DocumentRuntimeSnapshot {
+function fakeSnapshot(key: string, displayName = key): DocumentRuntimeSnapshot {
   return {
     runtimeId: key,
     active: true,
@@ -18,13 +19,13 @@ function fakeSnapshot(key: string): DocumentRuntimeSnapshot {
       canStep: true, canReset: true, canToggleInput: false,
     } as WorkspaceSnapshot,
     editor: null,
-    project: { path: null, displayName: key, identity: `temporary:${key}`, isDirty: false, saveError: null, openError: null, pendingFileAction: null },
+    project: { path: null, displayName, identity: `temporary:${key}`, isDirty: false, saveError: null, openError: null, pendingFileAction: null },
     view: { viewport: { x: 0, y: 0, zoom: 1, visibleRect: { width: 1, height: 1 } }, selection: null, activeRailPage: "components", bottomTab: "outputs" },
   };
 }
 
-function fakeRuntime(key: string): DocumentRuntime {
-  let current = fakeSnapshot(key);
+function fakeRuntime(key: string, displayName = key, dispatchResult: CommandResult | null = null): DocumentRuntime {
+  let current = fakeSnapshot(key, displayName);
   const listeners = new Set<(snapshot: DocumentRuntimeSnapshot) => void>();
   const publish = () => { for (const listener of listeners) listener(current); return current; };
   const runtime = {
@@ -41,7 +42,7 @@ function fakeRuntime(key: string): DocumentRuntime {
     step: async () => current,
     reset: async () => current,
     setInputBit: async () => current,
-    dispatchEditor: async () => null,
+    dispatchEditor: async () => dispatchResult,
     setProjectPath(path: string | null) { current = { ...current, project: { ...current.project, path, displayName: path?.split(/[\\/]/).pop() ?? key, identity: path ?? current.project.identity } }; return publish(); },
     setDirty(isDirty: boolean) { current = { ...current, project: { ...current.project, isDirty } }; return publish(); },
     setSaveError: () => current,
@@ -103,6 +104,83 @@ test("coordinator pauses on activation and closes only the requested runtime", a
   const closed = await coordinator.close(firstKey, { discard: true });
   assert.equal(closed.ok, true);
   assert.equal(closed.ok ? closed.activeKey : null, null);
+});
+
+test("coordinator forwards CommandResult errors from the active runtime", async () => {
+  const editorSnapshot: EditorSnapshot = {
+    document: { components: [], connections: [] },
+    selection: null,
+    operation: "idle",
+    canUndo: false,
+    canRedo: false,
+    confirmation: null,
+    error: null,
+  };
+  const result: CommandResult = {
+    ok: false,
+    error: { code: "busy", message: "编辑器忙碌。", retryable: true },
+    snapshot: editorSnapshot,
+  };
+  const coordinator = createDocumentCoordinator({
+    reader: { async readProjectFile() { return { ok: true, content: emptyProject }; } },
+    runtimeFactory: ({ documentKey }) => fakeRuntime(documentKey, documentKey, result),
+  });
+  const opened = await coordinator.openProject("C:\\A.circuit.json");
+  assert.equal(opened.ok, true);
+
+  assert.deepEqual(await coordinator.dispatchEditor({ type: "select", selection: null }), result);
+});
+
+test("newDocument 使用连续临时名称，并以结构化错误保留已有标签", async () => {
+  const names: Array<string | undefined> = [];
+  let shouldFail = false;
+  const coordinator = createDocumentCoordinator({
+    reader: { async readProjectFile() { return { ok: true, content: emptyProject }; } },
+    runtimeFactory: ({ documentKey, temporaryName }) => {
+      names.push(temporaryName);
+      if (shouldFail) throw new Error("引擎启动失败");
+      return fakeRuntime(documentKey, temporaryName);
+    },
+  });
+
+  const first = await coordinator.newDocument();
+  const second = await coordinator.newDocument();
+  assert.deepEqual(first, { ok: true, key: "document-1" });
+  assert.deepEqual(second, { ok: true, key: "document-2" });
+  assert.deepEqual(names, ["未命名 1", "未命名 2"]);
+  assert.deepEqual(coordinator.snapshot().tabs.map((tab) => tab.displayName), ["未命名 1", "未命名 2"]);
+
+  shouldFail = true;
+  const failed = await coordinator.newDocument();
+  assert.deepEqual(failed, { ok: false, error: "引擎启动失败" });
+  assert.equal(coordinator.snapshot().tabs.length, 2);
+  assert.equal(coordinator.snapshot().activeKey, "document-2");
+  assert.equal(coordinator.snapshot().openError, "引擎启动失败");
+});
+
+test("coordinator dispose 释放全部运行时且不影响彼此", async () => {
+  const runtimes: Array<{ runtime: DocumentRuntime; disposeCalls: number }> = [];
+  const coordinator = createDocumentCoordinator({
+    reader: { async readProjectFile() { return { ok: true, content: emptyProject }; } },
+    runtimeFactory: ({ documentKey }) => {
+      const runtime = fakeRuntime(documentKey);
+      const originalDispose = runtime.dispose.bind(runtime);
+      const record = { runtime, disposeCalls: 0 };
+      runtime.dispose = () => { record.disposeCalls += 1; originalDispose(); };
+      runtimes.push(record);
+      return runtime;
+    },
+  });
+  await coordinator.openProject("C:\\A.circuit.json");
+  await coordinator.openProject("C:\\B.circuit.json");
+
+  coordinator.dispose();
+  coordinator.dispose();
+
+  assert.deepEqual(coordinator.snapshot().tabs, []);
+  assert.equal(coordinator.snapshot().activeKey, null);
+  assert.deepEqual(runtimes.map((record) => record.disposeCalls), [1, 1]);
+  assert.deepEqual(runtimes.map((record) => record.runtime.snapshot().active), [false, false]);
 });
 
 test("document tab resolver supports arrows, Home/End, and activation keys", () => {

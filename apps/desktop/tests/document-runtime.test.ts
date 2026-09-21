@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ComponentKindName, EngineResponse } from "@circuit-platform/protocol";
-import type { CircuitEnginePort, EditorInitialState } from "../src/editor/index.ts";
+import type { CircuitEnginePort, EditorInitialState, EditorSession } from "../src/editor/index.ts";
 import {
   createDocumentRuntime,
   type DocumentRuntime,
@@ -102,8 +102,43 @@ test("运行时提供窄编辑器命令，不把引擎身份放进快照", async
     editorEngine: editorEngine(),
   });
   const result = await runtime.dispatchEditor({ type: "select", selection: { kind: "component", id: "same-id" } });
-  assert.equal(result?.selection?.kind, "component");
+  assert.equal(result?.ok, true);
+  assert.equal(result?.ok === true ? result.snapshot.selection?.kind : undefined, "component");
   assert.equal("bindings" in runtime.snapshot(), false);
   assert.equal("engineId" in runtime.snapshot(), false);
+  runtime.destroy();
+});
+
+test("运行时保留 EditorSession 的结构命令错误", async () => {
+  const expectedError = { code: "engine_unavailable", message: "引擎不可用。", retryable: true } as const;
+  const editor = {
+    snapshot: () => ({
+      document: { components: [], connections: [] },
+      selection: null,
+      operation: "idle",
+      canUndo: false,
+      canRedo: false,
+      confirmation: null,
+      error: expectedError,
+    }),
+    dispatch: async () => ({
+      ok: false as const,
+      error: expectedError,
+      snapshot: editor.snapshot(),
+    }),
+    subscribe: () => () => undefined,
+    setEngineAvailability: () => undefined,
+    adoptBindings: () => undefined,
+    replaceProjection: async () => ({ ok: true as const, snapshot: editor.snapshot() }),
+    projection: () => null,
+    adoptProjection: () => undefined,
+    rewriteSubcircuitReferences: () => false,
+  } as unknown as EditorSession;
+  const runtime = createDocumentRuntime({ adapter: new DeferredEngine(), editor });
+
+  const result = await runtime.dispatchEditor({ type: "select", selection: null });
+
+  assert.equal(result?.ok, false);
+  assert.deepEqual(result?.ok === false ? result.error : null, expectedError);
   runtime.destroy();
 });

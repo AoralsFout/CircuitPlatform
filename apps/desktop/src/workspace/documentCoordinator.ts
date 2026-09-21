@@ -3,7 +3,7 @@ import {
   projectPathIdentity,
   type ParsedProjectFile,
 } from "../project-file/index.ts";
-import type { EditorCommand, EditorSnapshot } from "../editor/index.ts";
+import type { CommandResult, EditorCommand } from "../editor/index.ts";
 import type {
   CircuitDocument,
   InputBit,
@@ -31,6 +31,8 @@ export interface DocumentRuntimeFactoryContext {
   documentKey: string;
   path: string | null;
   parsed: ParsedProjectFile | null;
+  /** 未保存文档的展示名；已保存文档不需要临时名称。 */
+  temporaryName?: string;
 }
 
 /** 协调器注入的运行时工厂；生产代码和测试替身共享这个窄 seam。 */
@@ -44,7 +46,7 @@ export type DocumentRuntimeFactory = (context: DocumentRuntimeFactoryContext) =>
  * @returns 可传给 `createDocumentCoordinator` 的运行时工厂。
  */
 export function createWindowDocumentRuntimeFactory(): DocumentRuntimeFactory {
-  return ({ documentKey, path, parsed }) => {
+  return ({ documentKey, path, parsed, temporaryName }) => {
     const bridge = (window as unknown as {
       circuitPlatform: {
         forDocument(key: string): unknown;
@@ -59,6 +61,7 @@ export function createWindowDocumentRuntimeFactory(): DocumentRuntimeFactory {
         await bridge.closeDocument();
       },
       project: path === null ? undefined : { path },
+      temporaryName,
       initialEditor: {
         document: parsed?.document ?? { components: [], connections: [] },
         bindings: { components: {}, connections: {} },
@@ -90,6 +93,10 @@ export interface DocumentCoordinatorSnapshot {
 
 export type CoordinatorOpenResult =
   | { ok: true; key: string; duplicate: boolean }
+  | { ok: false; error: string };
+
+export type CoordinatorNewDocumentResult =
+  | { ok: true; key: string }
   | { ok: false; error: string };
 
 export type CoordinatorCloseResult =
@@ -188,11 +195,17 @@ export function createDocumentCoordinator(options: DocumentCoordinatorOptions) {
   let activeKey: string | null = null;
   let openError: string | null = null;
   let sequence = 1;
+  let temporarySequence = 1;
+  let disposed = false;
 
   function nextKey(): string {
     let key = `document-${sequence++}`;
     while (byKey.has(key)) key = `document-${sequence++}`;
     return key;
+  }
+
+  function nextTemporaryName(): string {
+    return `未命名 ${temporarySequence++}`;
   }
 
   function snapshot(): DocumentCoordinatorSnapshot {
@@ -232,6 +245,7 @@ export function createDocumentCoordinator(options: DocumentCoordinatorOptions) {
   }
 
   async function openProject(path: string): Promise<CoordinatorOpenResult> {
+    if (disposed) return { ok: false, error: "文档协调器已释放。" };
     const identity = identityOf(path);
     const existingKey = byIdentity.get(identity);
     if (existingKey !== undefined) {
@@ -242,6 +256,7 @@ export function createDocumentCoordinator(options: DocumentCoordinatorOptions) {
     if (pending !== undefined) return pending;
 
     const operation = (async (): Promise<CoordinatorOpenResult> => {
+      if (disposed) return { ok: false, error: "文档协调器已释放。" };
       // 再次检查竞态：另一条路径写法可能在本次读取期间先完成。
       const racedKey = byIdentity.get(identity);
       if (racedKey !== undefined) {
@@ -283,6 +298,10 @@ export function createDocumentCoordinator(options: DocumentCoordinatorOptions) {
         if (loaded.workspace.operationError !== null || loaded.workspace.engineState !== "ready") {
           throw new Error(loaded.workspace.operationError ?? "打开项目失败。");
         }
+        if (disposed) {
+          runtime.destroy();
+          return { ok: false, error: "文档协调器已释放。" };
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : "打开项目失败。";
         openError = message;
@@ -313,18 +332,37 @@ export function createDocumentCoordinator(options: DocumentCoordinatorOptions) {
     try { return await operation; } finally { opening.delete(identity); }
   }
 
-  async function newDocument(): Promise<string> {
+  async function newDocument(): Promise<CoordinatorNewDocumentResult> {
+    if (disposed) return { ok: false, error: "文档协调器已释放。" };
     const key = nextKey();
-    const runtime = await options.runtimeFactory({ documentKey: key, path: null, parsed: null });
+    const temporaryName = nextTemporaryName();
+    let runtime: DocumentRuntime | undefined;
     try {
+      runtime = await options.runtimeFactory({ documentKey: key, path: null, parsed: null, temporaryName });
       const health = await runtime.checkEngine();
       if (health.workspace.engineState !== "ready") {
         throw new Error(health.workspace.operationError ?? "仿真引擎不可用，无法新建文档。");
       }
-      await runtime.openCircuit({ components: [], connections: [] });
+      const opened = await runtime.openCircuit({ components: [], connections: [] });
+      if (opened.workspace.operationError !== null || opened.workspace.engineState !== "ready") {
+        throw new Error(opened.workspace.operationError ?? "新建文档失败。");
+      }
+      if (disposed) {
+        runtime.destroy();
+        return { ok: false, error: "文档协调器已释放。" };
+      }
     } catch (error) {
-      runtime.destroy();
-      throw error;
+      try { runtime?.destroy(); } catch { /* 新建失败的隔离清理。 */ }
+      const message = error instanceof Error ? error.message : "新建文档失败。";
+      openError = message;
+      publish();
+      return { ok: false, error: message };
+    }
+    if (runtime === undefined) {
+      const error = "新建文档失败。";
+      openError = error;
+      publish();
+      return { ok: false, error };
     }
     const record: RuntimeRecord = {
       key,
@@ -339,7 +377,7 @@ export function createDocumentCoordinator(options: DocumentCoordinatorOptions) {
     activeKey = key;
     openError = null;
     publish();
-    return key;
+    return { ok: true, key };
   }
 
   async function close(key: string, options: { discard?: boolean } = {}): Promise<CoordinatorCloseResult> {
@@ -360,9 +398,30 @@ export function createDocumentCoordinator(options: DocumentCoordinatorOptions) {
     return { ok: true, key, activeKey };
   }
 
-  async function dispatchEditor(command: EditorCommand): Promise<EditorSnapshot | null> {
+  async function dispatchEditor(command: EditorCommand): Promise<CommandResult | null> {
     const record = activeKey === null ? undefined : byKey.get(activeKey);
     return record?.runtime.dispatchEditor(command) ?? null;
+  }
+
+  /** 释放协调器拥有的全部文档运行时；清理失败不会阻断其他文档的释放。 */
+  function dispose(): void {
+    if (disposed) return;
+    disposed = true;
+    for (const record of [...records]) {
+      record.unsubscribe();
+      try {
+        record.runtime.dispose();
+      } catch {
+        try { record.runtime.destroy(); } catch { /* 继续释放其他文档。 */ }
+      }
+    }
+    records.length = 0;
+    byKey.clear();
+    byIdentity.clear();
+    opening.clear();
+    activeKey = null;
+    openError = null;
+    listeners.clear();
   }
 
   function activeRuntime(): DocumentRuntime | null {
@@ -372,6 +431,7 @@ export function createDocumentCoordinator(options: DocumentCoordinatorOptions) {
   const coordinator = {
     snapshot,
     subscribe(listener: (snapshot: DocumentCoordinatorSnapshot) => void) {
+      if (disposed) return () => undefined;
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
@@ -382,6 +442,7 @@ export function createDocumentCoordinator(options: DocumentCoordinatorOptions) {
     close,
     activeRuntime,
     dispatchEditor,
+    dispose,
     async start() { return activeRuntime()?.start() ?? null; },
     async pause() { return activeRuntime()?.pause() ?? null; },
     async resume() { return activeRuntime()?.resume() ?? null; },
