@@ -66,14 +66,15 @@ async function main() {
     definitions: {
       child: { displayName: "child.circuit.json", circuit: {
         components: [
-          { id: "in", kind: "input", displayName: "A", position: { x: 0, y: 0 }, ports: [{ name: "out", direction: "output", width: 1 }] },
+          { id: "in", kind: "input", displayName: "A", position: { x: 0, y: 0 }, ports: [{ name: "out", direction: "output", width: 1 }], data: { value: "1" } },
           { id: "gate", kind: "not", displayName: "NOT", position: { x: 120, y: 0 } },
           { id: "out", kind: "output", displayName: "Y", position: { x: 240, y: 0 }, ports: [{ name: "in", direction: "input", width: 1 }] },
-          { id: "missing-nested", kind: "subcircuit", displayName: "missing.circuit.json", position: { x: 120, y: 130 }, data: { definitionId: "missing", cachedPorts: [] } },
+          { id: "missing-nested", kind: "subcircuit", displayName: "missing.circuit.json", position: { x: 120, y: 130 }, data: { definitionId: "missing", cachedPorts: [{ name: "A", direction: "input", width: 1 }, { name: "B", direction: "input", width: 1 }, { name: "Y", direction: "output", width: 1 }], portOrder: ["B", "A", "Y"] } },
         ],
         connections: [
           { id: "w1", source: { component: "in", port: "out" }, target: { component: "gate", port: "in" } },
           { id: "w2", source: { component: "gate", port: "out" }, target: { component: "out", port: "in" } },
+          { id: "w3", source: { component: "in", port: "out" }, target: { component: "missing-nested", port: "B" } },
         ],
       } },
     },
@@ -109,8 +110,15 @@ async function main() {
       tabCount: document.querySelectorAll('[role=tab]').length,
       missingNested: document.querySelector('.embedded-definition-view__item button:disabled')?.getAttribute('aria-label'),
       definitionKey: document.querySelector('[role=tab][aria-selected=true]')?.dataset.documentKey,
+      savedValue: document.querySelector('.embedded-definition-view__value')?.textContent,
+      portOrder: Array.from(Array.from(document.querySelectorAll('.embedded-definition-view__item')).find(item => item.textContent.includes('missing.circuit.json'))?.querySelectorAll('.embedded-definition-view__ports li') ?? []).map(item => item.textContent?.trim()),
+      endpointLabels: Array.from(document.querySelectorAll('.embedded-definition-view__connections li')).map(item => item.textContent),
+      bPortY: document.querySelector('[data-port="missing-nested.B"] circle')?.getAttribute('cy'),
+      w3Points: Array.from(document.querySelectorAll('.embedded-definition-view__canvas polyline')).find(item => item.getAttribute('aria-label')?.includes('w3'))?.getAttribute('points'),
     })`);
-    if (treeView.title !== "child.circuit.json" || treeView.nodes !== 4 || treeView.wires !== 2 || treeView.editableToolbar || treeView.tabCount !== 2 || !treeView.missingNested?.includes("定义已删除")) {
+    if (treeView.title !== "child.circuit.json" || treeView.nodes !== 4 || treeView.wires !== 3 || treeView.editableToolbar || treeView.tabCount !== 2 || !treeView.missingNested?.includes("定义已删除") ||
+        treeView.savedValue !== "值 1" || JSON.stringify(treeView.portOrder) !== JSON.stringify(["输入 B", "输入 A", "输出 Y"]) ||
+        !treeView.endpointLabels?.some(label => label.includes("w3：in.out → missing-nested.B")) || treeView.bPortY !== "-10" || !treeView.w3Points?.endsWith("60,120")) {
       throw new Error(`树导航或只读内容错误：${JSON.stringify(treeView)}`);
     }
     await inPage(window, `Array.from(document.querySelectorAll('button')).find(button => button.textContent === '返回父电路')?.click()`);

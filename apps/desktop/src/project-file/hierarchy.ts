@@ -4,20 +4,6 @@ import type { EditorComponent, EditorConnection, EditorDocument, InternalCompone
 import type { ProjectFileComponent, ProjectFileData } from "./index.ts";
 import { projectPathIdentity, type PathPlatform } from "./paths.ts";
 
-/** 旧层次调用方保留的读取器类型；v2 展平只读取 root.definitions，不会调用它。 */
-export interface HierarchyProjectReader {
-  /**
-   * 读取某个使用处采用的子 Project。
-   * @param identity 已按目标平台规范化的 Project 身份。
-   * @param occurrencePath 从根文档到该使用处的稳定 Editor Component ID 路径；同一文件的不同路径必须可返回不同快照。
-   * @returns 已校验的项目数据，或包含稳定机器类别和中文原因的读取失败。
-   */
-  read(identity: string, occurrencePath?: readonly string[]): Promise<
-    | { ok: true; value: ProjectFileData }
-    | { ok: false; code: string; message: string }
-  >;
-}
-
 /** 展平后可直接交给 Workspace 的纯协议 Circuit 投影。 */
 export interface FlattenedCircuit {
   components: readonly { id: string; kind: ComponentKindName; ports?: readonly PortSpec[] }[];
@@ -51,8 +37,6 @@ export interface HierarchyDiagnostic extends SubcircuitDiagnostic {
 export interface FlattenProjectInput {
   rootIdentity: string;
   root: ProjectFileData;
-  /** 兼容旧调用方；v2 忽略此项并只读取 root.definitions。 */
-  reader?: HierarchyProjectReader;
   platform?: PathPlatform;
 }
 
@@ -162,15 +146,7 @@ export async function flattenProjectHierarchy(input: FlattenProjectInput): Promi
     visiblePorts: {},
     diagnostics: [],
   };
-  const embeddedReader: HierarchyProjectReader = {
-    async read(definitionId) {
-      const definition = Object.hasOwn(input.root.definitions, definitionId) ? input.root.definitions[definitionId] : undefined;
-      return definition === undefined
-        ? { ok: false, code: "definition-missing", message: `父 Project 中缺少子电路定义「${definitionId}」。` }
-        : { ok: true, value: { ...input.root, circuit: definition.circuit } };
-    },
-  };
-  await flattenOccurrence(input.root, rootIdentity, [], [], false, [], output, embeddedReader, platform);
+  await flattenOccurrence(input.root, rootIdentity, [], [], false, [], output);
   const rootDocument = documentForProject(input.root, output);
 
   return {
@@ -239,11 +215,9 @@ async function flattenOccurrence(
   omitBoundary: boolean,
   ownerIds: readonly string[],
   output: MutableOutput,
-  reader: HierarchyProjectReader,
-  platform: PathPlatform | undefined,
 ): Promise<OccurrenceProjection> {
   const interfaceResult = omitBoundary
-    ? await interfaceFor(project, identity, undefined, stack, output, reader, platform)
+    ? await interfaceFor(project, identity, undefined, stack, output)
     : null;
   const projection: OccurrenceProjection = { inputs: new Map(), outputs: new Map(), inputAliases: new Map(), components: [], connections: [] };
   const componentById = new Map(project.circuit.components.map((component) => [component.id, component]));
@@ -263,7 +237,7 @@ async function flattenOccurrence(
         updateVisibleSubcircuit(output, component.id, unresolvedData(data, diagnostic));
         continue;
       }
-      const childResult = await readChild(reader, childKey, [...occurrencePath, component.id]);
+      const childResult = readChild(project, childKey);
       if (!childResult.ok) {
         const diagnostic = diagnosticFor(childResult.code, childResult.message, childKey, component.id, [...stack, identity, childKey]);
         output.diagnostics.push(diagnostic);
@@ -278,7 +252,7 @@ async function flattenOccurrence(
         continue;
       }
       const childOutput = createMutableOutput();
-      const childInterface = await interfaceFor(childResult.value, childKey, data?.portOrder, [...stack, identity], childOutput, reader, platform);
+      const childInterface = await interfaceFor(childResult.value, childKey, data?.portOrder, [...stack, identity], childOutput);
       if (childInterface === null) {
         const diagnostic = outputDiagnosticForComponent(childOutput, component.id) ?? diagnosticFor("interface-invalid", "Subcircuit 接口无效。", childKey, component.id, [...stack, identity, childKey]);
         output.diagnostics.push(...childOutput.diagnostics);
@@ -293,8 +267,6 @@ async function flattenOccurrence(
         true,
         [...ownerIds, component.id],
         childOutput,
-        reader,
-        platform,
       );
       if (childOutput.diagnostics.some((diagnostic) => diagnostic.code !== "definition-missing" && diagnostic.code !== "dangling-connection")) {
         output.diagnostics.push(...childOutput.diagnostics);
@@ -559,8 +531,6 @@ async function interfaceFor(
   explicitOrder: readonly string[] | undefined,
   stack: readonly string[],
   output: MutableOutput,
-  _reader: HierarchyProjectReader,
-  _platform: PathPlatform | undefined,
 ): Promise<ProjectInterface | null> {
   // Clock 只能存在于顶层运行文档；将含 Clock 的文件作为子电路会让层次接口
   // 失去纯组合语义，因此在边界处整体拒绝，而顶层调用不会进入本函数。
@@ -620,12 +590,11 @@ function orderPorts(ports: readonly PortSpec[], order: readonly string[], identi
   return order.map((name) => ports.find((port) => port.name === name)!);
 }
 
-async function readChild(reader: HierarchyProjectReader, identity: string, occurrencePath: readonly string[] = []) {
-  try {
-    return await reader.read(identity, occurrencePath);
-  } catch (error) {
-    return { ok: false as const, code: "project-read-failed", message: error instanceof Error ? error.message : "读取子 Project 失败。" };
-  }
+function readChild(project: ProjectFileData, identity: string) {
+  const definition = Object.hasOwn(project.definitions, identity) ? project.definitions[identity] : undefined;
+  return definition === undefined
+    ? { ok: false as const, code: "definition-missing", message: `父 Project 中缺少子电路定义「${identity}」。` }
+    : { ok: true as const, value: { ...project, circuit: definition.circuit } };
 }
 
 function subcircuitDataOf(entry: ProjectFileComponent): SubcircuitComponentData | undefined {

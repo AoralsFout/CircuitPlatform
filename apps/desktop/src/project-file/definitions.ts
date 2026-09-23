@@ -26,7 +26,11 @@ export type RepairMissingUseResult =
   | { ok: true; file: ProjectFileData; topLevelImpacts: readonly ReimportPortImpact[] }
   | { ok: false; errors: readonly ProjectFileError[] };
 
-/** 找出父工程中仍指向缺失定义的具体使用处。 */
+/**
+ * 列出仍指向缺失定义的顶层与内嵌使用处，供修复入口定位；不修改文件。
+ * @param file 已解析的父 Project。
+ * @returns 带所属定义、元件身份和可读位置的使用处；没有缺失引用时为空。
+ */
 export function missingDefinitionUses(file: ProjectFileData): readonly (DefinitionUse & { missingDefinitionId: string })[] {
   const uses: Array<DefinitionUse & { missingDefinitionId: string }> = [];
   const scan = (circuit: ProjectFileCircuit, ownerDefinitionId: string | null, ownerName: string): void => {
@@ -42,7 +46,14 @@ export function missingDefinitionUses(file: ProjectFileData): readonly (Definiti
   return uses;
 }
 
-/** 仅替换一个缺失使用处的定义关联；先完成 Port 影响和环校验，再返回可提交快照。 */
+/**
+ * 只重关联一个缺失使用处，不修改输入文件；先验证端口影响与定义环。
+ * @param file 当前父 Project。
+ * @param ownerDefinitionId 所属定义身份；null 表示顶层电路。
+ * @param componentId 待修复的使用处元件身份。
+ * @param targetDefinitionId 已存在且将被关联的定义身份。
+ * @returns 完整候选及顶层新悬空端点预告，或使用处变化、目标缺失、环、只读上层断线等诊断。
+ */
 export function repairMissingDefinitionUse(
   file: ProjectFileData,
   ownerDefinitionId: string | null,
@@ -187,7 +198,11 @@ export function planDeleteDefinition(file: ProjectFileData, definitionId: string
     : { ok: false, errors: parsed.errors };
 }
 
-/** 从已保存定义的边界 Input/Output 取得再次放置所需的端口；不读取源文件。 */
+/**
+ * 从定义内的 Input/Output 边界发布端口，供再次放置与只读检查使用；不读取源文件。
+ * @param circuit 已保存的定义电路。
+ * @returns 按边界位置排序的端口清单；非法或重复边界由候选校验另行诊断。
+ */
 export function portsForDefinition(circuit: ProjectFileCircuit): readonly PortSpec[] {
   const errors: ProjectFileError[] = [];
   return publishedPorts(circuit, errors);
@@ -431,7 +446,13 @@ function replacementCachedPorts(
   ];
 }
 
-/** 只有缓存等于真实接口时保留显式顺序；悬空旧端口与新接口并存时交给默认顺序。 */
+/**
+ * 判断旧显式顺序能否继续用于新接口，避免把悬空的缓存端口误认成有效接口。
+ * @param previous 旧使用处保存的端口顺序，可省略。
+ * @param cached 更新后的使用处缓存端口。
+ * @param actual 新定义真实发布的端口。
+ * @returns 可保留的顺序副本；无顺序或缓存与真实接口不兼容时返回 undefined。
+ */
 export function compatiblePortOrder(previous: readonly string[] | undefined, cached: readonly PortSpec[], actual: readonly PortSpec[]): string[] | undefined {
   if (!previous || cached.length !== actual.length || cached.some((port) => !actual.some((item) =>
     item.name === port.name && item.direction === port.direction && item.width === port.width))) return undefined;

@@ -32,7 +32,6 @@ async function flatten(file: ProjectFileData) {
     rootIdentity: "/anywhere/parent.circuit.json",
     root: file,
     platform: "posix",
-    reader: { async read() { throw new Error("embedded definition must not read source file"); } },
   });
 }
 

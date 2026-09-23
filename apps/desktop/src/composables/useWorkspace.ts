@@ -535,6 +535,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     hierarchy: FlattenProjectResult;
     cache: Map<string, ProjectFileData>;
     forceReplaceFlatIds: readonly string[];
+    definitionWarnings?: readonly string[];
     action?: "repair";
   } | null = null;
   // 待确认「打开」的来源路径：来自最近项目入口时非空（确认后不再弹文件对话框，
@@ -1334,31 +1335,41 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     }) };
   }
 
+  async function pickParsedProjectFile(): Promise<
+    | { ok: true; path: string; file: ProjectFileData }
+    | { ok: false; message: string | null }
+  > {
+    const picked = await adapter.pickOpenPath();
+    if (!picked.ok) return { ok: false, message: picked.reason === "canceled" ? null : picked.reason };
+    const read = await adapter.readProjectFile(picked.path);
+    if (!read.ok) return { ok: false, message: read.reason };
+    let raw: unknown;
+    try { raw = JSON.parse(read.content); }
+    catch (error) {
+      return { ok: false, message: `项目文件不是合法的 JSON：${error instanceof Error ? error.message : "解析失败"}` };
+    }
+    const parsed = parseProjectFile(raw);
+    return parsed.ok
+      ? { ok: true, path: picked.path, file: parsed.value.file }
+      : { ok: false, message: parsed.errors[0]?.message ?? "项目文件校验失败。" };
+  }
+
+  async function definitionGraphWarnings(file: ProjectFileData, definitionId: string): Promise<readonly string[]> {
+    const definition = file.definitions[definitionId];
+    if (!definition) return [];
+    const inspection: ProjectFileData = { ...file, circuit: { components: [{
+      id: "definition-inspection", kind: "subcircuit", displayName: definition.displayName,
+      position: { x: 0, y: 0 }, data: { definitionId, cachedPorts: portsForDefinition(definition.circuit) },
+    }], connections: [] } };
+    const result = await flattenProjectHierarchy({ rootIdentity: projectPath.value ?? "untitled.circuit.json", root: inspection });
+    return [...new Set(result.diagnostics.map((diagnostic) => diagnostic.message))];
+  }
+
   /** 从已保存的 v2 文件导入独立定义；仅导入和导入并放置共用读取与校验。 */
   async function importSubcircuitFromDialog(place: boolean, center: Point): Promise<boolean> {
     if (editor === null) return false;
-    const picked = await adapter.pickOpenPath();
-    if (!picked.ok) {
-      if (picked.reason !== "canceled") openError.value = picked.reason;
-      return false;
-    }
-    const read = await adapter.readProjectFile(picked.path);
-    if (!read.ok) {
-      openError.value = read.reason;
-      return false;
-    }
-    let raw: unknown;
-    try {
-      raw = JSON.parse(read.content);
-    } catch (error) {
-      openError.value = `项目文件不是合法的 JSON：${error instanceof Error ? error.message : "解析失败"}`;
-      return false;
-    }
-    const parsed = parseProjectFile(raw);
-    if (!parsed.ok) {
-      openError.value = parsed.errors[0]?.message ?? "项目文件校验失败。";
-      return false;
-    }
+    const source = await pickParsedProjectFile();
+    if (!source.ok) { if (source.message !== null) openError.value = source.message; return false; }
     const snapshot = editor.snapshot();
     const parent = serializeProjectFile({
       document: snapshot.document,
@@ -1366,7 +1377,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
       definitions: embeddedDefinitions,
       libraryRoots: embeddedLibraryRoots,
     });
-    const imported = importProjectSnapshot(parent, parsed.value.file, projectDisplayName(picked.path), (used) => {
+    const imported = importProjectSnapshot(parent, source.file, projectDisplayName(source.path), (used) => {
       let index = 1;
       while (used.has(`definition-${index}`)) index += 1;
       return `definition-${index}`;
@@ -1376,6 +1387,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
       return false;
     }
     const file = labelDefinitionUses(imported.file);
+    const definitionWarnings = await definitionGraphWarnings(file, imported.definitionId);
     const id = nextComponentId(snapshot.document);
     const candidate: EditorComponent = {
       id, kind: "subcircuit", displayName: definitionDisplayNames(file.definitions)[imported.definitionId]!,
@@ -1393,9 +1405,10 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
       return false;
     }
     const committed = await replaceHierarchyProjection(hierarchy, cache);
+    const warnings = [...new Set([...definitionWarnings, ...hierarchy.diagnostics.map((item) => item.message)])];
     openError.value = committed
-      ? (hierarchy.diagnostics.length > 0
-        ? `导入成功，部分连接或定义需要检查：${hierarchy.diagnostics.map((item) => item.message).join("；")}`
+      ? (warnings.length > 0
+        ? `导入成功，部分连接或定义需要检查：${warnings.join("；")}`
         : null)
       : (editor.snapshot().error?.message ?? "子电路导入失败，父工程保持原状。");
     return committed;
@@ -1465,34 +1478,22 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
       openError.value = "所选子电路定义已不存在。";
       return false;
     }
-    const picked = await adapter.pickOpenPath();
-    if (!picked.ok) {
-      if (picked.reason !== "canceled") openError.value = picked.reason;
-      return false;
-    }
-    const read = await adapter.readProjectFile(picked.path);
-    if (!read.ok) { openError.value = read.reason; return false; }
-    let raw: unknown;
-    try { raw = JSON.parse(read.content); }
-    catch (error) {
-      openError.value = `项目文件不是合法的 JSON：${error instanceof Error ? error.message : "解析失败"}`;
-      return false;
-    }
-    const parsed = parseProjectFile(raw);
-    if (!parsed.ok) { openError.value = parsed.errors[0]?.message ?? "项目文件校验失败。"; return false; }
+    const source = await pickParsedProjectFile();
+    if (!source.ok) { if (source.message !== null) openError.value = source.message; return false; }
     const snapshot = editor.snapshot();
     const parent = serializeProjectFile({
       document: snapshot.document, inputValues: state.value.inputValues,
       definitions: embeddedDefinitions, libraryRoots: embeddedLibraryRoots,
     });
     const paths = affectedOccurrencePaths(parent, definitionId);
-    const candidate = reimportProjectSnapshot(parent, parsed.value.file, definitionId, (used) => {
+    const candidate = reimportProjectSnapshot(parent, source.file, definitionId, (used) => {
       let index = 1;
       while (used.has(`definition-${index}`)) index += 1;
       return `definition-${index}`;
     });
     if (!candidate.ok) { openError.value = candidate.errors[0]?.message ?? "重新导入失败。"; return false; }
     const file = labelDefinitionUses(candidate.file);
+    const definitionWarnings = await definitionGraphWarnings(file, definitionId);
     const cache = new Map(adoptedProjectFiles ?? []);
     cache.set(projectPathIdentity(projectPath.value ?? "untitled.circuit.json"), file);
     const hierarchy = await flattenVisibleDocument(withDefinitionLabels(snapshot.document, file), cache);
@@ -1500,7 +1501,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     const previousFlat = adoptedHierarchy?.circuit.components.map((component) => component.id) ?? [];
     const nextFlat = hierarchy.circuit.components.map((component) => component.id);
     const forceReplaceFlatIds = [...new Set([...previousFlat, ...nextFlat].filter((id) => paths.some((path) => id.startsWith(`${path}/`))))];
-    const prepared = { base: serializeCurrentProjectFile()!, hierarchy, cache, forceReplaceFlatIds };
+    const prepared = { base: serializeCurrentProjectFile()!, hierarchy, cache, forceReplaceFlatIds, definitionWarnings };
     if (candidate.topLevelImpacts.length > 0) {
       pendingReimportCommit = prepared;
       pendingReimport.value = {
@@ -1522,9 +1523,10 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     }
     const committed = await replaceHierarchyProjection(prepared.hierarchy, prepared.cache, undefined, prepared.forceReplaceFlatIds);
     const action = prepared.action === "repair" ? "修复" : "重新导入";
+    const warnings = [...new Set([...(prepared.definitionWarnings ?? []), ...prepared.hierarchy.diagnostics.map((item) => item.message)])];
     openError.value = committed
-      ? (prepared.hierarchy.diagnostics.length > 0
-        ? `${action}成功，部分连接或定义需要检查：${prepared.hierarchy.diagnostics.map((item) => item.message).join("；")}`
+      ? (warnings.length > 0
+        ? `${action}成功，部分连接或定义需要检查：${warnings.join("；")}`
         : null)
       : (editor?.snapshot().error?.message ?? `${action}失败，父工程保持原状。`);
     return committed;
@@ -1688,19 +1690,12 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   async function repairMissingUseFromDialog(ownerDefinitionId: string | null, componentId: string): Promise<boolean> {
     cancelReimport();
     if (editor === null) return false;
-    const picked = await adapter.pickOpenPath();
-    if (!picked.ok) { if (picked.reason !== "canceled") openError.value = picked.reason; return false; }
-    const read = await adapter.readProjectFile(picked.path);
-    if (!read.ok) { openError.value = read.reason; return false; }
-    let raw: unknown;
-    try { raw = JSON.parse(read.content); }
-    catch (error) { openError.value = `项目文件不是合法的 JSON：${error instanceof Error ? error.message : "解析失败"}`; return false; }
-    const parsed = parseProjectFile(raw);
-    if (!parsed.ok) { openError.value = parsed.errors[0]?.message ?? "项目文件校验失败。"; return false; }
+    const source = await pickParsedProjectFile();
+    if (!source.ok) { if (source.message !== null) openError.value = source.message; return false; }
     const snapshot = editor.snapshot();
     const parent = serializeProjectFile({ document: snapshot.document, inputValues: state.value.inputValues,
       definitions: embeddedDefinitions, libraryRoots: embeddedLibraryRoots });
-    const imported = importProjectSnapshot(parent, parsed.value.file, projectDisplayName(picked.path), (used) => {
+    const imported = importProjectSnapshot(parent, source.file, projectDisplayName(source.path), (used) => {
       let index = 1;
       while (used.has(`definition-${index}`)) index += 1;
       return `definition-${index}`;

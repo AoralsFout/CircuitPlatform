@@ -100,6 +100,19 @@ function sourceFile(): string {
   }));
 }
 
+function sourceWithUnresolvedDefinition(): string {
+  const source = JSON.parse(sourceFile()) as ProjectFileData;
+  return JSON.stringify({ ...source, circuit: {
+    components: [...source.circuit.components, {
+      id: "missing-nested", kind: "subcircuit", displayName: "missing.circuit.json", position: { x: 100, y: 120 },
+      data: { definitionId: "missing", cachedPorts: [{ name: "A", direction: "input", width: 1 }] },
+    }],
+    connections: [...source.circuit.connections, {
+      id: "stale-wire", source: { component: "in", port: "out" }, target: { component: "missing-nested", port: "A" },
+    }],
+  } });
+}
+
 test("an unsaved parent imports a v2 snapshot and reopens after the source is deleted", async () => {
   const engine = new EmbeddedEngine();
   const sourcePath = "E:\\circuits\\source.circuit.json";
@@ -213,6 +226,36 @@ test("import only persists an unused root and placing it later reuses the same d
   } finally {
     await reopened?.dispose();
     await first?.dispose();
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
+});
+
+test("import only and unused-definition reimport report saved missing definitions and dangling connections", async () => {
+  const engine = new EmbeddedEngine();
+  const cleanPath = "E:\\circuits\\clean.circuit.json";
+  const brokenPath = "E:\\circuits\\broken.circuit.json";
+  engine.files.set(cleanPath, sourceFile());
+  engine.files.set(brokenPath, sourceWithUnresolvedDefinition());
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", { configurable: true, value: { circuitPlatform: engine } });
+  const binding = useWorkspace();
+  try {
+    await binding.bootstrap();
+    await binding.requestNew();
+    engine.openChoices.push({ ok: true, path: brokenPath });
+    assert.equal(await binding.importSubcircuitOnlyFromDialog(), true);
+    assert.equal(binding.editorState.value?.document.components.length, 0);
+    assert.match(binding.openError.value ?? "", /导入成功.*缺少子电路定义.*连接「stale-wire」/);
+    engine.openChoices.push({ ok: true, path: cleanPath });
+    assert.equal(await binding.importSubcircuitOnlyFromDialog(), true);
+    const cleanId = binding.libraryTree.value[1]!.definitionId;
+    engine.openChoices.push({ ok: true, path: brokenPath });
+    assert.equal(await binding.reimportEmbeddedDefinition(cleanId), true);
+    assert.equal(binding.editorState.value?.document.components.length, 0);
+    assert.match(binding.openError.value ?? "", /重新导入成功.*缺少子电路定义.*连接「stale-wire」/);
+  } finally {
+    await binding.dispose();
     if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
     else Reflect.deleteProperty(globalThis, "window");
   }

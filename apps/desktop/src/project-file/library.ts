@@ -11,7 +11,11 @@ export interface LibraryNode {
   children: readonly LibraryNode[];
 }
 
-/** 按定义插入顺序为同名定义编号，保留文件中的原始显示名称。 */
+/**
+ * 按定义插入顺序给同名定义添加显示编号，不改写持久化名称。
+ * @param definitions 父 Project 的定义表。
+ * @returns 以定义身份索引的显示名；空定义表返回空映射。
+ */
 export function definitionDisplayNames(definitions: ProjectFileData["definitions"]): Readonly<Record<string, string>> {
   const seen = new Map<string, number>();
   return Object.fromEntries(Object.entries(definitions).map(([id, definition]) => {
@@ -21,12 +25,20 @@ export function definitionDisplayNames(definitions: ProjectFileData["definitions
   }));
 }
 
-/** 只为画布标题省略文件后缀；编号仍保留，持久化名称不变。 */
+/**
+ * 为画布标题省略 `.circuit.json` 后缀，保留同名编号。
+ * @param name 已编号或原始的显示名。
+ * @returns 画布用名称；不修改持久化定义。
+ */
 export function canvasSubcircuitName(name: string): string {
   return name.replace(/\.circuit\.json(?= \(\d+\)$|$)/, "");
 }
 
-/** 让所有使用处的显示名称跟随定义名称及同名编号。 */
+/**
+ * 让顶层及内嵌使用处采用定义的当前显示名与同名编号。
+ * @param file 已解析的父 Project。
+ * @returns 带更新显示名的新文件；缺失定义的使用处保留原名，输入不被修改。
+ */
 export function labelDefinitionUses(file: ProjectFileData): ProjectFileData {
   const labels = definitionDisplayNames(file.definitions);
   const labelCircuit = (circuit: ProjectFileCircuit): ProjectFileCircuit => ({
@@ -44,7 +56,11 @@ export function labelDefinitionUses(file: ProjectFileData): ProjectFileData {
   };
 }
 
-/** 从直接导入的根开始构建定义树；使用数统计顶层及定义内的静态引用。 */
+/**
+ * 从直接导入的根构建导航树，并统计顶层及定义内的静态使用数。
+ * @param file 已解析的父 Project。
+ * @returns 按根顺序排列的节点；缺失或循环引用显示状态但不继续递归。
+ */
 export function buildLibraryTree(file: ProjectFileData): readonly LibraryNode[] {
   const labels = definitionDisplayNames(file.definitions);
   const uses = new Map<string, number>();
