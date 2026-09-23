@@ -2,6 +2,7 @@
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import BottomPanel from "./components/BottomPanel.vue";
 import CircuitCanvas from "./components/CircuitCanvas.vue";
+import DeleteDefinitionDialog from "./components/DeleteDefinitionDialog.vue";
 import EmbeddedDefinitionView from "./components/EmbeddedDefinitionView.vue";
 import ClearCanvasDialog from "./components/ClearCanvasDialog.vue";
 import EditorToolbar from "./components/EditorToolbar.vue";
@@ -86,6 +87,11 @@ const {
   exportImportedSubcircuit,
   exportFeedback,
   libraryTree,
+  getEmbeddedDefinition,
+  requestDeleteImportedSubcircuit,
+  confirmDeleteImportedSubcircuit,
+  cancelDeleteImportedSubcircuit,
+  pendingDefinitionDeletion,
   reloadSubcircuit,
   dispose: disposeDocumentWorkspace,
 } = documentWorkspace;
@@ -157,6 +163,10 @@ const ZOOM_STEP = 10;
 
 const isBottomPanelExpanded = ref(true);
 
+function canOpenEmbeddedDefinition(definitionId: string): boolean {
+  return getEmbeddedDefinition(definitionId) !== null;
+}
+
 // Internal instance reads are visibility-driven. The document binding keeps the
 // latest selection/projection revision and cancels publication of stale results.
 watch(
@@ -209,6 +219,7 @@ function onEditorKeydown(event: KeyboardEvent): void {
   if (shortcut === "cancel") {
     // Esc 只取消当前最上层状态：文件操作确认 → 清空确认框 → 恢复提示 → 草稿 → 拖动预览 → 选择。
     if (pendingFileAction.value) cancelPendingFileAction();
+    else if (pendingDefinitionDeletion.value) cancelDeleteImportedSubcircuit();
     else if (pendingSaveConflict.value) cancelSaveConflict();
     else if (editorState.value?.confirmation) void cancelCurrentOperation();
     else if (editorState.value?.operation === "recovery-required") return;
@@ -219,7 +230,7 @@ function onEditorKeydown(event: KeyboardEvent): void {
     else if (editorState.value?.selection) void cancelCurrentOperation();
     return;
   }
-  if (editorState.value?.confirmation || pendingFileAction.value) return;
+  if (editorState.value?.confirmation || pendingFileAction.value || pendingDefinitionDeletion.value) return;
   switch (shortcut) {
     case "undo": void undo(); break;
     case "redo": void redo(); break;
@@ -309,10 +320,11 @@ onBeforeUnmount(() => {
         @reimport-embedded-definition="reimportEmbeddedDefinition"
         @open-embedded-definition="openEmbeddedDefinition"
         @export-imported-subcircuit="exportImportedSubcircuit"
+        @delete-imported-subcircuit="requestDeleteImportedSubcircuit"
         @default-wire-color-change="setDefaultWireColor"
       />
 
-      <EmbeddedDefinitionView v-if="activeDefinition" :definition="activeDefinition" @open-definition="openEmbeddedDefinition" />
+      <EmbeddedDefinitionView v-if="activeDefinition" :definition="activeDefinition" :can-open-definition="canOpenEmbeddedDefinition" @open-definition="openEmbeddedDefinition" />
       <section v-else-if="activeRailPage !== 'settings'" class="editor-main" :class="{ 'editor-main--bottom-panel-collapsed': !isBottomPanelExpanded }" aria-label="电路编辑器">
         <p v-if="editorState?.operation === 'recovery-required'" class="bottom-error" role="alert">编辑器与仿真引擎的结构状态可能不一致。请关闭并重新打开应用后再继续编辑。</p>
         <p v-else-if="saveError" class="bottom-error" role="alert" :title="saveError">{{ saveError }}</p>
@@ -439,6 +451,13 @@ onBeforeUnmount(() => {
       :connection-count="editorState.confirmation.connectionCount"
       @confirm="confirmClear"
       @cancel="cancelCurrentOperation"
+    />
+
+    <DeleteDefinitionDialog
+      v-if="pendingDefinitionDeletion"
+      :pending="pendingDefinitionDeletion"
+      @confirm="confirmDeleteImportedSubcircuit"
+      @cancel="cancelDeleteImportedSubcircuit"
     />
 
     <UnsavedChangesDialog

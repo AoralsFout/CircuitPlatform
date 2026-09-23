@@ -47,6 +47,7 @@ const emit = defineEmits<{
   reimportEmbeddedDefinition: [definitionId: string];
   openEmbeddedDefinition: [definitionId: string];
   exportImportedSubcircuit: [definitionId: string];
+  deleteImportedSubcircuit: [definitionId: string];
   defaultWireColorChange: [color: WireColorId];
 }>();
 
@@ -248,6 +249,7 @@ function startComponentDrag(event: DragEvent, kind: EditorComponentKind): void {
           <button type="button" :disabled="selectedDefinition.status !== 'ready'" :aria-label="`重新导入 ${selectedDefinition.displayName}`" @click="emit('reimportEmbeddedDefinition', selectedDefinition.definitionId)">重新导入</button>
           <button type="button" :disabled="selectedDefinition.status !== 'ready'" :aria-label="`改名 ${selectedDefinition.displayName}`" @click="renameDraft = selectedDefinition.editableName">改名</button>
           <button type="button" :aria-label="`导出 ${selectedDefinition.displayName}`" @click="emit('exportImportedSubcircuit', selectedDefinition.definitionId)">导出为 Project</button>
+          <button type="button" :disabled="selectedDefinition.status !== 'ready'" :aria-label="`删除定义 ${selectedDefinition.displayName}`" @click="emit('deleteImportedSubcircuit', selectedDefinition.definitionId)">删除定义</button>
         </div>
         <form v-if="renameDraft !== null" class="subcircuit-rename" @submit.prevent="submitRename">
           <label for="subcircuit-rename-input">子电路名称</label>

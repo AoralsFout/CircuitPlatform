@@ -19,6 +19,8 @@ class EmbeddedEngine {
   readonly saveChoices: Array<{ ok: true; path: string } | { ok: false; reason: string }> = [];
   nextComponentId = 1;
   nextConnectionId = 1;
+  readonly activeComponents = new Map<number, ComponentKindName>();
+  readonly activeConnections = new Set<number>();
   failNextAdd = false;
   failNextWrite = false;
   diskFiles = false;
@@ -29,15 +31,21 @@ class EmbeddedEngine {
       this.failNextAdd = false;
       return { type: "error", requestId: "fake", code: "FAKE_ERROR", message: "创建元件失败" };
     }
-    return { type: "component_added", requestId: "fake", componentId: this.nextComponentId++, ports: portsForAddComponent(kind, ports) };
+    const componentId = this.nextComponentId++;
+    this.activeComponents.set(componentId, kind);
+    return { type: "component_added", requestId: "fake", componentId, ports: portsForAddComponent(kind, ports) };
   }
   async removeComponent(componentId: number): Promise<EngineResponse> {
+    this.activeComponents.delete(componentId);
     return { type: "component_removed", requestId: "fake", componentId };
   }
   async addConnection(): Promise<EngineResponse> {
-    return { type: "connection_added", requestId: "fake", connectionId: this.nextConnectionId++ };
+    const connectionId = this.nextConnectionId++;
+    this.activeConnections.add(connectionId);
+    return { type: "connection_added", requestId: "fake", connectionId };
   }
   async removeConnection(connectionId: number): Promise<EngineResponse> {
+    this.activeConnections.delete(connectionId);
     return { type: "connection_removed", requestId: "fake", connectionId };
   }
   async setPortWidth(componentId: number, ports: readonly PortSpec[]): Promise<EngineResponse> {
@@ -548,5 +556,118 @@ test("export writes a standalone direct or nested v2 project through the file ad
     if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
     else Reflect.deleteProperty(globalThis, "window");
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("deleting a used definition requires confirmation, preserves wiring, and survives save and reopen", async () => {
+  const engine = new EmbeddedEngine();
+  const parentPath = "D:\\archive\\with-definition.circuit.json";
+  const child = JSON.parse(sourceFile()) as ProjectFileData;
+  const publishedPorts: PortSpec[] = [
+    { name: "A", direction: "input", width: 1 },
+    { name: "Y", direction: "output", width: 1 },
+  ];
+  const parent: ProjectFileData = {
+    version: 2,
+    circuit: {
+      components: [
+        { id: "input", kind: "input", displayName: "IN", position: { x: 0, y: 0 }, ports: [{ name: "out", direction: "output", width: 1 }] },
+        { id: "instance", kind: "subcircuit", displayName: "child.circuit.json", position: { x: 150, y: 0 }, data: { definitionId: "child", cachedPorts: publishedPorts } },
+        { id: "output", kind: "output", displayName: "OUT", position: { x: 300, y: 0 }, ports: [{ name: "in", direction: "input", width: 1 }] },
+        { id: "healthy", kind: "not", displayName: "HEALTHY", position: { x: 100, y: 170 } },
+        { id: "healthy-in", kind: "input", displayName: "HEALTHY-IN", position: { x: 0, y: 170 }, ports: [{ name: "out", direction: "output", width: 1 }] },
+        { id: "healthy-out", kind: "output", displayName: "HEALTHY-OUT", position: { x: 220, y: 170 }, ports: [{ name: "in", direction: "input", width: 1 }] },
+      ],
+      connections: [
+        { id: "to-child", source: { component: "input", port: "out" }, target: { component: "instance", port: "A" } },
+        { id: "from-child", source: { component: "instance", port: "Y" }, target: { component: "output", port: "in" } },
+        { id: "healthy-in-wire", source: { component: "healthy-in", port: "out" }, target: { component: "healthy", port: "in" } },
+        { id: "healthy-out-wire", source: { component: "healthy", port: "out" }, target: { component: "healthy-out", port: "in" } },
+      ],
+    },
+    definitions: { child: { displayName: "child.circuit.json", circuit: child.circuit } },
+    libraryRoots: ["child"],
+  };
+  engine.files.set(parentPath, JSON.stringify(parent));
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", { configurable: true, value: { circuitPlatform: engine } });
+  const workspace = useDocumentWorkspace();
+  let reopened: ReturnType<typeof useWorkspace> | null = null;
+  try {
+    await workspace.requestOpenRecent(parentPath);
+    const parentKey = workspace.activeDocumentKey.value;
+    assert.equal(await workspace.openEmbeddedDefinition("child"), true);
+    const definitionKey = workspace.activeDocumentKey.value;
+    await workspace.activateTab(parentKey);
+    assert.equal(await workspace.requestDeleteImportedSubcircuit("child"), true);
+    assert.equal(workspace.pendingDefinitionDeletion.value?.uses.length, 1);
+    assert.match(workspace.pendingDefinitionDeletion.value?.uses[0]?.location ?? "", /顶层电路.*instance/);
+    assert.equal(workspace.getEmbeddedDefinition("child")?.circuit.components.length, 3);
+    workspace.cancelDeleteImportedSubcircuit();
+    assert.equal(workspace.pendingDefinitionDeletion.value, null);
+    assert.equal(await workspace.requestDeleteImportedSubcircuit("child"), true);
+    assert.equal(await workspace.confirmDeleteImportedSubcircuit(), true);
+    assert.equal(workspace.getEmbeddedDefinition("child"), null);
+    assert.equal(await workspace.exportImportedSubcircuit("child"), false);
+    assert.match(workspace.exportFeedback.value?.message ?? "", /已不存在/);
+    assert.equal(workspace.editorState.value?.document.components.find((item: { id: string }) => item.id === "instance")?.data?.subcircuit?.status, "unresolved");
+    assert.equal(workspace.editorState.value?.document.connections.length, 4);
+    assert.equal([...engine.activeComponents.values()].filter((kind) => kind === "not").length, 1);
+    assert.equal(engine.activeConnections.size, 2);
+    await workspace.activateTab(definitionKey);
+    assert.equal(workspace.activeDefinition.value?.missing, true);
+    await workspace.activateTab(parentKey);
+    await workspace.undo();
+    assert.equal(workspace.getEmbeddedDefinition("child")?.circuit.components.length, 3);
+    const exportPath = "D:\\archive\\restored-child.circuit.json";
+    engine.saveChoices.push({ ok: true, path: exportPath });
+    assert.equal(await workspace.exportImportedSubcircuit("child"), true);
+    assert.equal(JSON.parse(engine.files.get(exportPath)!).circuit.components.length, 3);
+    await workspace.activateTab(definitionKey);
+    assert.equal(workspace.activeDefinition.value?.missing, false);
+    await workspace.activateTab(parentKey);
+    await workspace.redo();
+    assert.equal(workspace.getEmbeddedDefinition("child"), null);
+    assert.equal(await workspace.save(), true);
+    const saved = JSON.parse(engine.files.get(parentPath)!);
+    assert.deepEqual(saved.definitions, {});
+    assert.equal(saved.circuit.components[1].data.definitionId, "child");
+    assert.deepEqual(saved.circuit.components[1].data.cachedPorts, publishedPorts);
+    assert.equal(saved.circuit.connections.length, 4);
+    reopened = useWorkspace();
+    await reopened.bootstrap();
+    assert.equal(await reopened.openProjectFromPath(parentPath), true);
+    assert.equal(reopened.editorState.value?.document.components[1]?.data?.subcircuit?.status, "unresolved");
+    assert.equal(reopened.editorState.value?.document.connections.length, 4);
+  } finally {
+    await reopened?.dispose();
+    workspace.dispose();
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
+});
+
+test("deleting an unused imported definition commits immediately and is one undo frame", async () => {
+  const engine = new EmbeddedEngine();
+  const sourcePath = "E:\\circuits\\source.circuit.json";
+  engine.files.set(sourcePath, sourceFile());
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", { configurable: true, value: { circuitPlatform: engine } });
+  const binding = useWorkspace();
+  try {
+    await binding.bootstrap();
+    await binding.requestNew();
+    engine.openChoices.push({ ok: true, path: sourcePath });
+    assert.equal(await binding.importSubcircuitOnlyFromDialog(), true);
+    const id = binding.libraryTree.value[0]!.definitionId;
+    assert.equal(await binding.requestDeleteImportedSubcircuit(id), true);
+    assert.equal(binding.pendingDefinitionDeletion.value, null);
+    assert.equal(binding.libraryTree.value.length, 0);
+    await binding.undo();
+    assert.equal(binding.libraryTree.value[0]?.definitionId, id);
+  } finally {
+    await binding.dispose();
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else Reflect.deleteProperty(globalThis, "window");
   }
 });

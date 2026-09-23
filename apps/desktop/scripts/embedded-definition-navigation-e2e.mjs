@@ -39,6 +39,18 @@ async function waitFor(window, selector) {
   })`);
 }
 
+async function waitForAbsent(window, selector) {
+  await inPage(window, `new Promise((resolve, reject) => {
+    const started = Date.now();
+    const poll = () => {
+      if (!document.querySelector(${JSON.stringify(selector)})) return resolve();
+      if (Date.now() - started > 15000) return reject(new Error('页面元素未消失：${selector}'));
+      setTimeout(poll, 25);
+    };
+    poll();
+  })`);
+}
+
 async function main() {
   if (!existsSync(enginePath)) throw new Error(`缺少真实 C++ 引擎：${enginePath}`);
   const directory = await mkdtemp(join(tmpdir(), "circuitplatform-definition-nav-"));
@@ -57,6 +69,7 @@ async function main() {
           { id: "in", kind: "input", displayName: "A", position: { x: 0, y: 0 }, ports: [{ name: "out", direction: "output", width: 1 }] },
           { id: "gate", kind: "not", displayName: "NOT", position: { x: 120, y: 0 } },
           { id: "out", kind: "output", displayName: "Y", position: { x: 240, y: 0 }, ports: [{ name: "in", direction: "input", width: 1 }] },
+          { id: "missing-nested", kind: "subcircuit", displayName: "missing.circuit.json", position: { x: 120, y: 130 }, data: { definitionId: "missing", cachedPorts: [] } },
         ],
         connections: [
           { id: "w1", source: { component: "in", port: "out" }, target: { component: "gate", port: "in" } },
@@ -67,14 +80,16 @@ async function main() {
     libraryRoots: ["child"],
   };
   writeFileSync(parentPath, `${JSON.stringify(parent)}\n`, "utf8");
-  const vite = await createServer({ root: desktopRoot, server: { host: "127.0.0.1", port: 49155, strictPort: true, hmr: false } });
+  const vite = await createServer({ root: desktopRoot, server: { host: "127.0.0.1", port: 0, hmr: false } });
   let window;
   const originalDialog = dialog.showOpenDialog;
   try {
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [parentPath] });
     await vite.listen();
+    const address = vite.httpServer?.address();
+    if (!address || typeof address === "string") throw new Error("无法获取 Vite 测试服务端口");
     process.env.CIRCUIT_ENGINE_PATH = enginePath;
-    process.env.CIRCUIT_PLATFORM_E2E_URL = "http://127.0.0.1:49155/index.html";
+    process.env.CIRCUIT_PLATFORM_E2E_URL = `http://127.0.0.1:${address.port}/index.html`;
     await import("../electron/main.cjs");
     await app.whenReady();
     window = await waitForWindow();
@@ -92,8 +107,10 @@ async function main() {
       wires: document.querySelectorAll('.embedded-definition-view__canvas polyline').length,
       editableToolbar: Boolean(document.querySelector('.editor-toolbar')),
       tabCount: document.querySelectorAll('[role=tab]').length,
+      missingNested: document.querySelector('.embedded-definition-view__item button:disabled')?.getAttribute('aria-label'),
+      definitionKey: document.querySelector('[role=tab][aria-selected=true]')?.dataset.documentKey,
     })`);
-    if (treeView.title !== "child.circuit.json" || treeView.nodes !== 3 || treeView.wires !== 2 || treeView.editableToolbar || treeView.tabCount !== 2) {
+    if (treeView.title !== "child.circuit.json" || treeView.nodes !== 4 || treeView.wires !== 2 || treeView.editableToolbar || treeView.tabCount !== 2 || !treeView.missingNested?.includes("定义已删除")) {
       throw new Error(`树导航或只读内容错误：${JSON.stringify(treeView)}`);
     }
     await inPage(window, `Array.from(document.querySelectorAll('button')).find(button => button.textContent === '返回父电路')?.click()`);
@@ -107,6 +124,24 @@ async function main() {
     await inPage(window, `(() => { const node = document.querySelector('.circuit-node[data-subcircuit-status=resolved]'); node.focus(); node.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); })()`);
     await waitFor(window, ".embedded-definition-view__canvas");
     if (await inPage(window, `document.querySelectorAll('[role=tab]').length`) !== 2) throw new Error("画布回车未复用定义标签");
+    await inPage(window, `Array.from(document.querySelectorAll('button')).find(button => button.textContent === '返回父电路')?.click()`);
+    await waitFor(window, ".circuit-node[data-subcircuit-status=resolved]");
+    await inPage(window, `document.querySelector('button[aria-label="子电路"]')?.click()`);
+    await inPage(window, `document.querySelector('.subcircuit-tree-node')?.click()`);
+    await inPage(window, `document.querySelector('button[aria-label^="删除定义"]')?.click()`);
+    await waitFor(window, ".confirmation-dialog[role=alertdialog]");
+    const impact = await inPage(window, `document.querySelector('.definition-delete-uses')?.textContent`);
+    if (!impact?.includes("顶层电路") || !impact?.includes("instance")) throw new Error(`删除确认缺少使用位置：${impact}`);
+    await inPage(window, `document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+    await waitForAbsent(window, ".confirmation-dialog[role=alertdialog]");
+    await inPage(window, `document.querySelector('button[aria-label^="删除定义"]')?.click()`);
+    await waitFor(window, ".confirmation-dialog[role=alertdialog]");
+    await inPage(window, `Array.from(document.querySelectorAll('.confirmation-dialog button')).find(button => button.textContent === '确认删除定义')?.click()`);
+    await waitForAbsent(window, ".confirmation-dialog[role=alertdialog]");
+    await inPage(window, `document.querySelector('[data-document-key=${JSON.stringify(treeView.definitionKey)}]')?.click()`);
+    await waitFor(window, ".embedded-definition-view__missing");
+    const missingMessage = await inPage(window, `document.querySelector('.embedded-definition-view__missing')?.textContent`);
+    if (!missingMessage?.includes("定义已删除")) throw new Error(`只读标签未跟随定义删除：${missingMessage}`);
     console.log("Embedded definition navigation Electron E2E passed", JSON.stringify({ treeView, canvasView }));
   } finally {
     dialog.showOpenDialog = originalDialog;

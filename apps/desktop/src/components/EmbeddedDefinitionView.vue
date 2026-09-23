@@ -4,7 +4,7 @@ import type { EmbeddedDefinitionSnapshot } from "../composables/useWorkspace.ts"
 import type { ProjectFileComponent } from "../project-file/index.ts";
 import { canvasSubcircuitName } from "../project-file/library.ts";
 
-const props = defineProps<{ definition: EmbeddedDefinitionSnapshot & { missing: boolean } }>();
+const props = defineProps<{ definition: EmbeddedDefinitionSnapshot & { missing: boolean }; canOpenDefinition: (definitionId: string) => boolean }>();
 const emit = defineEmits<{ openDefinition: [definitionId: string] }>();
 
 const NODE_WIDTH = 120;
@@ -43,6 +43,7 @@ function nestedDefinitionId(component: ProjectFileComponent): string | null {
 
 function openNested(definitionId: string | null): void {
   if (definitionId !== null) emit("openDefinition", definitionId);
+  if (definitionId !== null && props.canOpenDefinition(definitionId)) emit("openDefinition", definitionId);
 }
 </script>
 
@@ -69,7 +70,7 @@ function openNested(definitionId: string | null): void {
         <span>{{ components.length }} 个元件 · {{ connections.length }} 条连线</span>
         <div v-for="component in components" :key="component.id" class="embedded-definition-view__item">
           <span>{{ component.displayName }} · {{ component.kind.toUpperCase() }} <small>({{ component.position.x }}, {{ component.position.y }})</small></span>
-          <button v-if="nestedDefinitionId(component)" type="button" :aria-label="`查看内嵌子电路 ${component.displayName}`" @click="openNested(nestedDefinitionId(component))">查看定义</button>
+          <button v-if="nestedDefinitionId(component)" type="button" :disabled="!canOpenDefinition(nestedDefinitionId(component)!)" :aria-label="canOpenDefinition(nestedDefinitionId(component)!) ? `查看内嵌子电路 ${component.displayName}` : `${component.displayName}，定义已删除，无法查看`" @click="openNested(nestedDefinitionId(component))">{{ canOpenDefinition(nestedDefinitionId(component)!) ? '查看定义' : '定义已删除' }}</button>
         </div>
       </div>
     </template>
