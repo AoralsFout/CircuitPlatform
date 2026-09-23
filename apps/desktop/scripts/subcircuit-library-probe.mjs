@@ -179,8 +179,10 @@ async function main() {
     const renaming = await facts(window);
     assert.equal(renaming.renameLabel, "子电路名称");
     assert.equal(renaming.inputValue, longName, "改名时应编辑原始名称，不含编号");
-    key(window, "Tab");
-    key(window, "Tab");
+    for (let index = 0; index < 5; index += 1) {
+      key(window, "Tab");
+      if (await window.webContents.executeJavaScript("document.activeElement?.id === 'subcircuit-rename-input'")) break;
+    }
     await waitFor(window, "document.activeElement?.id === 'subcircuit-rename-input'", "Tab 未进入改名输入框", 5_000);
     assert.equal(await window.webContents.executeJavaScript("document.activeElement?.id"), "subcircuit-rename-input", "Tab 应进入改名输入框");
     await window.webContents.executeJavaScript("document.querySelector('#subcircuit-rename-input').select()");
@@ -196,6 +198,10 @@ async function main() {
     assert.equal(renamed.canvasTitle, "Renamed arithmetic unit");
     assert.equal(renamed.detailName, renamedName);
     assert.deepEqual(renamed.alerts, []);
+    await window.webContents.executeJavaScript("document.querySelector('button[title^=\"撤销\"]').click()");
+    await waitFor(window, `document.querySelectorAll('.subcircuit-tree-node')[2]?.querySelector('.subcircuit-name')?.textContent?.trim() === ${JSON.stringify(`${longName} (2)`)}`, "撤销后定义树未恢复原名");
+    await window.webContents.executeJavaScript("document.querySelector('button[title^=\"重做\"]').click()");
+    await waitFor(window, `document.querySelectorAll('.subcircuit-tree-node')[2]?.querySelector('.subcircuit-name')?.textContent?.trim() === ${JSON.stringify(renamedName)}`, "重做后定义树未恢复新名");
     await window.webContents.executeJavaScript("(() => { const button = document.querySelector('.subcircuit-detail button[aria-label^=\"导出 \"]'); if (!button) throw new Error('导出按钮缺失：' + document.querySelector('.subcircuit-detail')?.outerHTML); button.focus(); })()");
     key(window, " ");
     await waitFor(window, "document.querySelector('.subcircuit-export-feedback[role=\"status\"]')?.textContent?.includes('已导出到')", "键盘导出未完成");
@@ -207,6 +213,12 @@ async function main() {
     assert.equal(readFileSync(projectPath, "utf8"), parentContent, "导出不能改动父 Project 文件");
     assert.equal(initial.canvasTitle, expectedCanvasTitle, `两个同名定义中 second 的画布标题应保留编号；文件名分别为 ${longName}、${longName}`);
     assert.match(initial.canvasLabel, /A very long arithmetic and logic unit source file \(2\)/, "画布无障碍名称也应保留编号");
+    await window.webContents.executeJavaScript("document.querySelectorAll('.subcircuit-tree-node')[0].click()");
+    await waitFor(window, `document.querySelector('.subcircuit-detail strong')?.textContent?.trim() === ${JSON.stringify(longName)}`, "未选中待删除的闲置定义");
+    await window.webContents.executeJavaScript("document.querySelector('.subcircuit-detail button[aria-label^=\"删除定义 \"]').click()");
+    await waitFor(window, "document.querySelectorAll('.subcircuit-tree-node').length === 1", "删除未使用定义后树未收缩");
+    await window.webContents.executeJavaScript("document.querySelector('button[title^=\"撤销\"]').click()");
+    await waitFor(window, `document.querySelectorAll('.subcircuit-tree-node').length === 3 && document.querySelectorAll('.subcircuit-tree-node')[2]?.querySelector('.subcircuit-name')?.textContent?.trim() === ${JSON.stringify(renamedName)}`, "撤销删除后树未恢复定义闭包");
     console.log("Subcircuit library DOM, keyboard, and export probe passed", JSON.stringify({ treeNodes: initial.rows.length, nestedDepth: initial.rows[1].depth, exportedVersion: exported.version }));
   } catch (error) {
     failure = error;

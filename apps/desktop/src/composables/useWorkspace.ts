@@ -852,13 +852,16 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
       hierarchy,
       projectFiles: new Map(projectFiles),
     });
+    // 定义表不是 Vue ref；再次发布编辑器快照，让子电路树与详情重新取定义名称。
+    editorState.value = { ...editor.snapshot() };
     refreshDirtyMarker();
     return true;
   }
 
   /** 撤销/重做投影替换后，按会话携带的 revision 恢复相同的隐藏 Project 快照。 */
   function restoreAdoptedProjectionRevision(): void {
-    const revision = editor?.projection()?.revision;
+    if (editor === null) return;
+    const revision = editor.projection()?.revision;
     if (revision === undefined) {
       // 从未保存文档撤销第一次导入会回到普通编辑器历史帧；它没有定义图修订号。
       adoptedHierarchy = null;
@@ -866,16 +869,18 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
       adoptedProjectFiles = null;
       embeddedDefinitions = {};
       embeddedLibraryRoots = [];
+      editorState.value = { ...editor.snapshot() };
       return;
     }
     const adopted = adoptedProjectionRevisions.get(revision);
     if (adopted === undefined) return;
-    adoptedHierarchy = { ...adopted.hierarchy, document: editor!.snapshot().document };
+    adoptedHierarchy = { ...adopted.hierarchy, document: editor.snapshot().document };
     adoptedCircuit = circuitFromHierarchy(adopted.hierarchy);
     adoptedProjectFiles = new Map(adopted.projectFiles);
     const rootFile = adoptedProjectFiles.get(projectPathIdentity(projectPath.value ?? "untitled.circuit.json"));
     embeddedDefinitions = rootFile?.definitions ?? {};
     embeddedLibraryRoots = rootFile?.libraryRoots ?? [];
+    editorState.value = { ...editor.snapshot() };
   }
 
   /** 层次解析结果的扁平 Circuit 适配；协议类型在这个 seam 之后保持闭合。 */
