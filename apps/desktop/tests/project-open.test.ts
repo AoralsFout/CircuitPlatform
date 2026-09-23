@@ -309,7 +309,7 @@ test("opening an embedded hierarchy reads only the parent file and flattens its 
   }
 });
 
-test("an unsaved parent imports a saved v2 child, saves the embedded snapshot, and reopens after source deletion", async () => {
+test("an unsaved parent imports a saved v2 child, saves the embedded snapshot, and reopens after source relocation", async () => {
   const engine = new OpenFlowEngine();
   const restore = stubWindow(engine, memoryStorage());
   try {
@@ -346,6 +346,7 @@ test("an unsaved parent imports a saved v2 child, saves the embedded snapshot, a
     assert.equal(JSON.stringify(saved).includes("reference"), false);
     assert.deepEqual(saved.definitions[saved.libraryRoots[0]!]!.circuit.components.map((component) => component.kind), ["input", "not", "output"]);
 
+    engine.files.set("G:\\moved\\child.circuit.json", engine.files.get(childPath)!);
     engine.files.delete(childPath);
     const readsBeforeReopen = engine.readPaths.length;
     const addsBeforeReopen = engine.calls.filter((call) => call.type === "addComponent").length;
@@ -363,7 +364,7 @@ test("an unsaved parent imports a saved v2 child, saves the embedded snapshot, a
   }
 });
 
-test("Save As and engine recovery keep using the embedded definition after the source moves", async () => {
+test("cross-drive Save As and engine recovery keep using the embedded definition", async () => {
   const engine = new OpenFlowEngine();
   const restore = stubWindow(engine, memoryStorage());
   try {
