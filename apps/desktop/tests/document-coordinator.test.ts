@@ -6,7 +6,7 @@ import type { DocumentRuntime, DocumentRuntimeSnapshot } from "../src/workspace/
 import type { WorkspaceSnapshot } from "../src/workspace/index.ts";
 import { resolveDocumentTabKey } from "../src/components/document-tabs.ts";
 
-const emptyProject = JSON.stringify({ version: 1, circuit: { components: [], connections: [] } });
+const emptyProject = JSON.stringify({ version: 2, circuit: { components: [], connections: [] }, definitions: {}, libraryRoots: [] });
 
 function fakeSnapshot(key: string, displayName = key): DocumentRuntimeSnapshot {
   return {
