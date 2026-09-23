@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { importProjectSnapshot } from "../src/project-file/definitions.ts";
+import { importProjectSnapshot, planDeleteDefinition } from "../src/project-file/definitions.ts";
 import { parseProjectFile, type ProjectFileCircuit, type ProjectFileData } from "../src/project-file/index.ts";
 
 const input = (id: string, name: string) => ({ id, kind: "input" as const, displayName: name, position: { x: 0, y: 0 }, ports: [{ name: "out", direction: "output" as const, width: 1 }] });
@@ -74,4 +74,41 @@ test("missing source definition is retained as a missing reference while a cycle
   assert.equal(parsed.ok, false);
   if (!parsed.ok) assert.ok(parsed.errors.some((item) => item.code === "definition-cycle"));
   assert.equal(Object.keys(parent.definitions).length, 0);
+});
+
+test("definition deletion lists top-level and nested uses and only prunes private descendants", () => {
+  const parent = file(circuit(sub("top-use", "A"), sub("kept-child", "C")), {
+    A: { displayName: "A", circuit: circuit(sub("nested-use", "B"), sub("shared", "C")) },
+    B: { displayName: "B", circuit: circuit(input("b-input", "b")) },
+    C: { displayName: "C", circuit: circuit(input("c-input", "c")) },
+    independent: { displayName: "Independent", circuit: circuit(sub("nested-a", "A")) },
+  }, ["A", "independent"]);
+  const plan = planDeleteDefinition(parent, "A");
+  assert.equal(plan.ok, true);
+  if (!plan.ok) return;
+  assert.deepEqual(plan.uses.map((use) => [use.ownerDefinitionId, use.componentId]), [[null, "top-use"], ["independent", "nested-a"]]);
+  assert.deepEqual(plan.removedDefinitionIds, ["A", "B"]);
+  assert.equal(Object.hasOwn(plan.file.definitions, "A"), false);
+  assert.equal(Object.hasOwn(plan.file.definitions, "B"), false);
+  assert.equal(Object.hasOwn(plan.file.definitions, "C"), true);
+  const retainedUse = plan.file.circuit.components[0]?.data;
+  assert.ok(retainedUse && "definitionId" in retainedUse);
+  assert.equal(retainedUse.definitionId, "A");
+  assert.deepEqual(plan.file.libraryRoots, ["independent"]);
+  assert.equal(parseProjectFile(plan.file).ok, true);
+  assert.deepEqual(parent.libraryRoots, ["A", "independent"]);
+});
+
+test("unused direct import deletes immediately and missing identity has a stable diagnostic", () => {
+  const parent = file(circuit(), { A: { displayName: "A", circuit: circuit(input("a", "a")) } }, ["A"]);
+  const plan = planDeleteDefinition(parent, "A");
+  assert.equal(plan.ok, true);
+  if (plan.ok) {
+    assert.deepEqual(plan.uses, []);
+    assert.deepEqual(plan.file.definitions, {});
+    assert.deepEqual(plan.file.libraryRoots, []);
+  }
+  const missing = planDeleteDefinition(parent, "absent");
+  assert.equal(missing.ok, false);
+  if (!missing.ok) assert.equal(missing.errors[0]?.code, "definition-missing");
 });

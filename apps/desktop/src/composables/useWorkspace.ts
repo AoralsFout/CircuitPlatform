@@ -47,7 +47,7 @@ import {
   type FlattenProjectResult,
   type HierarchyProjectReader,
 } from "../project-file/hierarchy.ts";
-import { importProjectSnapshot, portsForDefinition } from "../project-file/definitions.ts";
+import { importProjectSnapshot, planDeleteDefinition, portsForDefinition, type DefinitionUse, type DeleteDefinitionPlan } from "../project-file/definitions.ts";
 import { buildLibraryTree, definitionDisplayNames, labelDefinitionUses, type LibraryNode } from "../project-file/library.ts";
 import {
   forgetRecentProject,
@@ -109,6 +109,14 @@ export interface EmbeddedDefinitionSnapshot {
   definitionId: string;
   displayName: string;
   circuit: ProjectFileCircuit;
+}
+
+/** 删除仍有使用处的定义时，供界面展示的待确认影响。 */
+export interface PendingDefinitionDeletion {
+  definitionId: string;
+  displayName: string;
+  uses: readonly DefinitionUse[];
+  removedDefinitionIds: readonly string[];
 }
 
 /** 未保存文档在另存为对话框里的默认文件名；与顶栏占位名一致。 */
@@ -218,6 +226,13 @@ export interface WorkspaceBinding {
   placeImportedSubcircuit(definitionId: string, center?: Point): Promise<boolean>;
   /** 修改单个定义的名称，并同步所有使用处的非画布显示名称。 */
   renameImportedSubcircuit(definitionId: string, name: string): Promise<boolean>;
+  /** 请求删除定义；有使用处时只展示影响，需再次确认。 */
+  requestDeleteImportedSubcircuit(definitionId: string): Promise<boolean>;
+  /** 确认当前受影响的使用处并以单帧历史删除；状态已变化时要求重新请求。 */
+  confirmDeleteImportedSubcircuit(): Promise<boolean>;
+  /** 取消待确认的定义删除。 */
+  cancelDeleteImportedSubcircuit(): void;
+  pendingDefinitionDeletion: DeepReadonly<Ref<PendingDefinitionDeletion | null>>;
   /** 直接导入的定义及递归依赖；每次状态更新均从父工程快照推导。 */
   libraryTree: ComputedRef<readonly LibraryNode[]>;
   /** 按父文档内的稳定 ID 读取定义副本；缺失时返回 null，不访问源文件或引擎。 */
@@ -433,6 +448,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   /** 当前文档拥有的内嵌定义；未保存文档也从此处序列化。 */
   let embeddedDefinitions: ProjectFileData["definitions"] = {};
   let embeddedLibraryRoots: ProjectFileData["libraryRoots"] = [];
+  const pendingDefinitionDeletion = shallowRef<(PendingDefinitionDeletion & { baseToken: string }) | null>(null);
   const libraryTree = computed<readonly LibraryNode[]>(() => {
     const snapshot = editorState.value;
     if (snapshot === null) return [];
@@ -1575,6 +1591,62 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     return committed;
   }
 
+  function deletionBaseToken(): string | null {
+    const snapshot = editor?.snapshot();
+    return snapshot ? JSON.stringify({ document: snapshot.document, definitions: embeddedDefinitions, libraryRoots: embeddedLibraryRoots }) : null;
+  }
+
+  async function commitDefinitionDeletion(plan: Extract<DeleteDefinitionPlan, { ok: true }>): Promise<boolean> {
+    if (editor === null) return false;
+    const document = editor.snapshot().document;
+    const cache = new Map(adoptedProjectFiles ?? []);
+    cache.set(projectPathIdentity(projectPath.value ?? "untitled.circuit.json"), plan.file);
+    const hierarchy = await flattenVisibleDocument(document, cache, false);
+    if (hierarchy === null) return false;
+    const committed = await replaceHierarchyProjection(hierarchy, cache);
+    openError.value = committed ? null : (editor.snapshot().error?.message ?? "删除子电路定义失败，父工程保持原状。");
+    return committed;
+  }
+
+  async function requestDeleteImportedSubcircuit(definitionId: string): Promise<boolean> {
+    if (editor === null) return false;
+    const snapshot = editor.snapshot();
+    const file = serializeProjectFile({
+      document: snapshot.document, inputValues: state.value.inputValues,
+      definitions: embeddedDefinitions, libraryRoots: embeddedLibraryRoots,
+    });
+    const plan = planDeleteDefinition(file, definitionId);
+    if (!plan.ok) { openError.value = plan.errors[0]?.message ?? "删除定义失败。"; return false; }
+    if (plan.uses.length === 0) return commitDefinitionDeletion(plan);
+    pendingDefinitionDeletion.value = {
+      definitionId, displayName: definitionDisplayNames(embeddedDefinitions)[definitionId] ?? definitionId,
+      uses: plan.uses, removedDefinitionIds: plan.removedDefinitionIds,
+      baseToken: deletionBaseToken()!,
+    };
+    return true;
+  }
+
+  async function confirmDeleteImportedSubcircuit(): Promise<boolean> {
+    const pending = pendingDefinitionDeletion.value;
+    if (pending === null) return false;
+    pendingDefinitionDeletion.value = null;
+    if (deletionBaseToken() !== pending.baseToken || editor === null) {
+      openError.value = "电路内容已变化，请重新查看删除影响。";
+      return false;
+    }
+    const file = serializeProjectFile({
+      document: editor.snapshot().document, inputValues: state.value.inputValues,
+      definitions: embeddedDefinitions, libraryRoots: embeddedLibraryRoots,
+    });
+    const plan = planDeleteDefinition(file, pending.definitionId);
+    if (!plan.ok) { openError.value = plan.errors[0]?.message ?? "删除定义失败。"; return false; }
+    return commitDefinitionDeletion(plan);
+  }
+
+  function cancelDeleteImportedSubcircuit(): void {
+    pendingDefinitionDeletion.value = null;
+  }
+
   /** 显式采用磁盘上的 Subcircuit 新快照；失败结果也以完整未解析状态原子采用。 */
   async function reloadSubcircuit(componentId: EditorComponentId): Promise<boolean> {
     if (editor === null || adoptedProjectFiles === null || projectPath.value === null) return false;
@@ -2126,6 +2198,10 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     importSubcircuitOnlyFromDialog,
     placeImportedSubcircuit,
     renameImportedSubcircuit,
+    requestDeleteImportedSubcircuit,
+    confirmDeleteImportedSubcircuit,
+    cancelDeleteImportedSubcircuit,
+    pendingDefinitionDeletion: readonly(pendingDefinitionDeletion),
     libraryTree,
     getEmbeddedDefinition,
     reloadSubcircuit,
