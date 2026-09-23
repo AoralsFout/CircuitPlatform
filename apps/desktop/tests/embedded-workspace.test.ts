@@ -13,9 +13,14 @@ class EmbeddedEngine {
   readonly saveChoices: Array<{ ok: true; path: string } | { ok: false; reason: string }> = [];
   nextComponentId = 1;
   nextConnectionId = 1;
+  failNextAdd = false;
 
   async checkEngine() { return { status: "ok" as const, engine: "fake-engine" }; }
   async addComponent(kind: ComponentKindName, ports?: readonly PortSpec[]): Promise<EngineResponse> {
+    if (this.failNextAdd) {
+      this.failNextAdd = false;
+      return { type: "error", requestId: "fake", code: "FAKE_ERROR", message: "创建元件失败" };
+    }
     return { type: "component_added", requestId: "fake", componentId: this.nextComponentId++, ports: portsForAddComponent(kind, ports) };
   }
   async removeComponent(componentId: number): Promise<EngineResponse> {
@@ -84,6 +89,10 @@ test("an unsaved parent imports a v2 snapshot and reopens after the source is de
     assert.equal(await first.addSubcircuitFromDialog(), true);
     assert.equal(first.projectPath.value, null);
     assert.equal(first.editorState.value?.document.components[0]?.data?.subcircuit?.status, "resolved");
+    await first.undo();
+    assert.equal(first.editorState.value?.document.components.length, 0);
+    await first.redo();
+    assert.equal(first.editorState.value?.document.components[0]?.data?.subcircuit?.status, "resolved");
     engine.saveChoices.push({ ok: true, path: parentPath });
     assert.equal(await first.saveAs(), true);
     const saved = JSON.parse(engine.files.get(parentPath)!);
@@ -104,6 +113,33 @@ test("an unsaved parent imports a v2 snapshot and reopens after the source is de
   } finally {
     await reopened?.dispose();
     await first?.dispose();
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
+});
+
+test("a failed snapshot import leaves no definition, component, or history frame", async () => {
+  const engine = new EmbeddedEngine();
+  const sourcePath = "E:\\circuits\\source.circuit.json";
+  engine.files.set(sourcePath, sourceFile());
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", { configurable: true, value: { circuitPlatform: engine } });
+  const binding = useWorkspace();
+  try {
+    await binding.bootstrap();
+    await binding.requestNew();
+    engine.failNextAdd = true;
+    engine.openChoices.push({ ok: true, path: sourcePath });
+    assert.equal(await binding.addSubcircuitFromDialog(), false);
+    assert.equal(binding.editorState.value?.document.components.length, 0);
+    assert.equal(binding.editorState.value?.canUndo, false);
+    engine.saveChoices.push({ ok: true, path: "D:\\archive\\parent.circuit.json" });
+    assert.equal(await binding.saveAs(), true);
+    const saved = JSON.parse(engine.files.get("D:\\archive\\parent.circuit.json")!);
+    assert.deepEqual(saved.definitions, {});
+    assert.deepEqual(saved.libraryRoots, []);
+  } finally {
+    await binding.dispose();
     if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
     else Reflect.deleteProperty(globalThis, "window");
   }

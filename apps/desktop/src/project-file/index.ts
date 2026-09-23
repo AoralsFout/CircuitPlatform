@@ -1,14 +1,14 @@
 /**
- * 项目文件 v1（`.circuit.json`）的序列化与校验：编辑器文档与 v1 JSON 互相转换的纯实现。
+ * 项目文件 v2（`.circuit.json`）的序列化与校验：顶层文档和内嵌定义互相转换的纯实现。
  *
- * 这是 Phase 5 唯一新增的测试缝。校验规则只有这一份实现——渲染层负责序列化与校验，
+ * 校验规则只有这一份实现——渲染层负责序列化与校验，
  * 主进程只做对话框与文件读写，所以本模块不接 Vue、不接 Electron、不做任何 IO：
  * 调用方拿到普通对象，`JSON.stringify` / `JSON.parse` 与落盘都发生在调用方。
  *
- * v1 的既定取舍（规格 #34）：Editor ID 写入文件并作为文件内唯一身份，加载后沿用同一套
+ * Editor ID 写入文件并作为文件内唯一身份，加载后沿用同一套
  * 身份；Waypoint 以语义形式内联在连接记录上，渲染 Route 不进文件；端口清单只为数据驱动
- * 元件写入，且只是缓存——引擎回传的清单仍是权威；`data` 数据袋 v1 保存 Input 当前值或
- * Subcircuit 的引用与缓存接口；
+ * 元件写入，且只是缓存——引擎回传的清单仍是权威；`data` 数据袋保存 Input 当前值或
+ * Subcircuit 的工程内定义身份与缓存接口；
  * 视口、选中、撤销历史、波形历史与时序状态都是会话状态，不进文件。
  */
 
@@ -30,11 +30,11 @@ export {
   sameProjectPath,
 } from "./paths.ts";
 
-/** 当前实现支持的最高项目文件版本；版本规则由 `parseProjectFile` 执行。 */
+/** 当前唯一支持的项目文件版本；版本规则由 `parseProjectFile` 执行。 */
 export const PROJECT_FILE_VERSION = 2;
 
 /**
- * v1 文件里允许出现的元件类型；文件格式钉死这份清单，新元件类型属于新的文件版本。
+ * v2 文件里允许出现的元件类型；文件格式钉死这份清单，新元件类型属于新的文件版本。
  * 若 `ComponentKindName` 未来扩充，这里是必须被有意更新的一处。
  */
 const FILE_KINDS = [
@@ -63,7 +63,7 @@ const FILE_KINDS = [
  */
 const FILE_DATA_DRIVEN_KINDS: readonly ComponentKindName[] = ["input", "output", "splitter", "merger"];
 
-/** 项目文件 v1 的类型形状；只描述序列化结果，解析前的实际数据一律按 `unknown` 校验。 */
+/** 项目文件 v2 的类型形状；只描述序列化结果，解析前的实际数据一律按 `unknown` 校验。 */
 export interface ProjectFileData {
   version: 2;
   circuit: ProjectFileCircuit;
@@ -91,7 +91,7 @@ export interface ProjectFileComponent {
   position: { x: number; y: number };
   /** 端口清单缓存，只在数据驱动元件上写入；引擎回传的清单仍是权威。 */
   ports?: readonly PortSpec[];
-  /** 按类型扩展的数据袋；v1 支持 Input 当前激励值与 Subcircuit 引用缓存。 */
+  /** 按类型扩展的数据袋；保存 Input 当前值或 Subcircuit 的定义身份与接口缓存。 */
   data?: ProjectFileComponentData;
 }
 
@@ -125,7 +125,7 @@ export interface ProjectSerializationInput {
   inputValues?: Readonly<Record<string, Signal>>;
 }
 
-/** Save As 重定位引用时返回的稳定错误；失败时原文件不会产生部分改写。 */
+/** 旧调用方兼容类型；v2 内嵌定义无需引用重定位。 */
 export interface ProjectFileRebaseError {
   code: "reference-rebase-cross-root";
   message: string;
@@ -138,10 +138,7 @@ export type ProjectFileRebaseResult =
   | { ok: false; error: ProjectFileRebaseError };
 
 /**
- * 将项目文件中顶层 Subcircuit 的引用从旧父路径重定位到新父路径。
- *
- * 每条引用先按旧父路径解析为目标身份，再按新父路径计算相对写法；所有目标都能
- * 相对化后才一次性返回新文件，因此跨盘符或跨根失败时不会留下半成品修改。
+ * 兼容旧保存调用方的恒等操作。v2 项目文件没有源路径，另存为不改内容。
  * @param file 已通过 `parseProjectFile` 的规范化项目文件。
  * @param oldParentProject 原父 Project 路径。
  * @param newParentProject Save As 后的新父 Project 路径。
@@ -168,8 +165,8 @@ export interface ProjectFileError {
 
 /** 解析成功的结果：可直接交给编辑器文档结构的数据，外加 Input 的当前值。 */
 export interface ParsedProjectFile {
-  /** 文件声明的版本；只可能等于或低于 `PROJECT_FILE_VERSION`。 */
-  version: number;
+  /** 文件声明的版本，恒为 2。 */
+  version: 2;
   /**
    * 与编辑器文档同构的数据。
    *
@@ -189,10 +186,10 @@ export type ProjectFileParseResult =
   | { ok: false; errors: readonly ProjectFileError[] };
 
 /**
- * 把编辑器文档序列化为项目文件 v1 的数据。无校验、无 IO：文档里缺什么就少写什么，
+ * 把编辑器文档与内嵌定义序列化为项目文件 v2 的数据。无校验、无 IO：文档里缺什么就少写什么，
  * 端口清单与输入值的权威来源是调用方（引擎回传值与工作区状态）。
  * @param input 编辑器文档与可选的 Input 当前值。
- * @returns 可直接 `JSON.stringify` 落盘的 v1 文件数据。
+ * @returns 可直接 `JSON.stringify` 落盘的 v2 文件数据。
  */
 export function serializeProjectFile(input: ProjectSerializationInput): ProjectFileData {
   const activeComponentIds = new Set(
@@ -558,7 +555,7 @@ function cloneFilePort(port: PortSpec): PortSpec {
   };
 }
 
-/** 检查元件类型是否在 v1 文件格式允许的清单内。 */
+/** 检查元件类型是否在 v2 文件格式允许的清单内。 */
 function fileKindIs(kind: string): kind is EditorComponentKind {
   return (FILE_KINDS as readonly string[]).includes(kind);
 }

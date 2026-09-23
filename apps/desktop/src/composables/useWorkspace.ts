@@ -36,8 +36,6 @@ import { createEngineCallQueue } from "../workspace/engineQueue.ts";
 import {
   parseProjectFile,
   projectPathIdentity,
-  rebaseProjectFileReferences,
-  relativeProjectReference,
   resolveProjectReference,
   serializeProjectFile,
   type ParsedProjectFile,
@@ -948,7 +946,15 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   /** 撤销/重做投影替换后，按会话携带的 revision 恢复相同的隐藏 Project 快照。 */
   function restoreAdoptedProjectionRevision(): void {
     const revision = editor?.projection()?.revision;
-    if (revision === undefined) return;
+    if (revision === undefined) {
+      // 从未保存文档撤销第一次导入会回到普通编辑器历史帧；它没有定义图修订号。
+      adoptedHierarchy = null;
+      adoptedCircuit = null;
+      adoptedProjectFiles = null;
+      embeddedDefinitions = {};
+      embeddedLibraryRoots = [];
+      return;
+    }
     const adopted = adoptedProjectionRevisions.get(revision);
     if (adopted === undefined) return;
     adoptedHierarchy = { ...adopted.hierarchy, document: editor!.snapshot().document };
@@ -1648,7 +1654,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   }
 
   /**
-   * 将当前文档保存到指定路径；路径重定位和往返校验都在原子写入前完成。
+   * 将当前文档保存到指定路径；内嵌定义不含源路径，移动文件无需重定位。
    * @param path 目标路径。
    * @param preparedFile 可选的已序列化文件，内部另存为流程用于避免重复取快照。
    * @returns 写入成功返回 true；任何计算或 IO 失败均保留原身份和脏状态。
@@ -1656,15 +1662,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   async function saveToPath(path: string, preparedFile?: ProjectFileData): Promise<boolean> {
     if (!editor) return false;
     const current = preparedFile ?? serializeProjectFile({ document: editor.snapshot().document, inputValues: state.value.inputValues, definitions: embeddedDefinitions, libraryRoots: embeddedLibraryRoots });
-    if (projectPath.value === null || projectPathIdentity(projectPath.value) === projectPathIdentity(path)) {
-      return commitSave(path, current);
-    }
-    const rebased = rebaseProjectFileReferences(current, projectPath.value, path);
-    if (!rebased.ok) {
-      saveError.value = rebased.error.message;
-      return false;
-    }
-    return commitSave(path, rebased.value);
+    return commitSave(path, current);
   }
 
   async function save(): Promise<boolean> {

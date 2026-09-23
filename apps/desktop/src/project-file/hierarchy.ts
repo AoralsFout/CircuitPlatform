@@ -4,13 +4,13 @@ import type { EditorComponent, EditorConnection, EditorDocument, InternalCompone
 import type { ProjectFileComponent, ProjectFileData } from "./index.ts";
 import { projectPathIdentity, type PathPlatform } from "./paths.ts";
 
-/** 供层次解析模块使用的最小子 Project 读取器；实现可以接文件、内存图或测试夹具。 */
+/** 旧层次调用方保留的读取器类型；v2 展平只读取 root.definitions，不会调用它。 */
 export interface HierarchyProjectReader {
   /**
    * 读取某个使用处采用的子 Project。
    * @param identity 已按目标平台规范化的 Project 身份。
    * @param occurrencePath 从根文档到该使用处的稳定 Editor Component ID 路径；同一文件的不同路径必须可返回不同快照。
-   * @returns 已校验的 v1 项目数据，或包含稳定机器类别和中文原因的读取失败；抛出异常也会由展平器转换为失败诊断。
+   * @returns 已校验的项目数据，或包含稳定机器类别和中文原因的读取失败。
    */
   read(identity: string, occurrencePath?: readonly string[]): Promise<
     | { ok: true; value: ProjectFileData }
@@ -51,6 +51,7 @@ export interface HierarchyDiagnostic extends SubcircuitDiagnostic {
 export interface FlattenProjectInput {
   rootIdentity: string;
   root: ProjectFileData;
+  /** 兼容旧调用方；v2 不从文件读取定义。 */
   reader: HierarchyProjectReader;
   platform?: PathPlatform;
 }
@@ -139,8 +140,8 @@ function mergeOutput(target: MutableOutput, source: MutableOutput): void {
 }
 
 /**
- * 递归解析并展平一份 Project。
- * @param input 顶层 Project 身份、已校验文件数据和可注入的子 Project 读取器。
+ * 递归解析并展平一份 Project，所有子定义来自同一内存快照。
+ * @param input 顶层 Project 身份和已校验文件数据。
  * @returns 顶层 Editor 文档、只含引擎类型的扁平 Circuit、来源映射与诊断；不分配引擎 ID。
  */
 export async function flattenProjectHierarchy(input: FlattenProjectInput): Promise<FlattenProjectResult> {
