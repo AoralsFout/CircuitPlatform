@@ -51,6 +51,19 @@ pnpm --filter @circuit-platform/desktop visual:test -- --state=multi-tabs,multi-
 pnpm --filter @circuit-platform/desktop visual:probe
 ```
 
+Spec #67 的子电路库另有真实桌面窗口 DOM 探针：
+
+```sh
+pnpm --filter @circuit-platform/desktop test:subcircuit-library-probe
+```
+
+脚本打开临时 v2 Project，使用真实 Electron 输入事件以 Space 打开「子电路」侧栏，
+再以 Tab 进入定义树并选中同名定义。它核对长名称的完整 title、嵌套层级、
+使用次数、同名编号、详情和画布标题；随后通过键盘打开改名表单并提交名称，
+验证树与画布同步更新。画布标题省略 `.circuit.json`，树和详情保留完整名称。
+需要已构建的 C++ 引擎；在独立 worktree 运行时可用 `CIRCUIT_ENGINE_PATH`
+指向主工作区的 `engine/build/circuit-engine.exe`。
+
 `visual:test` 成功只证明页面和夹具能产出截图，不能证明像素哈希稳定；以上状态的 tab
 数量、ARIA 标签、dirty/stale/unresolved/unavailable 文案或类名、禁用下钻、来源选中/
 居中以及内部行和值，必须由 `visual:probe` 逐条断言。截图矩阵已抽查多标签、未命名标签、

@@ -11,6 +11,7 @@
     "test:temporal-e2e": "node --test --experimental-strip-types tests/temporal-e2e.test.ts",
     "test:multidocument-e2e": "electron scripts/multidocument-e2e.mjs",
     "test:embedded-snapshot-e2e": "electron scripts/embedded-snapshot-e2e.mjs",
+    "test:subcircuit-library-probe": "electron scripts/subcircuit-library-probe.mjs",
     "test:canvas-selection": "electron scripts/canvas-selection-regression.mjs",
     "performance:benchmark": "node scripts/performance-benchmark.mjs",
     "visual:test": "electron scripts/visual-regression.mjs",
