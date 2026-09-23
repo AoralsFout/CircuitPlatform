@@ -1,5 +1,5 @@
 import type { PortSpec } from "@circuit-platform/protocol";
-import { parseProjectFile, type ProjectFileCircuit, type ProjectFileData, type ProjectFileError } from "./index.ts";
+import { parseProjectFile, type ProjectFileCircuit, type ProjectFileComponent, type ProjectFileData, type ProjectFileError } from "./index.ts";
 
 /** 导入后的完整候选文件；调用方在写入工作区前可据此完成引擎事务。 */
 export type ImportProjectSnapshotResult =
@@ -20,6 +20,64 @@ export interface ReimportPortImpact {
 export type ReimportProjectSnapshotResult =
   | { ok: true; file: ProjectFileData; definitionId: string; ports: readonly PortSpec[]; topLevelImpacts: readonly ReimportPortImpact[] }
   | { ok: false; errors: readonly ProjectFileError[] };
+
+/** 单个缺失使用处修复的完整候选；顶层断线需由调用方确认。 */
+export type RepairMissingUseResult =
+  | { ok: true; file: ProjectFileData; topLevelImpacts: readonly ReimportPortImpact[] }
+  | { ok: false; errors: readonly ProjectFileError[] };
+
+/** 找出父工程中仍指向缺失定义的具体使用处。 */
+export function missingDefinitionUses(file: ProjectFileData): readonly (DefinitionUse & { missingDefinitionId: string })[] {
+  const uses: Array<DefinitionUse & { missingDefinitionId: string }> = [];
+  const scan = (circuit: ProjectFileCircuit, ownerDefinitionId: string | null, ownerName: string): void => {
+    for (const component of circuit.components) {
+      if (component.kind !== "subcircuit" || !component.data || !("definitionId" in component.data)) continue;
+      if (Object.hasOwn(file.definitions, component.data.definitionId)) continue;
+      uses.push({ ownerDefinitionId, componentId: component.id, missingDefinitionId: component.data.definitionId,
+        location: `${ownerName} / ${component.displayName}（${component.id}）` });
+    }
+  };
+  scan(file.circuit, null, "顶层电路");
+  for (const [id, definition] of Object.entries(file.definitions)) scan(definition.circuit, id, definition.displayName);
+  return uses;
+}
+
+/** 仅替换一个缺失使用处的定义关联；先完成 Port 影响和环校验，再返回可提交快照。 */
+export function repairMissingDefinitionUse(
+  file: ProjectFileData,
+  ownerDefinitionId: string | null,
+  componentId: string,
+  targetDefinitionId: string,
+): RepairMissingUseResult {
+  const owner = ownerDefinitionId === null ? null : Object.hasOwn(file.definitions, ownerDefinitionId) ? file.definitions[ownerDefinitionId] : undefined;
+  const target = Object.hasOwn(file.definitions, targetDefinitionId) ? file.definitions[targetDefinitionId] : undefined;
+  const circuit = ownerDefinitionId === null ? file.circuit : owner?.circuit;
+  const component = circuit?.components.find((item) => item.id === componentId);
+  if (!circuit || component?.kind !== "subcircuit" || !component.data || !("definitionId" in component.data) ||
+      Object.hasOwn(file.definitions, component.data.definitionId)) {
+    return { ok: false, errors: [{ code: "missing-use-not-found", message: "所选缺失定义使用处已变化，请重新选择。" }] };
+  }
+  if (!target) return { ok: false, errors: [{ code: "definition-missing", message: `目标定义「${targetDefinitionId}」已不存在。` }] };
+  const ports = portsForDefinition(target.circuit);
+  const impacts = portImpactsForUse(circuit, ownerDefinitionId, component, component.data.cachedPorts, ports);
+  const cachedPorts = replacementCachedPorts(circuit, component.id, component.data.cachedPorts, ports);
+  const { portOrder: previousOrder, ...baseData } = component.data;
+  const order = compatiblePortOrder(previousOrder, cachedPorts, ports);
+  const updated: ProjectFileComponent = { ...component, data: { ...baseData, definitionId: targetDefinitionId,
+    cachedPorts, ...(order ? { portOrder: order } : {}) } };
+  const revisedCircuit = { ...circuit, components: circuit.components.map((item) => item.id === componentId ? updated : item) };
+  const candidate: ProjectFileData = ownerDefinitionId === null
+    ? { ...file, circuit: revisedCircuit }
+    : { ...file, definitions: { ...file.definitions, [ownerDefinitionId]: { ...owner!, circuit: revisedCircuit } } };
+  const parsed = parseProjectFile(candidate);
+  if (!parsed.ok) return { ok: false, errors: parsed.errors };
+  if (ownerDefinitionId !== null && impacts.length > 0) {
+    const first = impacts[0]!;
+    return { ok: false, errors: [{ code: "readonly-ancestor-dangling",
+      message: `修复会使只读定义「${owner?.displayName ?? ownerDefinitionId}」的连接「${first.connectionId}」在 Port「${first.portName}」处悬空；请重新导入该上层定义。` }] };
+  }
+  return { ok: true, file: parsed.value.file, topLevelImpacts: impacts };
+}
 
 /** 导出的独立 v2 Project，或所选定义缺失与候选文件校验的诊断。 */
 export type ExportDefinitionProjectResult =
@@ -257,18 +315,11 @@ export function reimportProjectSnapshot(
     components: circuit.components.map((component) => {
       if (component.kind !== "subcircuit" || !component.data || !("definitionId" in component.data) || component.data.definitionId !== definitionId) return component;
       const cachedPorts = component.data.cachedPorts;
-      const connectedPortNames = new Set(circuit.connections.flatMap((connection) => [
-        ...(connection.source.component === component.id ? [connection.source.port] : []),
-        ...(connection.target.component === component.id ? [connection.target.port] : []),
-      ]));
-      return { ...component, data: { ...component.data, cachedPorts: [
-        ...cachedPorts.flatMap((port) => {
-          const replacement = newPorts.find((candidate) => candidate.name === port.name);
-          if (!connectedPortNames.has(port.name)) return replacement ? [{ ...replacement }] : [];
-          return [replacement?.direction === port.direction && replacement.width === port.width ? { ...replacement } : { ...port }];
-        }),
-        ...newPorts.filter((port) => !cachedPorts.some((old) => old.name === port.name)).map((port) => ({ ...port })),
-      ] } };
+      const updatedPorts = replacementCachedPorts(circuit, component.id, cachedPorts, newPorts);
+      const { portOrder: previousOrder, ...baseData } = component.data;
+      const order = compatiblePortOrder(previousOrder, updatedPorts, newPorts);
+      return { ...component, data: { ...baseData, cachedPorts: updatedPorts,
+        ...(order ? { portOrder: order } : {}) } };
     }),
   });
   for (const [id, definition] of Object.entries(definitions)) {
@@ -325,29 +376,68 @@ function reimportPortImpacts(
 ): readonly ReimportPortImpact[] {
   const impacts: ReimportPortImpact[] = [];
   const inspect = (circuit: ProjectFileCircuit, ownerDefinitionId: string | null): void => {
-    const uses = new Map(circuit.components.flatMap((component) =>
-      component.kind === "subcircuit" && component.data && "definitionId" in component.data && component.data.definitionId === definitionId
-        ? [[component.id, component.data.cachedPorts] as const] : []));
-    for (const connection of circuit.connections) {
-      for (const [componentId, portName, direction] of [
-        [connection.source.component, connection.source.port, "output"],
-        [connection.target.component, connection.target.port, "input"],
-      ] as const) {
-        const cachedPorts = uses.get(componentId);
-        if (cachedPorts === undefined) continue;
-        const oldPort = oldPorts.find((port) => port.name === portName && port.direction === direction);
-        if (!oldPort) continue;
-        // 曾经的更新已使这个端点悬空时，它不是本次更新新增的影响。
-        if (!cachedPorts.some((port) => port.name === oldPort.name && port.direction === oldPort.direction && port.width === oldPort.width)) continue;
-        const newPort = newPorts.find((port) => port.name === portName) ?? null;
-        if (newPort?.direction === oldPort.direction && newPort.width === oldPort.width) continue;
-        impacts.push({ ownerDefinitionId, componentId, connectionId: connection.id, portName, oldPort, newPort });
-      }
+    for (const component of circuit.components) {
+      if (component.kind !== "subcircuit" || !component.data || !("definitionId" in component.data) || component.data.definitionId !== definitionId) continue;
+      impacts.push(...portImpactsForUse(circuit, ownerDefinitionId, component, oldPorts, newPorts));
     }
   };
   inspect(parent.circuit, null);
   for (const [id, definition] of Object.entries(parent.definitions)) inspect(definition.circuit, id);
   return impacts;
+}
+
+/** 单个使用处的端点变化；缓存规格用于排除本次操作前已悬空的连接。 */
+function portImpactsForUse(
+  circuit: ProjectFileCircuit,
+  ownerDefinitionId: string | null,
+  component: ProjectFileComponent,
+  oldPorts: readonly PortSpec[],
+  newPorts: readonly PortSpec[],
+): readonly ReimportPortImpact[] {
+  if (component.kind !== "subcircuit" || !component.data || !("cachedPorts" in component.data)) return [];
+  const impacts: ReimportPortImpact[] = [];
+  for (const connection of circuit.connections) {
+    for (const [endpoint, direction] of [[connection.source, "output"], [connection.target, "input"]] as const) {
+      if (endpoint.component !== component.id) continue;
+      const oldPort = oldPorts.find((port) => port.name === endpoint.port && port.direction === direction);
+      if (!oldPort || !component.data.cachedPorts.some((port) => port.name === oldPort.name && port.direction === oldPort.direction && port.width === oldPort.width)) continue;
+      const newPort = newPorts.find((port) => port.name === endpoint.port) ?? null;
+      if (newPort?.direction === oldPort.direction && newPort.width === oldPort.width) continue;
+      impacts.push({ ownerDefinitionId, componentId: component.id, connectionId: connection.id,
+        portName: endpoint.port, oldPort, newPort });
+    }
+  }
+  return impacts;
+}
+
+/** 已连接且失配的旧签名留作悬空端点依据；无连线 Port 与兼容 Port 更新到新签名。 */
+function replacementCachedPorts(
+  circuit: ProjectFileCircuit,
+  componentId: string,
+  cachedPorts: readonly PortSpec[],
+  newPorts: readonly PortSpec[],
+): PortSpec[] {
+  const connectedPortNames = new Set(circuit.connections.flatMap((connection) => [
+    ...(connection.source.component === componentId ? [connection.source.port] : []),
+    ...(connection.target.component === componentId ? [connection.target.port] : []),
+  ]));
+  return [
+    ...cachedPorts.flatMap((port) => {
+      const replacement = newPorts.find((candidate) => candidate.name === port.name);
+      if (!connectedPortNames.has(port.name)) return replacement ? [{ ...replacement }] : [];
+      return [replacement?.direction === port.direction && replacement.width === port.width ? { ...replacement } : { ...port }];
+    }),
+    ...newPorts.filter((port) => !cachedPorts.some((old) => old.name === port.name)).map((port) => ({ ...port })),
+  ];
+}
+
+/** 只有缓存等于真实接口时保留显式顺序；悬空旧端口与新接口并存时交给默认顺序。 */
+export function compatiblePortOrder(previous: readonly string[] | undefined, cached: readonly PortSpec[], actual: readonly PortSpec[]): string[] | undefined {
+  if (!previous || cached.length !== actual.length || cached.some((port) => !actual.some((item) =>
+    item.name === port.name && item.direction === port.direction && item.width === port.width))) return undefined;
+  const names = new Set(actual.map((port) => port.name));
+  const retained = previous.filter((name) => names.has(name));
+  return [...retained, ...actual.map((port) => port.name).filter((name) => !retained.includes(name))];
 }
 
 /**

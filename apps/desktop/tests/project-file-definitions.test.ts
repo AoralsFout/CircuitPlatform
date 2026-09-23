@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { affectedOccurrencePaths, exportDefinitionProject, importProjectSnapshot, planDeleteDefinition, reimportProjectSnapshot } from "../src/project-file/definitions.ts";
+import { affectedOccurrencePaths, exportDefinitionProject, importProjectSnapshot, missingDefinitionUses, planDeleteDefinition, reimportProjectSnapshot, repairMissingDefinitionUse } from "../src/project-file/definitions.ts";
 import { parseProjectFile, type ProjectFileCircuit, type ProjectFileData } from "../src/project-file/index.ts";
 
 const input = (id: string, name: string) => ({ id, kind: "input" as const, displayName: name, position: { x: 0, y: 0 }, ports: [{ name: "out", direction: "output" as const, width: 1 }] });
@@ -163,6 +163,51 @@ test("nested reimport rejects a new dangling connection in its readonly ancestor
     assert.match(result.errors[0]?.message ?? "", /Readonly A.*internal-wire.*x/);
   }
   assert.equal(JSON.stringify(parent), before);
+});
+
+test("a missing use can rebind to an existing definition while preserving its component and wire", () => {
+  const parent = file({ components: [input("driver", "driver"), sub("instance", "deleted")],
+    connections: [{ id: "wire", source: { component: "driver", port: "out" }, target: { component: "instance", port: "x" } }] },
+  { compatible: { displayName: "Compatible", circuit: circuit(input("boundary", "x")) },
+    incompatible: { displayName: "Incompatible", circuit: circuit(input("boundary", "renamed")) } }, ["compatible", "incompatible"]);
+  const use = parent.circuit.components[1]?.data;
+  if (use && "definitionId" in use) use.portOrder = ["x"];
+  const originalUse = JSON.stringify(parent.circuit.components[1]?.data);
+  assert.deepEqual(missingDefinitionUses(parent).map((use) => [use.ownerDefinitionId, use.componentId, use.missingDefinitionId]), [[null, "instance", "deleted"]]);
+  const compatible = repairMissingDefinitionUse(parent, null, "instance", "compatible");
+  assert.equal(compatible.ok, true);
+  if (compatible.ok) {
+    assert.equal(compatible.topLevelImpacts.length, 0);
+    assert.equal(compatible.file.circuit.components[1]?.id, "instance");
+    assert.equal(compatible.file.circuit.connections[0]?.id, "wire");
+    const data = compatible.file.circuit.components[1]?.data;
+    assert.ok(data && "definitionId" in data);
+    assert.equal(data.definitionId, "compatible");
+  }
+  const incompatible = repairMissingDefinitionUse(parent, null, "instance", "incompatible");
+  assert.equal(incompatible.ok, true);
+  if (incompatible.ok) {
+    assert.deepEqual(incompatible.topLevelImpacts.map((impact) => impact.connectionId), ["wire"]);
+    const cached = incompatible.file.circuit.components[1]?.data;
+    assert.ok(cached && "cachedPorts" in cached);
+    assert.equal(cached.cachedPorts[0]?.name, "x");
+    assert.equal(cached.portOrder, undefined, "旧悬空端口与新接口并存时不能保留失效显式顺序");
+  }
+  assert.equal(JSON.stringify(parent.circuit.components[1]?.data), originalUse);
+});
+
+test("readonly nested missing use refuses a new internal dangling wire and a repair cycle", () => {
+  const parent = file(circuit(sub("outer", "A")), {
+    A: { displayName: "A", circuit: { components: [input("driver", "driver"), sub("inner", "missing")],
+      connections: [{ id: "internal", source: { component: "driver", port: "out" }, target: { component: "inner", port: "x" } }] } },
+    B: { displayName: "B", circuit: circuit(input("new", "renamed")) },
+  }, ["A", "B"]);
+  const incompatible = repairMissingDefinitionUse(parent, "A", "inner", "B");
+  assert.equal(incompatible.ok, false);
+  if (!incompatible.ok) assert.match(incompatible.errors[0]?.message ?? "", /A.*internal.*x/);
+  const cycle = repairMissingDefinitionUse(parent, "A", "inner", "A");
+  assert.equal(cycle.ok, false);
+  if (!cycle.ok) assert.ok(cycle.errors.some((error) => error.code === "definition-cycle"));
 });
 
 test("reimporting a nested definition leaves its readonly ancestor identity intact", () => {

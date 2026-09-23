@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import type { LibraryNode } from "../project-file/library.ts";
-import type { SubcircuitExportFeedback } from "../composables/useWorkspace.ts";
+import type { RepairDefinitionTarget, SubcircuitExportFeedback } from "../composables/useWorkspace.ts";
+import type { DefinitionUse } from "../project-file/definitions.ts";
 import type { InputControl, RailPage } from "../composables/useEditorState";
 import type { ComponentDefinition } from "../canvas";
 import type { ComponentKindName } from "@circuit-platform/protocol";
@@ -32,6 +33,8 @@ const props = defineProps<{
   componentDefinitions: readonly ComponentDefinition[];
   defaultWireColor: WireColorId;
   libraryTree: readonly LibraryNode[];
+  missingUses: readonly (DefinitionUse & { missingDefinitionId: string })[];
+  repairTargets: readonly RepairDefinitionTarget[];
   exportFeedback: SubcircuitExportFeedback | null;
 }>();
 
@@ -48,11 +51,18 @@ const emit = defineEmits<{
   openEmbeddedDefinition: [definitionId: string];
   exportImportedSubcircuit: [definitionId: string];
   deleteImportedSubcircuit: [definitionId: string];
+  repairMissingUseWithDefinition: [ownerDefinitionId: string | null, componentId: string, targetDefinitionId: string];
+  repairMissingUseFromDialog: [ownerDefinitionId: string | null, componentId: string];
   defaultWireColorChange: [color: WireColorId];
 }>();
 
 const selectedDefinitionId = ref<string | null>(null);
 const renameDraft = ref<string | null>(null);
+const repairSelection = ref<Record<string, string>>({});
+const repairKey = (use: DefinitionUse): string => `${use.ownerDefinitionId ?? "root"}:${use.componentId}`;
+function selectedRepairTarget(use: DefinitionUse): string | null {
+  return repairSelection.value[repairKey(use)] ?? props.repairTargets[0]?.definitionId ?? null;
+}
 const flatLibrary = computed(() => {
   const rows: Array<{ key: string; node: LibraryNode; depth: number }> = [];
   const visit = (node: LibraryNode, depth: number, key: string): void => {
@@ -231,8 +241,8 @@ function startComponentDrag(event: DragEvent, kind: EditorComponentKind): void {
     <template v-else-if="activeRailPage === 'subcircuits'">
       <div class="sidebar-section-title"><span>已导入定义</span><span class="component-count">{{ libraryTree.length }}</span></div>
       <div class="subcircuit-actions"><button type="button" @click="emit('importSubcircuitOnly')">仅导入子电路</button></div>
-      <p v-if="libraryTree.length === 0" class="sidebar-hint">还没有导入的子电路。选择“仅导入子电路”后，可从这里再次放置。</p>
-      <ul v-else class="subcircuit-tree" aria-label="子电路定义树">
+      <p v-if="libraryTree.length === 0 && missingUses.length === 0" class="sidebar-hint">还没有导入的子电路。选择“仅导入子电路”后，可从这里再次放置。</p>
+      <ul v-if="libraryTree.length" class="subcircuit-tree" aria-label="子电路定义树">
         <li v-for="row in flatLibrary" :key="row.key" :style="{ '--tree-depth': row.depth }">
           <button type="button" class="subcircuit-tree-node" :class="{ 'subcircuit-tree-node--selected': row.node.definitionId === selectedDefinitionId }" :aria-pressed="row.node.definitionId === selectedDefinitionId" :aria-label="`选择子电路 ${row.node.displayName}，使用 ${row.node.usageCount} 次，${row.node.status === 'ready' ? '可用' : '定义缺失'}，回车查看`" :title="row.node.displayName" @click="selectDefinition(row.node)" @dblclick="emit('openEmbeddedDefinition', row.node.definitionId)" @keydown.enter.prevent="emit('openEmbeddedDefinition', row.node.definitionId)">
             <span class="subcircuit-branch" aria-hidden="true">{{ row.depth ? '└' : '◇' }}</span><span class="subcircuit-name">{{ row.node.displayName }}</span><span class="subcircuit-use-count" :title="`使用 ${row.node.usageCount} 次`">{{ row.node.usageCount }}</span>
@@ -258,6 +268,20 @@ function startComponentDrag(event: DragEvent, kind: EditorComponentKind): void {
         </form>
       </div>
       <p v-if="exportFeedback && exportFeedback.definitionId === selectedDefinitionId" class="subcircuit-export-feedback" :class="{ 'subcircuit-export-feedback--error': exportFeedback.kind === 'error' }" :role="exportFeedback.kind === 'error' ? 'alert' : 'status'">{{ exportFeedback.message }}</p>
+      <section v-if="missingUses.length" class="subcircuit-repair-list" aria-label="修复缺失定义使用处">
+        <h2>待修复的使用处</h2>
+        <div v-for="use in missingUses" :key="repairKey(use)" class="subcircuit-repair-item">
+          <strong>{{ use.location }}</strong><small>定义“{{ use.missingDefinitionId }}”已缺失</small>
+          <label :for="`repair-${repairKey(use)}`">关联已有定义</label>
+          <select :id="`repair-${repairKey(use)}`" :value="selectedRepairTarget(use) ?? ''" @change="repairSelection = { ...repairSelection, [repairKey(use)]: ($event.target as HTMLSelectElement).value }">
+            <option v-for="target in repairTargets" :key="target.definitionId" :value="target.definitionId">{{ target.displayName }}</option>
+          </select>
+          <div class="subcircuit-actions">
+            <button type="button" :disabled="selectedRepairTarget(use) === null" @click="emit('repairMissingUseWithDefinition', use.ownerDefinitionId, use.componentId, selectedRepairTarget(use)!)">确认关联</button>
+            <button type="button" @click="emit('repairMissingUseFromDialog', use.ownerDefinitionId, use.componentId)">从文件导入并修复</button>
+          </div>
+        </div>
+      </section>
     </template>
 
     <template v-else>

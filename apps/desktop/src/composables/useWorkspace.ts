@@ -45,7 +45,7 @@ import {
   flattenProjectHierarchy,
   type FlattenProjectResult,
 } from "../project-file/hierarchy.ts";
-import { affectedOccurrencePaths, exportDefinitionProject, importProjectSnapshot, planDeleteDefinition, portsForDefinition, reimportProjectSnapshot, type DefinitionUse, type DeleteDefinitionPlan, type ReimportPortImpact } from "../project-file/definitions.ts";
+import { affectedOccurrencePaths, compatiblePortOrder, exportDefinitionProject, importProjectSnapshot, missingDefinitionUses, planDeleteDefinition, portsForDefinition, reimportProjectSnapshot, repairMissingDefinitionUse, type DefinitionUse, type DeleteDefinitionPlan, type ReimportPortImpact } from "../project-file/definitions.ts";
 import { buildLibraryTree, definitionDisplayNames, labelDefinitionUses, type LibraryNode } from "../project-file/library.ts";
 import {
   forgetRecentProject,
@@ -127,7 +127,11 @@ export interface PendingReimportPreview {
   definitionId: string;
   displayName: string;
   impacts: readonly ReimportPortImpact[];
+  action?: "repair";
 }
+
+/** 可选的已保存定义；缺失使用处可关联其中任意一项。 */
+export interface RepairDefinitionTarget { definitionId: string; displayName: string }
 
 export interface WorkspaceBinding {
   /** 释放此文档的恢复调度、编辑器订阅和按文档引擎进程。 */
@@ -214,6 +218,13 @@ export interface WorkspaceBinding {
   confirmReimport(): Promise<boolean>;
   /** 放弃当前预告，不修改父工程。 */
   cancelReimport(): void;
+  /** 父工程中每个缺失定义的具体使用处，包含只读嵌套电路。 */
+  missingUses: ComputedRef<readonly (DefinitionUse & { missingDefinitionId: string })[]>;
+  repairTargets: ComputedRef<readonly RepairDefinitionTarget[]>;
+  /** 将指定缺失使用处关联到父工程已有定义。 */
+  repairMissingUseWithDefinition(ownerDefinitionId: string | null, componentId: string, targetDefinitionId: string): Promise<boolean>;
+  /** 从 v2 文件导入新定义并修复指定缺失使用处。 */
+  repairMissingUseFromDialog(ownerDefinitionId: string | null, componentId: string): Promise<boolean>;
   /** 直接导入的定义及递归依赖；每次状态更新均从父工程快照推导。 */
   libraryTree: ComputedRef<readonly LibraryNode[]>;
   /** 按父文档内的稳定 ID 读取定义副本；缺失时返回 null，不访问源文件或引擎。 */
@@ -430,6 +441,14 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
       libraryRoots: embeddedLibraryRoots,
     }));
   });
+  const missingUses = computed(() => editorState.value === null ? [] : missingDefinitionUses(serializeProjectFile({
+    document: editorState.value.document, inputValues: state.value.inputValues,
+    definitions: embeddedDefinitions, libraryRoots: embeddedLibraryRoots,
+  })));
+  const repairTargets = computed<readonly RepairDefinitionTarget[]>(() => {
+    const labels = definitionDisplayNames(embeddedDefinitions);
+    return Object.keys(embeddedDefinitions).map((definitionId) => ({ definitionId, displayName: labels[definitionId] ?? definitionId }));
+  });
   function getEmbeddedDefinition(definitionId: string): EmbeddedDefinitionSnapshot | null {
     const definition = embeddedDefinitions[definitionId];
     return definition === undefined ? null : {
@@ -516,6 +535,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     hierarchy: FlattenProjectResult;
     cache: Map<string, ProjectFileData>;
     forceReplaceFlatIds: readonly string[];
+    action?: "repair";
   } | null = null;
   // 待确认「打开」的来源路径：来自最近项目入口时非空（确认后不再弹文件对话框，
   // 直接打开该路径）；来自对话框打开时为 null。与 pendingFileAction 同生共死。
@@ -1293,13 +1313,24 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     return hierarchy !== null && replaceHierarchyProjection(hierarchy, cache);
   }
 
-  /** 根据定义身份同步文档中每个使用处的完整名称，包括同名编号。 */
+  /** 从候选文件同步顶层使用处的定义、缓存接口和完整名称；未写入文件的新放置元件保持原样。 */
   function withDefinitionLabels(document: EditorDocument, file: ProjectFileData): EditorDocument {
     const labels = definitionDisplayNames(file.definitions);
+    const saved = new Map(file.circuit.components.map((component) => [component.id, component]));
     return { ...document, components: document.components.map((component) => {
-      const id = component.data?.subcircuit?.definitionId;
+      const entry = saved.get(component.id);
+      const data = entry?.kind === "subcircuit" && entry.data && "definitionId" in entry.data ? entry.data : null;
+      const subcircuit = component.data?.subcircuit;
+      const synced = data && subcircuit ? (() => {
+        const updated = { ...subcircuit, definitionId: data.definitionId, cachedPorts: data.cachedPorts };
+        delete updated.portOrder;
+        if (data.portOrder) updated.portOrder = [...data.portOrder];
+        return updated;
+      })() : subcircuit;
+      const id = synced?.definitionId;
       const label = id === undefined ? undefined : labels[id];
-      return label === undefined ? component : { ...component, displayName: label };
+      return { ...component, ...(label === undefined ? {} : { displayName: label }),
+        ...(synced === undefined ? {} : { data: { ...component.data, subcircuit: synced } }) };
     }) };
   }
 
@@ -1490,11 +1521,12 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
       return false;
     }
     const committed = await replaceHierarchyProjection(prepared.hierarchy, prepared.cache, undefined, prepared.forceReplaceFlatIds);
+    const action = prepared.action === "repair" ? "修复" : "重新导入";
     openError.value = committed
       ? (prepared.hierarchy.diagnostics.length > 0
-        ? `重新导入成功，部分连接或定义需要检查：${prepared.hierarchy.diagnostics.map((item) => item.message).join("；")}`
+        ? `${action}成功，部分连接或定义需要检查：${prepared.hierarchy.diagnostics.map((item) => item.message).join("；")}`
         : null)
-      : (editor?.snapshot().error?.message ?? "重新导入失败，父工程保持原状。");
+      : (editor?.snapshot().error?.message ?? `${action}失败，父工程保持原状。`);
     return committed;
   }
 
@@ -1607,6 +1639,77 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     return prepared === null ? false : commitReimport(prepared);
   }
 
+  /** 使用纯候选计算的结果重建层次投影，保留顶层旧连接的布局与稳定身份。 */
+  async function commitMissingUseCandidate(
+    parent: ProjectFileData,
+    ownerDefinitionId: string | null,
+    componentId: string,
+    targetDefinitionId: string,
+    candidate: ReturnType<typeof repairMissingDefinitionUse>,
+  ): Promise<boolean> {
+    if (!candidate.ok || editor === null) {
+      openError.value = candidate.ok ? "当前没有可修复的工程。" : candidate.errors[0]?.message ?? "修复失败。";
+      return false;
+    }
+    const snapshot = editor.snapshot();
+    const file = labelDefinitionUses(candidate.file);
+    const cache = new Map(adoptedProjectFiles ?? []);
+    cache.set(projectPathIdentity(projectPath.value ?? "untitled.circuit.json"), file);
+    const hierarchy = await flattenVisibleDocument(withDefinitionLabels(snapshot.document, file), cache);
+    if (hierarchy === null) { openError.value = "无法展开修复后的定义。"; return false; }
+    const paths = ownerDefinitionId === null ? [componentId] : affectedOccurrencePaths(parent, ownerDefinitionId).map((path) => `${path}/${componentId}`);
+    const previousFlat = adoptedHierarchy?.circuit.components.map((item) => item.id) ?? [];
+    const nextFlat = hierarchy.circuit.components.map((item) => item.id);
+    const forceReplaceFlatIds = [...new Set([...previousFlat, ...nextFlat].filter((id) => paths.some((path) => id.startsWith(`${path}/`))))];
+    const prepared = { base: serializeCurrentProjectFile()!, hierarchy, cache, forceReplaceFlatIds, action: "repair" as const };
+    if (candidate.topLevelImpacts.length > 0) {
+      pendingReimportCommit = prepared;
+      pendingReimport.value = { definitionId: targetDefinitionId,
+        displayName: file.definitions[targetDefinitionId]?.displayName ?? targetDefinitionId,
+        impacts: candidate.topLevelImpacts, action: "repair" };
+      openError.value = null;
+      return false;
+    }
+    return commitReimport(prepared);
+  }
+
+  /** 关联父工程已有定义；只在完整候选通过校验与引擎事务后采用。 */
+  async function repairMissingUseWithDefinition(ownerDefinitionId: string | null, componentId: string, targetDefinitionId: string): Promise<boolean> {
+    cancelReimport();
+    if (editor === null) return false;
+    const snapshot = editor.snapshot();
+    const parent = serializeProjectFile({ document: snapshot.document, inputValues: state.value.inputValues,
+      definitions: embeddedDefinitions, libraryRoots: embeddedLibraryRoots });
+    return commitMissingUseCandidate(parent, ownerDefinitionId, componentId, targetDefinitionId,
+      repairMissingDefinitionUse(parent, ownerDefinitionId, componentId, targetDefinitionId));
+  }
+
+  /** 从文件导入新闭包并关联一个缺失使用处；读取与解析失败不改变父工程。 */
+  async function repairMissingUseFromDialog(ownerDefinitionId: string | null, componentId: string): Promise<boolean> {
+    cancelReimport();
+    if (editor === null) return false;
+    const picked = await adapter.pickOpenPath();
+    if (!picked.ok) { if (picked.reason !== "canceled") openError.value = picked.reason; return false; }
+    const read = await adapter.readProjectFile(picked.path);
+    if (!read.ok) { openError.value = read.reason; return false; }
+    let raw: unknown;
+    try { raw = JSON.parse(read.content); }
+    catch (error) { openError.value = `项目文件不是合法的 JSON：${error instanceof Error ? error.message : "解析失败"}`; return false; }
+    const parsed = parseProjectFile(raw);
+    if (!parsed.ok) { openError.value = parsed.errors[0]?.message ?? "项目文件校验失败。"; return false; }
+    const snapshot = editor.snapshot();
+    const parent = serializeProjectFile({ document: snapshot.document, inputValues: state.value.inputValues,
+      definitions: embeddedDefinitions, libraryRoots: embeddedLibraryRoots });
+    const imported = importProjectSnapshot(parent, parsed.value.file, projectDisplayName(picked.path), (used) => {
+      let index = 1;
+      while (used.has(`definition-${index}`)) index += 1;
+      return `definition-${index}`;
+    });
+    if (!imported.ok) { openError.value = imported.errors[0]?.message ?? "不能导入这个 Project。"; return false; }
+    return commitMissingUseCandidate(parent, ownerDefinitionId, componentId, imported.definitionId,
+      repairMissingDefinitionUse(imported.file, ownerDefinitionId, componentId, imported.definitionId));
+  }
+
   /** 提交元件库产生的待放置意图；成功才返回 true，供最近使用偏好记录使用。 */
   async function placeComponent(center: Point, altKey = false): Promise<boolean> {
     const result = await runEditorCommand({ type: "place-component", center, altKey });
@@ -1652,9 +1755,10 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
       component.kind === "subcircuit" &&
       (component.id === connection.source.componentId || component.id === connection.target.componentId));
     if (snapshot && connection && touchesSubcircuit) {
+      const connections = snapshot.document.connections.filter((candidate) => candidate.id !== connectionId);
       await replaceVisibleHierarchyDocument({
-        components: snapshot.document.components,
-        connections: snapshot.document.connections.filter((candidate) => candidate.id !== connectionId),
+        components: refreshUnusedSubcircuitPorts(snapshot.document.components, connections),
+        connections,
       });
       return;
     }
@@ -1965,7 +2069,10 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
       const connections = connectionId === undefined
         ? [...snapshot.document.connections, nextConnection]
         : snapshot.document.connections.map((connection) => connection.id === connectionId ? nextConnection : connection);
-      const succeeded = await replaceVisibleHierarchyDocument({ components: snapshot.document.components, connections });
+      const previousOtherConnections = snapshot.document.connections.filter((connection) => connection.id !== connectionId);
+      const succeeded = await replaceVisibleHierarchyDocument({
+        components: refreshUnusedSubcircuitPorts(snapshot.document.components, previousOtherConnections), connections,
+      });
       return succeeded
         ? { ok: true }
         : { ok: false, error: editor?.snapshot().error?.message ?? "层次 Connection 提交失败。" };
@@ -1976,6 +2083,33 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     const result = await runEditorCommand(command);
     if (result === null) return { ok: false, error: "编辑器尚未准备好。" };
     return result.ok ? { ok: true } : { ok: false, error: result.error.message };
+  }
+
+  /** 连线编辑同帧更新不再由旧线占用的 Port 缓存；仍连着的旧端点保留原签名。 */
+  function refreshUnusedSubcircuitPorts(
+    components: readonly EditorComponent[],
+    remainingConnections: EditorDocument["connections"],
+  ): readonly EditorComponent[] {
+    return components.map((component) => {
+      const data = component.data?.subcircuit;
+      if (component.kind !== "subcircuit" || data?.status !== "resolved" || component.ports === undefined) return component;
+      const attached = new Set(remainingConnections.flatMap((connection) => [
+        ...(connection.source.componentId === component.id ? [connection.source.port] : []),
+        ...(connection.target.componentId === component.id ? [connection.target.port] : []),
+      ]));
+      const cachedPorts = [
+        ...data.cachedPorts.flatMap((port) => {
+          if (attached.has(port.name)) return [{ ...port }];
+          const actual = component.ports!.find((candidate) => candidate.name === port.name);
+          return actual ? [{ ...actual }] : [];
+        }),
+        ...component.ports.filter((port) => !data.cachedPorts.some((cached) => cached.name === port.name)).map((port) => ({ ...port })),
+      ];
+      const { portOrder: previousOrder, ...baseData } = data;
+      const order = compatiblePortOrder(previousOrder, cachedPorts, component.ports);
+      return { ...component, data: { ...component.data, subcircuit: { ...baseData, cachedPorts,
+        ...(order ? { portOrder: order } : {}) } } };
+    });
   }
 
   function nextConnectionId(document: EditorDocument): string {
@@ -2055,6 +2189,10 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     pendingReimport: readonly(pendingReimport),
     confirmReimport,
     cancelReimport,
+    missingUses,
+    repairTargets,
+    repairMissingUseWithDefinition,
+    repairMissingUseFromDialog,
     libraryTree,
     getEmbeddedDefinition,
     projectPath: readonly(projectPath),

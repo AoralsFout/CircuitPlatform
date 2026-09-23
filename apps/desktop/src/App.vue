@@ -90,6 +90,10 @@ const {
   pendingReimport,
   confirmReimport,
   cancelReimport,
+  missingUses,
+  repairTargets,
+  repairMissingUseWithDefinition,
+  repairMissingUseFromDialog,
   libraryTree,
   getEmbeddedDefinition,
   requestDeleteImportedSubcircuit,
@@ -312,6 +316,8 @@ onBeforeUnmount(() => {
         :component-definitions="componentDefinitions"
         :default-wire-color="defaultWireColor"
         :library-tree="libraryTree"
+        :missing-uses="missingUses"
+        :repair-targets="repairTargets"
         :export-feedback="exportFeedback"
         @close="showSidebar = false"
         @select-component="selectComponent"
@@ -325,6 +331,8 @@ onBeforeUnmount(() => {
         @open-embedded-definition="openEmbeddedDefinition"
         @export-imported-subcircuit="exportImportedSubcircuit"
         @delete-imported-subcircuit="requestDeleteImportedSubcircuit"
+        @repair-missing-use-with-definition="repairMissingUseWithDefinition"
+        @repair-missing-use-from-dialog="repairMissingUseFromDialog"
         @default-wire-color-change="setDefaultWireColor"
       />
 

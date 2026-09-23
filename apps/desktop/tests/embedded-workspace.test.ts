@@ -810,3 +810,187 @@ test("nested Port change is rejected before preview and leaves the readonly ance
     else Reflect.deleteProperty(globalThis, "window");
   }
 });
+
+test("a missing top-level use relinks to an existing compatible definition in one frame and reopens", async () => {
+  const engine = new EmbeddedEngine();
+  const path = "D:\\archive\\missing-use.circuit.json";
+  const child = JSON.parse(sourceFile()) as ProjectFileData;
+  const ports: PortSpec[] = [{ name: "A", direction: "input", width: 1 }, { name: "Y", direction: "output", width: 1 }];
+  const parent: ProjectFileData = {
+    version: 2,
+    circuit: { components: [
+      { id: "driver", kind: "input", displayName: "driver", position: { x: 0, y: 0 }, ports: [{ name: "out", direction: "output", width: 1 }] },
+      { id: "instance", kind: "subcircuit", displayName: "missing", position: { x: 120, y: 0 }, data: { definitionId: "missing", cachedPorts: ports } },
+    ], connections: [{ id: "wire", source: { component: "driver", port: "out" }, target: { component: "instance", port: "A" } }] },
+    definitions: { available: { displayName: "Available", circuit: child.circuit } }, libraryRoots: ["available"],
+  };
+  engine.files.set(path, JSON.stringify(parent));
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", { configurable: true, value: { circuitPlatform: engine } });
+  const binding = useWorkspace();
+  let reopened: ReturnType<typeof useWorkspace> | null = null;
+  try {
+    await binding.bootstrap();
+    assert.equal(await binding.openProjectFromPath(path), true);
+    assert.deepEqual(binding.missingUses.value.map((use) => use.componentId), ["instance"]);
+    assert.equal(engine.activeConnections.size, 0);
+    const before = JSON.stringify(binding.editorState.value?.document);
+    assert.equal(await binding.repairMissingUseWithDefinition(null, "instance", "available"), true, binding.openError.value ?? "");
+    assert.equal(binding.pendingReimport.value, null);
+    assert.equal(binding.missingUses.value.length, 0);
+    assert.equal(binding.editorState.value?.document.components.find((item) => item.id === "instance")?.data?.subcircuit?.definitionId, "available");
+    assert.equal(binding.editorState.value?.document.connections[0]?.id, "wire");
+    assert.equal(binding.editorState.value?.document.connections[0]?.danglingEndpoints.length, 0);
+    assert.equal(engine.activeConnections.size, 1);
+    await binding.undo();
+    assert.equal(JSON.stringify(binding.editorState.value?.document), before);
+    assert.equal(binding.missingUses.value.length, 1);
+    await binding.redo();
+    assert.equal(binding.missingUses.value.length, 0);
+    assert.equal(await binding.save(), true);
+    reopened = useWorkspace();
+    await reopened.bootstrap();
+    assert.equal(await reopened.openProjectFromPath(path), true);
+    assert.equal(reopened.editorState.value?.document.connections[0]?.danglingEndpoints.length, 0);
+    assert.equal(reopened.missingUses.value.length, 0);
+  } finally {
+    await reopened?.dispose();
+    await binding.dispose();
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
+});
+
+test("file repair previews a dangling top-level wire; cancellation and failures keep the missing use", async () => {
+  const engine = new EmbeddedEngine();
+  const parentPath = "D:\\archive\\repair-parent.circuit.json";
+  const sourcePath = "G:\\sources\\renamed.circuit.json";
+  const oldPorts: PortSpec[] = [{ name: "A", direction: "input", width: 1 }, { name: "Y", direction: "output", width: 1 }];
+  const parent: ProjectFileData = { version: 2, circuit: { components: [
+    { id: "driver", kind: "input", displayName: "driver", position: { x: 0, y: 0 }, ports: [{ name: "out", direction: "output", width: 1 }] },
+    { id: "instance", kind: "subcircuit", displayName: "deleted", position: { x: 100, y: 0 }, data: { definitionId: "deleted", cachedPorts: oldPorts, portOrder: ["A", "Y"] } },
+  ], connections: [{ id: "wire", source: { component: "driver", port: "out" }, target: { component: "instance", port: "A" } }] },
+  definitions: {}, libraryRoots: [] };
+  const source = JSON.parse(sourceFile()) as ProjectFileData;
+  source.circuit.components[0]!.displayName = "Renamed";
+  parent.definitions = { incompatible: { displayName: "Incompatible", circuit: source.circuit } };
+  parent.libraryRoots = ["incompatible"];
+  engine.files.set(parentPath, JSON.stringify(parent));
+  engine.files.set(sourcePath, JSON.stringify(source));
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", { configurable: true, value: { circuitPlatform: engine } });
+  const binding = useWorkspace();
+  let reopened: ReturnType<typeof useWorkspace> | null = null;
+  try {
+    await binding.bootstrap();
+    assert.equal(await binding.openProjectFromPath(parentPath), true);
+    const before = JSON.stringify(binding.editorState.value?.document);
+    assert.equal(await binding.repairMissingUseWithDefinition(null, "instance", "incompatible"), false);
+    assert.deepEqual(binding.pendingReimport.value?.impacts.map((impact) => impact.connectionId), ["wire"]);
+    binding.cancelReimport();
+    assert.equal(await binding.repairMissingUseFromDialog(null, "instance"), false, "文件选择取消");
+    engine.openChoices.push({ ok: true, path: "G:\\missing.circuit.json" });
+    assert.equal(await binding.repairMissingUseFromDialog(null, "instance"), false, "读取失败");
+    engine.files.set("G:\\bad.circuit.json", "{");
+    engine.openChoices.push({ ok: true, path: "G:\\bad.circuit.json" });
+    assert.equal(await binding.repairMissingUseFromDialog(null, "instance"), false, "解析失败");
+    const cyclic: ProjectFileData = { version: 2, circuit: { components: [{ id: "loop", kind: "subcircuit", displayName: "loop", position: { x: 0, y: 0 }, data: { definitionId: "loop", cachedPorts: [] } }], connections: [] },
+      definitions: { loop: { displayName: "loop", circuit: { components: [{ id: "again", kind: "subcircuit", displayName: "again", position: { x: 0, y: 0 }, data: { definitionId: "loop", cachedPorts: [] } }], connections: [] } } }, libraryRoots: ["loop"] };
+    engine.files.set("G:\\cycle.circuit.json", JSON.stringify(cyclic));
+    engine.openChoices.push({ ok: true, path: "G:\\cycle.circuit.json" });
+    assert.equal(await binding.repairMissingUseFromDialog(null, "instance"), false, "循环定义拒绝");
+    assert.equal(JSON.stringify(binding.editorState.value?.document), before);
+    engine.openChoices.push({ ok: true, path: sourcePath });
+    assert.equal(await binding.repairMissingUseFromDialog(null, "instance"), false);
+    assert.equal(binding.pendingReimport.value?.action, "repair");
+    assert.deepEqual(binding.pendingReimport.value?.impacts.map((impact) => impact.connectionId), ["wire"]);
+    assert.equal(JSON.stringify(binding.editorState.value?.document), before);
+    binding.cancelReimport();
+    assert.equal(JSON.stringify(binding.editorState.value?.document), before);
+    engine.openChoices.push({ ok: true, path: sourcePath });
+    assert.equal(await binding.repairMissingUseFromDialog(null, "instance"), false);
+    engine.failNextAdd = true;
+    assert.equal(await binding.confirmReimport(), false, "引擎失败回滚");
+    assert.equal(JSON.stringify(binding.editorState.value?.document), before);
+    engine.openChoices.push({ ok: true, path: sourcePath });
+    assert.equal(await binding.repairMissingUseFromDialog(null, "instance"), false);
+    assert.equal(await binding.confirmReimport(), true, binding.openError.value ?? "");
+    assert.equal(binding.missingUses.value.length, 0);
+    assert.equal(binding.editorState.value?.document.connections[0]?.id, "wire");
+    assert.ok(binding.editorState.value?.document.connections[0]?.danglingEndpoints.includes("target"));
+    await binding.undo();
+    assert.equal(JSON.stringify(binding.editorState.value?.document), before);
+    await binding.redo();
+    assert.equal(await binding.save(), true);
+    reopened = useWorkspace();
+    await reopened.bootstrap();
+    assert.equal(await reopened.openProjectFromPath(parentPath), true);
+    assert.ok(reopened.editorState.value?.document.connections[0]?.danglingEndpoints.includes("target"));
+    await reopened.deleteConnection("wire");
+    const repairedCache = reopened.editorState.value?.document.components.find((item) => item.id === "instance")?.data?.subcircuit?.cachedPorts;
+    assert.equal(repairedCache?.some((port) => port.name === "A"), false);
+    assert.equal(repairedCache?.some((port) => port.name === "Renamed"), true);
+    assert.equal(reopened.editorState.value?.document.components.find((item) => item.id === "instance")?.data?.subcircuit?.portOrder, undefined);
+    const reconnected = await reopened.createConnection(
+      { componentId: "driver", port: "out", direction: "output", point: { x: 0, y: 0 } },
+      { componentId: "instance", port: "Renamed", direction: "input", point: { x: 0, y: 0 } },
+    );
+    assert.equal(reconnected.ok, true, reconnected.error);
+    assert.equal(reopened.editorState.value?.document.connections[0]?.danglingEndpoints.length, 0);
+    assert.equal(await reopened.save(), true);
+    await binding.undo();
+    engine.files.set("G:\\sources\\compatible.circuit.json", sourceFile());
+    engine.openChoices.push({ ok: true, path: "G:\\sources\\compatible.circuit.json" });
+    assert.equal(await binding.repairMissingUseFromDialog(null, "instance"), true);
+    assert.equal(binding.pendingReimport.value, null);
+    assert.equal(binding.editorState.value?.document.connections[0]?.danglingEndpoints.length, 0);
+  } finally {
+    await reopened?.dispose();
+    await binding.dispose();
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
+});
+
+test("nested missing use rejects incompatible repair and accepts a compatible definition atomically", async () => {
+  const engine = new EmbeddedEngine();
+  const parentPath = "D:\\archive\\nested-repair.circuit.json";
+  const child = JSON.parse(sourceFile()) as ProjectFileData;
+  const ports: PortSpec[] = [{ name: "A", direction: "input", width: 1 }, { name: "Y", direction: "output", width: 1 }];
+  const changed = structuredClone(child.circuit);
+  changed.components[0]!.displayName = "Renamed";
+  const parent: ProjectFileData = { version: 2,
+    circuit: { components: [{ id: "outer", kind: "subcircuit", displayName: "A", position: { x: 0, y: 0 }, data: { definitionId: "A", cachedPorts: [{ name: "driver", direction: "input", width: 1 }] } }], connections: [] },
+    definitions: {
+      A: { displayName: "A", circuit: { components: [
+        { id: "driver", kind: "input", displayName: "driver", position: { x: 0, y: 0 }, ports: [{ name: "out", direction: "output", width: 1 }] },
+        { id: "inner", kind: "subcircuit", displayName: "deleted", position: { x: 120, y: 0 }, data: { definitionId: "deleted", cachedPorts: ports } },
+      ], connections: [{ id: "internal", source: { component: "driver", port: "out" }, target: { component: "inner", port: "A" } }] } },
+      compatible: { displayName: "Compatible", circuit: child.circuit },
+      incompatible: { displayName: "Incompatible", circuit: changed },
+    }, libraryRoots: ["A", "compatible", "incompatible"] };
+  engine.files.set(parentPath, JSON.stringify(parent));
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", { configurable: true, value: { circuitPlatform: engine } });
+  const binding = useWorkspace();
+  try {
+    await binding.bootstrap();
+    assert.equal(await binding.openProjectFromPath(parentPath), true);
+    const before = JSON.stringify(binding.getEmbeddedDefinition("A")?.circuit);
+    assert.deepEqual(binding.missingUses.value.map((use) => [use.ownerDefinitionId, use.componentId]), [["A", "inner"]]);
+    assert.equal(await binding.repairMissingUseWithDefinition("A", "inner", "incompatible"), false);
+    assert.match(binding.openError.value ?? "", /A.*internal.*A/);
+    assert.equal(binding.pendingReimport.value, null);
+    assert.equal(JSON.stringify(binding.getEmbeddedDefinition("A")?.circuit), before);
+    assert.equal(await binding.repairMissingUseWithDefinition("A", "inner", "compatible"), true, binding.openError.value ?? "");
+    const repaired = binding.getEmbeddedDefinition("A")?.circuit.components[1]?.data;
+    assert.ok(repaired && "definitionId" in repaired);
+    assert.equal(repaired.definitionId, "compatible");
+    await binding.undo();
+    assert.equal(JSON.stringify(binding.getEmbeddedDefinition("A")?.circuit), before);
+  } finally {
+    await binding.dispose();
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
+});

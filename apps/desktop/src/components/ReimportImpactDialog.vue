@@ -37,8 +37,8 @@ onBeforeUnmount(() => returnFocus?.focus());
   <div class="dialog-backdrop" @keydown="onKeydown">
     <section class="confirmation-dialog" role="alertdialog" aria-modal="true" aria-labelledby="reimport-impact-title" aria-describedby="reimport-impact-description">
       <span class="eyebrow">SUBCIRCUIT UPDATE</span>
-      <h2 id="reimport-impact-title">重新导入会使连线悬空</h2>
-      <p id="reimport-impact-description">“{{ preview.displayName }}”的新 Port 与现有连线不兼容。确认后连线会保留，供你逐条修复。</p>
+      <h2 id="reimport-impact-title">{{ preview.action === 'repair' ? '修复会使连线悬空' : '重新导入会使连线悬空' }}</h2>
+      <p id="reimport-impact-description">“{{ preview.displayName }}”的 Port 与现有连线不兼容。确认后连线会保留，供你逐条修复。</p>
       <ul class="reimport-impact-list">
         <li v-for="(impact, index) in preview.impacts" :key="`${impact.connectionId}:${impact.componentId}:${impact.portName}:${index}`">
           连接“{{ impact.connectionId }}” · 元件“{{ impact.componentId }}”的 Port“{{ impact.portName }}”
@@ -48,7 +48,7 @@ onBeforeUnmount(() => returnFocus?.focus());
       </ul>
       <div class="confirmation-dialog__actions">
         <button ref="cancelButton" type="button" class="dialog-button" @click="emit('cancel')">取消</button>
-        <button ref="confirmButton" type="button" class="dialog-button dialog-button--danger" @click="emit('confirm')">确认重新导入</button>
+        <button ref="confirmButton" type="button" class="dialog-button dialog-button--danger" @click="emit('confirm')">{{ preview.action === 'repair' ? '确认修复' : '确认重新导入' }}</button>
       </div>
     </section>
   </div>
