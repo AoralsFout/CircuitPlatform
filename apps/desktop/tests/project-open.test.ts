@@ -235,6 +235,32 @@ function parentProjectFile(logic: "not" | "and" = "not"): ProjectFileData {
   };
 }
 
+function nestedSourceProjectFile(): ProjectFileData {
+  const ports: PortSpec[] = [{ name: "a", direction: "input", width: 1 }, { name: "y", direction: "output", width: 1 }];
+  const wrapper = (nestedId: string, duplicate = false): ProjectFileData["circuit"] => ({
+    components: [
+      { id: "in-a", kind: "input", displayName: "a", position: { x: 0, y: 0 }, ports: [{ name: "out", direction: "output", width: 1 }] },
+      { id: "inner", kind: "subcircuit", displayName: nestedId, position: { x: 120, y: 0 }, data: { definitionId: nestedId, cachedPorts: ports } },
+      ...(duplicate ? [{ id: "second", kind: "subcircuit" as const, displayName: nestedId, position: { x: 120, y: 120 }, data: { definitionId: nestedId, cachedPorts: ports } }] : []),
+      { id: "out-y", kind: "output", displayName: "y", position: { x: 240, y: 0 }, ports: [{ name: "in", direction: "input", width: 1 }] },
+    ],
+    connections: [
+      { id: "into", source: { component: "in-a", port: "out" }, target: { component: "inner", port: "a" } },
+      { id: "from", source: { component: "inner", port: "y" }, target: { component: "out-y", port: "in" } },
+    ],
+  });
+  return {
+    version: 2,
+    circuit: wrapper("B", true),
+    definitions: {
+      B: { displayName: "B.circuit.json", circuit: wrapper("C") },
+      C: { displayName: "C.circuit.json", circuit: childProjectFile("not").circuit },
+      idle: { displayName: "idle.circuit.json", circuit: childProjectFile("and").circuit },
+    },
+    libraryRoots: ["B", "idle"],
+  };
+}
+
 test("opening a valid project file restores structure, values, geometry, identity and the recent entry", async () => {
   const engine = new OpenFlowEngine();
   const storage = memoryStorage();
@@ -359,6 +385,112 @@ test("an unsaved parent imports a saved v2 child, saves the embedded snapshot, a
       engine.calls.filter((call): call is Extract<Call, { type: "addComponent" }> => call.type === "addComponent").slice(addsBeforeReopen).map((call) => call.kind),
       ["not"],
     );
+  } finally {
+    restore();
+  }
+});
+
+test("workspace recursively imports two independent A closures while preserving an older B, then saves and reopens", async () => {
+  const engine = new OpenFlowEngine();
+  const restore = stubWindow(engine, memoryStorage());
+  try {
+    const parentPath = "E:\\circuits\\parent.circuit.json";
+    const sourcePath = "E:\\circuits\\A.circuit.json";
+    const savedPath = "F:\\portable\\nested-parent.circuit.json";
+    const oldParent = parentProjectFile("and");
+    engine.files.set(parentPath, JSON.stringify(oldParent));
+    engine.files.set(sourcePath, JSON.stringify(nestedSourceProjectFile()));
+    const binding = useWorkspace();
+    await binding.bootstrap();
+    assert.equal(await binding.openProjectFromPath(parentPath), true);
+    for (const y of [200, 360]) {
+      engine.openDialogResults.push({ ok: true, path: sourcePath });
+      assert.equal(await binding.addSubcircuitFromDialog({ x: 300, y }), true, binding.openError.value ?? "");
+    }
+    engine.saveDialogResults.push({ ok: true, path: savedPath });
+    assert.equal(await binding.saveAs(), true, binding.saveError.value ?? "");
+    const saved = JSON.parse(engine.files.get(savedPath)!) as ProjectFileData;
+    assert.deepEqual(saved.definitions["embedded-child"], oldParent.definitions["embedded-child"]);
+    assert.equal(Object.keys(saved.definitions).length, 7);
+    assert.equal(Object.values(saved.definitions).some((definition) => definition.displayName === "idle.circuit.json"), false);
+    const [first, second] = saved.libraryRoots.slice(1);
+    assert.notEqual(first, second);
+    for (const id of [first, second]) {
+      const root = saved.definitions[id!]!;
+      const uses = root.circuit.components.filter((component) => component.kind === "subcircuit");
+      assert.equal(uses.length, 2);
+      assert.equal((uses[0]!.data as { definitionId: string }).definitionId, (uses[1]!.data as { definitionId: string }).definitionId);
+    }
+    const firstB = (saved.definitions[first!]!.circuit.components.find((component) => component.kind === "subcircuit")!.data as { definitionId: string }).definitionId;
+    const secondB = (saved.definitions[second!]!.circuit.components.find((component) => component.kind === "subcircuit")!.data as { definitionId: string }).definitionId;
+    assert.notEqual(firstB, secondB);
+    assert.equal(JSON.stringify(saved).includes(sourcePath), false);
+    engine.files.delete(sourcePath);
+    const readsBefore = engine.readPaths.length;
+    const addedBefore = engine.calls.filter((call) => call.type === "addComponent").length;
+    const reopened = useWorkspace();
+    await reopened.bootstrap();
+    assert.equal(await reopened.openProjectFromPath(savedPath), true, reopened.openError.value ?? "");
+    assert.deepEqual(engine.readPaths.slice(readsBefore), [savedPath]);
+    assert.equal(reopened.editorState.value?.document.components.filter((component) => component.kind === "subcircuit").length, 3);
+    assert.equal(engine.calls.filter((call) => call.type === "addComponent").length - addedBefore >= 4, true);
+  } finally {
+    restore();
+  }
+});
+
+test("workspace imports a partial v2 source with warnings, preserves its wires, and rejects malformed or cyclic sources", async () => {
+  const engine = new OpenFlowEngine();
+  const restore = stubWindow(engine, memoryStorage());
+  try {
+    const partialPath = "E:\\circuits\\partial.circuit.json";
+    const invalidPath = "E:\\circuits\\invalid.circuit.json";
+    const cyclicPath = "E:\\circuits\\cyclic.circuit.json";
+    const savedPath = "F:\\portable\\partial-parent.circuit.json";
+    const source = childProjectFile();
+    source.circuit = {
+      ...source.circuit,
+      components: [...source.circuit.components, {
+        id: "broken", kind: "subcircuit", displayName: "missing", position: { x: 180, y: 150 },
+        data: { definitionId: "gone", cachedPorts: [{ name: "OLD", direction: "input", width: 1 }] },
+      }],
+      connections: [...source.circuit.connections, { id: "stale", source: { component: "in-a", port: "out" }, target: { component: "broken", port: "OLD" } }],
+    };
+    engine.files.set(partialPath, JSON.stringify(source));
+    engine.files.set(invalidPath, "{broken JSON");
+    const cyclic = nestedSourceProjectFile();
+    cyclic.definitions = { X: { displayName: "X", circuit: {
+      components: [{ id: "self", kind: "subcircuit", displayName: "self", position: { x: 0, y: 0 }, data: { definitionId: "X", cachedPorts: [] } }],
+      connections: [],
+    } } };
+    cyclic.circuit = { components: [{ id: "cycle", kind: "subcircuit", displayName: "cycle", position: { x: 0, y: 0 }, data: { definitionId: "X", cachedPorts: [] } }], connections: [] };
+    cyclic.libraryRoots = ["X"];
+    engine.files.set(cyclicPath, JSON.stringify(cyclic));
+    const binding = useWorkspace();
+    await binding.bootstrap();
+    await binding.requestNew();
+    for (const path of [invalidPath, cyclicPath]) {
+      engine.openDialogResults.push({ ok: true, path });
+      assert.equal(await binding.addSubcircuitFromDialog({ x: 100, y: 100 }), false);
+      assert.equal(binding.editorState.value?.document.components.length, 0);
+    }
+    assert.match(binding.openError.value ?? "", /环/);
+    engine.openDialogResults.push({ ok: true, path: partialPath });
+    assert.equal(await binding.addSubcircuitFromDialog({ x: 200, y: 120 }), true, binding.openError.value ?? "");
+    assert.match(binding.openError.value ?? "", /定义/);
+    assert.equal(binding.editorState.value?.document.components[0]?.data?.subcircuit?.status, "resolved");
+    engine.saveDialogResults.push({ ok: true, path: savedPath });
+    assert.equal(await binding.saveAs(), true, binding.saveError.value ?? "");
+    const saved = JSON.parse(engine.files.get(savedPath)!) as ProjectFileData;
+    assert.equal(saved.definitions[saved.libraryRoots[0]!]!.circuit.connections.some((wire) => wire.id === "stale"), true);
+    engine.files.delete(partialPath);
+    const readsBefore = engine.readPaths.length;
+    const reopened = useWorkspace();
+    await reopened.bootstrap();
+    assert.equal(await reopened.openProjectFromPath(savedPath), true);
+    assert.match(reopened.openError.value ?? "", /定义/);
+    assert.deepEqual(engine.readPaths.slice(readsBefore), [savedPath]);
+    assert.equal(reopened.editorState.value?.document.components[0]?.data?.subcircuit?.status, "resolved");
   } finally {
     restore();
   }

@@ -25,7 +25,15 @@ export function importProjectSnapshot(
   const ports = publishedPorts(source.circuit, errors);
   if (errors.length > 0) return { ok: false, errors };
 
+  // 缺失定义的引用也是已占用身份；重用它会意外修复父工程中的旧使用处。
   const usedIds = new Set(Object.keys(parent.definitions));
+  for (const circuit of [parent.circuit, ...Object.values(parent.definitions).map((definition) => definition.circuit)]) {
+    for (const component of circuit.components) {
+      if (component.kind === "subcircuit" && component.data !== undefined && "definitionId" in component.data) {
+        usedIds.add(component.data.definitionId);
+      }
+    }
+  }
   const identities = new Map<string, string>();
   const definitions = Object.assign(Object.create(null) as Record<string, { displayName: string; circuit: ProjectFileCircuit }>, structuredClone(parent.definitions));
   const allocate = (): string | null => {

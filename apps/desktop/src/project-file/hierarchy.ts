@@ -247,6 +247,7 @@ async function flattenOccurrence(
   const endpointTarget = new Map<string, FlatEndpoint[]>();
   const boundaryOutputNames = new Map<string, string>();
   const boundaryInputNames = new Map<string, string>();
+  const validSubcircuitPorts = new Map<string, readonly PortSpec[]>();
 
   for (const component of project.circuit.components) {
     if (component.kind === "subcircuit") {
@@ -291,12 +292,13 @@ async function flattenOccurrence(
         reader,
         platform,
       );
-      if (childOutput.diagnostics.length > 0) {
+      if (childOutput.diagnostics.some((diagnostic) => diagnostic.code !== "definition-missing" && diagnostic.code !== "dangling-connection")) {
         output.diagnostics.push(...childOutput.diagnostics);
         updateVisibleSubcircuit(output, component.id, unresolvedData(data, childOutput.diagnostics[0]!));
         continue;
       }
       mergeOutput(output, childOutput);
+      validSubcircuitPorts.set(component.id, childInterface.ports);
       const subData: SubcircuitComponentData = {
         ...(data ?? { reference: "", cachedPorts: [] }),
         definitionId: childKey,
@@ -380,6 +382,7 @@ async function flattenOccurrence(
 
   // 先收集所有嵌套边界输入的来源别名，使连接遍历顺序不会影响多层直通的结果。
   for (const connection of project.circuit.connections) {
+    if (hasInvalidSubcircuitEndpoint(connection, componentById, validSubcircuitPorts)) continue;
     const sources = resolveConnectionSources(connection.source.component, connection.source.port, endpointSource, endpointTarget);
     const targets = resolveConnectionTargets(connection.target.component, connection.target.port, endpointSource, endpointTarget, boundaryOutputNames, boundaryInputNames);
     for (const source of sources) {
@@ -391,6 +394,10 @@ async function flattenOccurrence(
   }
 
   for (const connection of project.circuit.connections) {
+    if (hasInvalidSubcircuitEndpoint(connection, componentById, validSubcircuitPorts)) {
+      output.diagnostics.push(diagnosticFor("dangling-connection", `连接「${connection.id}」的子电路端口缺失或不兼容，已跳过仿真。`, identity, undefined, [...stack, identity]));
+      continue;
+    }
     // 内置元件的 Port 清单不进 Project 文件（由引擎回传，ADR 0020），但它们的连接端点
     // 仍然是合法且可展平的。按连接中实际出现的 Port 补出普通元件端点，不能因为文件里
     // 没有缓存清单就把穿过 AND/NOT 等内置元件的连接静默丢掉。
@@ -469,6 +476,24 @@ async function flattenOccurrence(
     }
   }
   return projection;
+}
+
+/** 子电路端点必须匹配当前定义的名称、方向和位宽；缺失子树的连接也保持在文档中。 */
+function hasInvalidSubcircuitEndpoint(
+  connection: ProjectFileData["circuit"]["connections"][number],
+  components: ReadonlyMap<string, ProjectFileComponent>,
+  validPorts: ReadonlyMap<string, readonly PortSpec[]>,
+): boolean {
+  for (const [endpoint, direction] of [[connection.source, "output"], [connection.target, "input"]] as const) {
+    const component = components.get(endpoint.component);
+    if (component?.kind !== "subcircuit") continue;
+    const actual = validPorts.get(component.id)?.find((port) => port.name === endpoint.port && port.direction === direction);
+    const cached = component.data !== undefined && "cachedPorts" in component.data
+      ? component.data.cachedPorts.find((port) => port.name === endpoint.port && port.direction === direction)
+      : undefined;
+    if (actual === undefined || cached === undefined || actual.width !== cached.width) return true;
+  }
+  return false;
 }
 
 /** 把可读来源收敛为稳定且无重复的扁平端点，供纯边界直通 Port 显示信号。 */

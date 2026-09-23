@@ -1465,8 +1465,13 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
       openError.value = diagnostic?.message ?? "所选 Project 不能作为 Subcircuit 使用。";
       return false;
     }
-    openError.value = null;
-    return replaceHierarchyProjection(hierarchy, cache);
+    const committed = await replaceHierarchyProjection(hierarchy, cache);
+    openError.value = committed
+      ? (hierarchy.diagnostics.length > 0
+        ? `导入成功，部分连接或定义需要检查：${hierarchy.diagnostics.map((item) => item.message).join("；")}`
+        : null)
+      : (editor.snapshot().error?.message ?? "子电路导入失败，父工程保持原状。");
+    return committed;
   }
 
   /** 显式采用磁盘上的 Subcircuit 新快照；失败结果也以完整未解析状态原子采用。 */
@@ -1723,6 +1728,9 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
       defaultComponentDefinitionRegistry,
     );
     finishDocumentLoad({ snapshot: state.value }, document, projectedBindings, path, hierarchy, circuit, projectFiles);
+    if (hierarchy.diagnostics.length > 0) {
+      openError.value = `项目已打开，部分连接或定义需要检查：${hierarchy.diagnostics.map((item) => item.message).join("；")}`;
+    }
     recordRecentProject(path);
     return true;
   }

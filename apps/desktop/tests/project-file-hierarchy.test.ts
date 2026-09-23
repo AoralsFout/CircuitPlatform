@@ -105,7 +105,7 @@ test("nested embedded definitions preserve boundary splicing without source path
   assert.equal(result.circuit.connections.some((item) => item.source.componentId === "src" && item.target.componentId === "sink"), true);
 });
 
-test("an invalid nested branch does not leak partial flat objects", async () => {
+test("a missing nested definition keeps healthy branches of its containing definition runnable", async () => {
   const wrapper = circuit(
     [input("in", "A"), gate("g"), sub("broken", "missing"), output("out", "Y")],
     [wire("to-g", "in", "out", "g", "in")],
@@ -115,9 +115,25 @@ test("an invalid nested branch does not leak partial flat objects", async () => 
     { wrapper: definition(wrapper) },
   ));
   assert.ok(result.diagnostics.some((item) => item.code === "definition-missing"));
-  assert.equal(result.circuit.components.some((item) => item.id.startsWith("u/")), false);
+  assert.ok(result.circuit.components.some((item) => item.id === "u/g"));
   assert.ok(result.circuit.components.some((item) => item.id === "sibling"));
-  assert.equal(result.document.components.find((item) => item.id === "u")?.data?.subcircuit?.status, "unresolved");
+  assert.equal(result.document.components.find((item) => item.id === "u")?.data?.subcircuit?.status, "resolved");
+});
+
+test("an existing dangling subcircuit port is diagnosed and omitted from the flat circuit", async () => {
+  const leaf = circuit([input("in", "A"), output("out", "Y")], [wire("through", "in", "out", "out", "in")]);
+  const wrapper = circuit(
+    [input("src", "A"), sub("nested", "leaf"), gate("healthy")],
+    [wire("stale", "src", "out", "nested", "OLD"), wire("working", "src", "out", "healthy", "in")],
+  );
+  const result = await flatten(project(
+    circuit([input("outside", "SRC"), sub("u", "wrapper")], [wire("drive", "outside", "out", "u", "A")]),
+    { wrapper: definition(wrapper), leaf: definition(leaf) },
+  ));
+  assert.ok(result.diagnostics.some((item) => item.code === "dangling-connection"));
+  assert.ok(result.circuit.components.some((item) => item.id === "u/healthy"));
+  assert.equal(result.circuit.connections.some((item) => item.id.includes("stale")), false);
+  assert.ok(result.circuit.connections.some((item) => item.source.componentId === "outside" && item.target.componentId === "u/healthy"));
 });
 
 test("top-level Clock works while an embedded Clock definition reports an interface diagnostic", async () => {

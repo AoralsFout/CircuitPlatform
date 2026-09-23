@@ -244,6 +244,31 @@ function parentProject(): ProjectFileData {
   };
 }
 
+function nestedSharedParentProject(): ProjectFileData {
+  const parent = parentProject();
+  const wrapper: ProjectFileData["circuit"] = {
+    components: [
+      { id: "d", kind: "input", displayName: "d", position: { x: 0, y: 0 }, ports: inputPorts },
+      { id: "clock", kind: "input", displayName: "clock", position: { x: 0, y: 80 }, ports: inputPorts },
+      { id: "inner", kind: "subcircuit", displayName: "register", position: { x: 160, y: 40 }, data: { definitionId: "register", cachedPorts: dffPorts } },
+      { id: "q", kind: "output", displayName: "q", position: { x: 320, y: 40 }, ports: outputPorts },
+    ],
+    connections: [
+      { id: "d-inner", source: { component: "d", port: "out" }, target: { component: "inner", port: "d" } },
+      { id: "clock-inner", source: { component: "clock", port: "out" }, target: { component: "inner", port: "clock" } },
+      { id: "inner-q", source: { component: "inner", port: "q" }, target: { component: "q", port: "in" } },
+    ],
+  };
+  return {
+    ...parent,
+    circuit: { ...parent.circuit, components: parent.circuit.components.map((component) => component.kind === "subcircuit"
+      ? { ...component, data: { definitionId: "wrapper", cachedPorts: dffPorts } }
+      : component) },
+    definitions: { ...parent.definitions, wrapper: { displayName: "wrapper.circuit.json", circuit: wrapper } },
+    libraryRoots: ["wrapper"],
+  };
+}
+
 function projectText(file: ProjectFileData): string {
   return JSON.stringify(file);
 }
@@ -313,6 +338,33 @@ test("hierarchy DFF occurrences retain independent state across unrelated compon
     assert.equal(binding.state.value.signals["u1:q"], "1");
     assert.equal(binding.state.value.signals["u2:q"], "0");
     assert.deepEqual(engine.resetCalls, [], "无关普通元件编辑不得调用 reset");
+  } finally {
+    restore();
+  }
+});
+
+test("two occurrences of a shared nested definition keep separate DFF state", async () => {
+  const engine = new StatefulHierarchyEngine();
+  const parentPath = "E:\\circuits\\nested-parent.circuit.json";
+  engine.files.set(parentPath.toLowerCase(), projectText(nestedSharedParentProject()));
+  const restore = installWindow(engine);
+  try {
+    const binding = useWorkspace();
+    await binding.bootstrap();
+    assert.equal(await binding.openProjectFromPath(parentPath), true, binding.openError.value ?? "");
+    assert.equal(binding.state.value.signals["u1:q"], "X");
+    assert.equal(binding.state.value.signals["u2:q"], "X");
+    await binding.step();
+    await binding.setInputBit("data-1", 0, "1");
+    await binding.setInputBit("clock-1", 0, "1");
+    await binding.step();
+    assert.equal(binding.state.value.signals["u1:q"], "1");
+    assert.equal(binding.state.value.signals["u2:q"], "X");
+    await binding.setInputBit("clock-1", 0, "0");
+    await binding.setInputBit("clock-2", 0, "1");
+    await binding.step();
+    assert.equal(binding.state.value.signals["u1:q"], "1");
+    assert.equal(binding.state.value.signals["u2:q"], "0");
   } finally {
     restore();
   }
