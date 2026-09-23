@@ -1775,12 +1775,14 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
       openError.value = "仿真引擎不可用，无法打开项目。";
       return false;
     }
+    // 已保存的 v2 文件也可能含同名定义；打开时同步画布使用处的编号。
+    const file = labelDefinitionUses(parsed.file);
     const projectFiles = new Map<string, ProjectFileData>([
-      [projectPathIdentity(path), parsed.file],
+      [projectPathIdentity(path), file],
     ]);
     const hierarchy = await flattenProjectHierarchy({
       rootIdentity: path,
-      root: parsed.file,
+      root: file,
       reader: hierarchyProjectReader(projectFiles, true),
     });
     if (disposed) return false;

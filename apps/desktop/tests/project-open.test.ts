@@ -261,6 +261,35 @@ function nestedSourceProjectFile(): ProjectFileData {
   };
 }
 
+test("opening v2 labels duplicate definition uses on the canvas without changing definition names", async () => {
+  const engine = new OpenFlowEngine();
+  const restore = stubWindow(engine, memoryStorage());
+  try {
+    const path = "E:\\circuits\\duplicate-names.circuit.json";
+    const base = parentProjectFile();
+    const file: ProjectFileData = {
+      ...base,
+      circuit: { ...base.circuit, components: base.circuit.components.map((component) => component.id === "unit" ? {
+        ...component,
+        data: { definitionId: "another-child", cachedPorts: [{ name: "a", direction: "input" as const, width: 1 }, { name: "y", direction: "output" as const, width: 1 }] },
+      } : component) },
+      definitions: { ...base.definitions, "another-child": { ...base.definitions["embedded-child"]! } },
+      libraryRoots: [...base.libraryRoots, "another-child"],
+    };
+    engine.files.set(path, JSON.stringify(file));
+
+    const binding = useWorkspace();
+    await binding.bootstrap();
+    assert.equal(await binding.openProjectFromPath(path), true, binding.openError.value ?? "");
+    assert.equal(binding.editorState.value?.document.components.find((component) => component.id === "unit")?.displayName, "child.circuit.json (2)");
+    assert.deepEqual(binding.libraryTree.value.map((node) => node.displayName), ["child.circuit.json", "child.circuit.json (2)"]);
+    assert.equal(binding.isDirty.value, false);
+    assert.equal(file.definitions["another-child"]?.displayName, "child.circuit.json");
+  } finally {
+    restore();
+  }
+});
+
 test("opening a valid project file restores structure, values, geometry, identity and the recent entry", async () => {
   const engine = new OpenFlowEngine();
   const storage = memoryStorage();
