@@ -44,7 +44,7 @@ import {
 } from "../editor/connection-draft.ts";
 import { createSimulationSnapshot } from "../editor/simulation.ts";
 
-export type RailPage = "components" | "inputs" | "layers" | "settings";
+export type RailPage = "components" | "inputs" | "layers" | "subcircuits" | "settings";
 export type BottomTab = "inspector" | "outputs" | "waveform";
 /** 位按钮组里的一位：它属于哪个 Input、在取值文本里的位置，以及当前取值。 */
 export interface InputBitControl {

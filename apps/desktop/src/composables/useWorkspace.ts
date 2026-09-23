@@ -46,7 +46,8 @@ import {
   type FlattenProjectResult,
   type HierarchyProjectReader,
 } from "../project-file/hierarchy.ts";
-import { importProjectSnapshot } from "../project-file/definitions.ts";
+import { importProjectSnapshot, portsForDefinition } from "../project-file/definitions.ts";
+import { buildLibraryTree, definitionDisplayNames, labelDefinitionUses, type LibraryNode } from "../project-file/library.ts";
 import {
   forgetRecentProject,
   projectDisplayName,
@@ -203,6 +204,14 @@ export interface WorkspaceBinding {
   duplicateComponent(componentId?: EditorComponentId): Promise<boolean>;
   /** 选择一份已保存 Project 并把它作为 Subcircuit 加入当前父 Project。 */
   addSubcircuitFromDialog(center?: Point): Promise<boolean>;
+  /** 只导入定义快照，不在画布放置元件；与普通导入一样可撤销和保存。 */
+  importSubcircuitOnlyFromDialog(): Promise<boolean>;
+  /** 复用已有定义，在顶层电路新增一个独立使用处。 */
+  placeImportedSubcircuit(definitionId: string, center?: Point): Promise<boolean>;
+  /** 修改单个定义的名称，并同步所有使用处的非画布显示名称。 */
+  renameImportedSubcircuit(definitionId: string, name: string): Promise<boolean>;
+  /** 直接导入的定义及递归依赖；每次状态更新均从父工程快照推导。 */
+  libraryTree: ComputedRef<readonly LibraryNode[]>;
   /** 显式重新读取并采用一个 Subcircuit 及其递归依赖；磁盘变化不会自动传播。 */
   reloadSubcircuit(componentId: EditorComponentId): Promise<boolean>;
   /** 当前父文档的 occurrence-local 旧版本列表；不会把 stale 混入 isDirty。 */
@@ -414,6 +423,16 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   /** 当前文档拥有的内嵌定义；未保存文档也从此处序列化。 */
   let embeddedDefinitions: ProjectFileData["definitions"] = {};
   let embeddedLibraryRoots: ProjectFileData["libraryRoots"] = [];
+  const libraryTree = computed<readonly LibraryNode[]>(() => {
+    const snapshot = editorState.value;
+    if (snapshot === null) return [];
+    return buildLibraryTree(serializeProjectFile({
+      document: snapshot.document,
+      inputValues: state.value.inputValues,
+      definitions: embeddedDefinitions,
+      libraryRoots: embeddedLibraryRoots,
+    }));
+  });
   /** 每个顶层 Subcircuit occurrence 独立记录它实际采用的磁盘快照版本。 */
   const adoptedOccurrenceVersions = new Map<string, string>();
   /** 只存 occurrence key，不把 stale 合并到文档 dirty 或解析 status。 */
@@ -1404,8 +1423,18 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     return hierarchy !== null && replaceHierarchyProjection(hierarchy, cache);
   }
 
-  /** 从已保存的 v2 文件导入独立定义并放置；失败和取消均不改变父文档。 */
-  async function addSubcircuitFromDialog(center: Point = { x: 240, y: 180 }): Promise<boolean> {
+  /** 根据定义身份同步文档中每个使用处的完整名称，包括同名编号。 */
+  function withDefinitionLabels(document: EditorDocument, file: ProjectFileData): EditorDocument {
+    const labels = definitionDisplayNames(file.definitions);
+    return { ...document, components: document.components.map((component) => {
+      const id = component.data?.subcircuit?.definitionId;
+      const label = id === undefined ? undefined : labels[id];
+      return label === undefined ? component : { ...component, displayName: label };
+    }) };
+  }
+
+  /** 从已保存的 v2 文件导入独立定义；仅导入和导入并放置共用读取与校验。 */
+  async function importSubcircuitFromDialog(place: boolean, center: Point): Promise<boolean> {
     if (editor === null) return false;
     const picked = await adapter.pickOpenPath();
     if (!picked.ok) {
@@ -1445,22 +1474,19 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
       openError.value = imported.errors[0]?.message ?? "不能导入这个 Project。";
       return false;
     }
+    const file = labelDefinitionUses(imported.file);
     const id = nextComponentId(snapshot.document);
     const candidate: EditorComponent = {
-      id,
-      kind: "subcircuit",
-      displayName: projectDisplayName(picked.path),
-      position: { ...center },
-      lifecycle: "active",
-      ports: imported.ports,
+      id, kind: "subcircuit", displayName: definitionDisplayNames(file.definitions)[imported.definitionId]!,
+      position: { ...center }, lifecycle: "active", ports: imported.ports,
       data: { subcircuit: { definitionId: imported.definitionId, reference: "", cachedPorts: imported.ports } },
     };
-    const document = { ...snapshot.document, components: [...snapshot.document.components, candidate] };
+    const document = withDefinitionLabels({ ...snapshot.document, components: place ? [...snapshot.document.components, candidate] : snapshot.document.components }, file);
     const cache = new Map(adoptedProjectFiles ?? []);
-    cache.set(projectPathIdentity(projectPath.value ?? "untitled.circuit.json"), imported.file);
+    cache.set(projectPathIdentity(projectPath.value ?? "untitled.circuit.json"), file);
     const hierarchy = await flattenVisibleDocument(document, cache, false);
-    const added = hierarchy?.document.components.find((component) => component.id === id);
-    if (hierarchy === null || added?.data?.subcircuit?.status !== "resolved") {
+    const added = place ? hierarchy?.document.components.find((component) => component.id === id) : undefined;
+    if (hierarchy === null || (place && added?.data?.subcircuit?.status !== "resolved")) {
       const diagnostic = hierarchy?.diagnostics.find((item) => item.componentId === id);
       openError.value = diagnostic?.message ?? "所选 Project 不能作为 Subcircuit 使用。";
       return false;
@@ -1471,6 +1497,63 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
         ? `导入成功，部分连接或定义需要检查：${hierarchy.diagnostics.map((item) => item.message).join("；")}`
         : null)
       : (editor.snapshot().error?.message ?? "子电路导入失败，父工程保持原状。");
+    return committed;
+  }
+
+  /** 导入源文件并立即放置一个新定义的使用处。 */
+  async function addSubcircuitFromDialog(center: Point = { x: 240, y: 180 }): Promise<boolean> {
+    return importSubcircuitFromDialog(true, center);
+  }
+
+  /** 只保存源文件的定义快照，不创建画布元件。 */
+  async function importSubcircuitOnlyFromDialog(): Promise<boolean> {
+    return importSubcircuitFromDialog(false, { x: 240, y: 180 });
+  }
+
+  /** 从现有定义创建一个新的顶层使用处，不读取源文件。 */
+  async function placeImportedSubcircuit(definitionId: string, center: Point = { x: 240, y: 180 }): Promise<boolean> {
+    if (editor === null) return false;
+    const definition = embeddedDefinitions[definitionId];
+    if (!definition) { openError.value = "所选子电路定义已不存在。"; return false; }
+    const snapshot = editor.snapshot();
+    const ports = portsForDefinition(definition.circuit);
+    const candidate: EditorComponent = {
+      id: nextComponentId(snapshot.document), kind: "subcircuit",
+      displayName: definitionDisplayNames(embeddedDefinitions)[definitionId]!,
+      position: { ...center }, lifecycle: "active", ports,
+      data: { subcircuit: { definitionId, reference: "", cachedPorts: ports } },
+    };
+    const document = { ...snapshot.document, components: [...snapshot.document.components, candidate] };
+    const cache = new Map(adoptedProjectFiles ?? []);
+    const hierarchy = await flattenVisibleDocument(document, cache, false);
+    if (hierarchy === null || hierarchy.document.components.find((component) => component.id === candidate.id)?.data?.subcircuit?.status !== "resolved") {
+      openError.value = hierarchy?.diagnostics.find((item) => item.componentId === candidate.id)?.message ?? "无法放置这个子电路。";
+      return false;
+    }
+    const committed = await replaceHierarchyProjection(hierarchy, cache);
+    openError.value = committed ? null : (editor.snapshot().error?.message ?? "放置子电路失败。");
+    return committed;
+  }
+
+  /** 在一次投影历史事务中修改单个定义的显示名称。 */
+  async function renameImportedSubcircuit(definitionId: string, name: string): Promise<boolean> {
+    if (editor === null || !embeddedDefinitions[definitionId]) return false;
+    const trimmed = name.trim();
+    if (trimmed.length === 0) { openError.value = "子电路名称不能为空。"; return false; }
+    if (embeddedDefinitions[definitionId]!.displayName === trimmed) return true;
+    const snapshot = editor.snapshot();
+    const file = labelDefinitionUses(serializeProjectFile({
+      document: snapshot.document, inputValues: state.value.inputValues,
+      definitions: { ...embeddedDefinitions, [definitionId]: { ...embeddedDefinitions[definitionId]!, displayName: trimmed } },
+      libraryRoots: embeddedLibraryRoots,
+    }));
+    const document = withDefinitionLabels(snapshot.document, file);
+    const cache = new Map(adoptedProjectFiles ?? []);
+    cache.set(projectPathIdentity(projectPath.value ?? "untitled.circuit.json"), file);
+    const hierarchy = await flattenVisibleDocument(document, cache, false);
+    if (hierarchy === null) return false;
+    const committed = await replaceHierarchyProjection(hierarchy, cache);
+    openError.value = committed ? null : (editor.snapshot().error?.message ?? "子电路改名失败。");
     return committed;
   }
 
@@ -2022,6 +2105,10 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     addComponent,
     duplicateComponent,
     addSubcircuitFromDialog,
+    importSubcircuitOnlyFromDialog,
+    placeImportedSubcircuit,
+    renameImportedSubcircuit,
+    libraryTree,
     reloadSubcircuit,
     staleSubcircuits,
     needsReload,
