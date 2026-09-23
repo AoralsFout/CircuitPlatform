@@ -6,6 +6,10 @@ import { useDocumentWorkspace } from "../src/composables/useDocumentWorkspace.ts
 import { serializeProjectFile, type ProjectFileData } from "../src/project-file/index.ts";
 import { portsForAddComponent } from "./fake-ports.ts";
 import { canvasSubcircuitName } from "../src/project-file/library.ts";
+import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 /** 公开工作区操作的可控文件与引擎适配器。 */
 class EmbeddedEngine {
@@ -16,6 +20,8 @@ class EmbeddedEngine {
   nextComponentId = 1;
   nextConnectionId = 1;
   failNextAdd = false;
+  failNextWrite = false;
+  diskFiles = false;
 
   async checkEngine() { return { status: "ok" as const, engine: "fake-engine" }; }
   async addComponent(kind: ComponentKindName, ports?: readonly PortSpec[]): Promise<EngineResponse> {
@@ -46,12 +52,21 @@ class EmbeddedEngine {
   async pickSavePath() { return this.saveChoices.shift() ?? { ok: false as const, reason: "canceled" }; }
   async readProjectFile(path: string) {
     this.readPaths.push(path);
+    if (this.diskFiles) {
+      try { return { ok: true as const, content: readFileSync(path, "utf8") }; }
+      catch { return { ok: false as const, reason: "项目文件不存在。", code: "PROJECT_FILE_NOT_FOUND" }; }
+    }
     const content = this.files.get(path);
     return content === undefined
       ? { ok: false as const, reason: "项目文件不存在。", code: "PROJECT_FILE_NOT_FOUND" }
       : { ok: true as const, content };
   }
   async writeProjectFile(path: string, content: string) {
+    if (this.failNextWrite) {
+      this.failNextWrite = false;
+      return { ok: false as const, reason: "磁盘不可写" };
+    }
+    if (this.diskFiles) writeFileSync(path, content, "utf8");
     this.files.set(path, content);
     return { ok: true as const };
   }
@@ -433,5 +448,105 @@ test("canvas drill-down opens a read-only definition without changing editable p
     workspace.dispose();
     if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
     else Reflect.deleteProperty(globalThis, "window");
+  }
+});
+
+test("export writes a standalone direct or nested v2 project through the file adapter without changing its parent", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "circuitplatform-export-"));
+  const parentPath = join(directory, "parent.circuit.json");
+  const sourcePath = join(directory, "deleted-source.circuit.json");
+  const directPath = join(directory, "wrapper-export.circuit.json");
+  const nestedPath = join(directory, "child-export.circuit.json");
+  const child = JSON.parse(sourceFile()) as ProjectFileData;
+  const ports: PortSpec[] = [
+    { name: "A", direction: "input", width: 1 },
+    { name: "Y", direction: "output", width: 1 },
+  ];
+  const parent: ProjectFileData = {
+    version: 2,
+    circuit: { components: [], connections: [] },
+    definitions: {
+      wrapper: { displayName: "wrapper.circuit.json", circuit: {
+        components: [{ id: "nested", kind: "subcircuit", displayName: "child.circuit.json", position: { x: 100, y: 80 }, data: { definitionId: "child", cachedPorts: ports } }],
+        connections: [],
+      } },
+      child: { displayName: "child.circuit.json", circuit: child.circuit },
+      idle: { displayName: "idle.circuit.json", circuit: { components: [], connections: [] } },
+    },
+    libraryRoots: ["wrapper", "idle"],
+  };
+  const parentContent = JSON.stringify(parent);
+  writeFileSync(parentPath, parentContent, "utf8");
+  writeFileSync(sourcePath, sourceFile(), "utf8");
+  unlinkSync(sourcePath);
+  const engine = new EmbeddedEngine();
+  engine.diskFiles = true;
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", { configurable: true, value: { circuitPlatform: engine } });
+  let binding: ReturnType<typeof useWorkspace> | null = null;
+  let independent: ReturnType<typeof useWorkspace> | null = null;
+  try {
+    binding = useWorkspace();
+    await binding.bootstrap();
+    assert.equal(await binding.openProjectFromPath(parentPath), true, binding.openError.value ?? "");
+    await binding.step();
+    const before = {
+      document: JSON.parse(JSON.stringify(binding.editorState.value?.document)),
+      canUndo: binding.editorState.value?.canUndo,
+      simulationStep: binding.state.value.simulationStep,
+      isDirty: binding.isDirty.value,
+    };
+
+    engine.saveChoices.push({ ok: false, reason: "canceled" });
+    assert.equal(await binding.exportImportedSubcircuit("wrapper"), false);
+    assert.equal(binding.exportFeedback.value?.kind, "canceled");
+    engine.saveChoices.push({ ok: true, path: parentPath });
+    assert.equal(await binding.exportImportedSubcircuit("wrapper"), false);
+    assert.match(binding.exportFeedback.value?.message ?? "", /不能覆盖当前父 Project/);
+    engine.saveChoices.push({ ok: true, path: directPath });
+    engine.failNextWrite = true;
+    assert.equal(await binding.exportImportedSubcircuit("wrapper"), false);
+    assert.match(binding.exportFeedback.value?.message ?? "", /磁盘不可写/);
+    assert.equal(await binding.exportImportedSubcircuit("deleted"), false);
+    assert.match(binding.exportFeedback.value?.message ?? "", /已不存在/);
+
+    engine.saveChoices.push({ ok: true, path: directPath });
+    assert.equal(await binding.exportImportedSubcircuit("wrapper"), true);
+    assert.equal(binding.exportFeedback.value?.kind, "success");
+    const direct = JSON.parse(readFileSync(directPath, "utf8")) as ProjectFileData;
+    assert.equal(direct.version, 2);
+    assert.deepEqual(direct.circuit, parent.definitions.wrapper?.circuit);
+    assert.deepEqual(Object.keys(direct.definitions), ["child"]);
+    assert.deepEqual(direct.libraryRoots, []);
+    engine.saveChoices.push({ ok: true, path: nestedPath });
+    assert.equal(await binding.exportImportedSubcircuit("child"), true);
+    const nested = JSON.parse(readFileSync(nestedPath, "utf8")) as ProjectFileData;
+    assert.deepEqual(nested.circuit, parent.definitions.child?.circuit);
+    assert.deepEqual(nested.definitions, {});
+    assert.deepEqual({
+      document: binding.editorState.value?.document,
+      canUndo: binding.editorState.value?.canUndo,
+      simulationStep: binding.state.value.simulationStep,
+      isDirty: binding.isDirty.value,
+    }, before);
+    assert.equal(readFileSync(parentPath, "utf8"), parentContent);
+    assert.deepEqual(engine.readPaths, [parentPath]);
+
+    independent = useWorkspace();
+    await independent.bootstrap();
+    assert.equal(await independent.openProjectFromPath(directPath), true, independent.openError.value ?? "");
+    assert.equal(await independent.addComponent("and", { x: 420, y: 180 }), true);
+    await independent.step();
+    assert.ok(independent.state.value.simulationStep > 0);
+    assert.equal(await independent.save(), true);
+    assert.equal((JSON.parse(readFileSync(directPath, "utf8")) as ProjectFileData).circuit.components.length, 2);
+    assert.equal(readFileSync(parentPath, "utf8"), parentContent);
+    assert.deepEqual(binding.libraryTree.value.map((node) => node.displayName), ["wrapper.circuit.json", "idle.circuit.json"]);
+  } finally {
+    await independent?.dispose();
+    await binding?.dispose();
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+    await rm(directory, { recursive: true, force: true });
   }
 });

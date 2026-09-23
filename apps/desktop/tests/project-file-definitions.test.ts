@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { affectedOccurrencePaths, importProjectSnapshot, reimportProjectSnapshot } from "../src/project-file/definitions.ts";
+import { affectedOccurrencePaths, exportDefinitionProject, importProjectSnapshot, reimportProjectSnapshot } from "../src/project-file/definitions.ts";
 import { parseProjectFile, type ProjectFileCircuit, type ProjectFileData } from "../src/project-file/index.ts";
 
 const input = (id: string, name: string) => ({ id, kind: "input" as const, displayName: name, position: { x: 0, y: 0 }, ports: [{ name: "out", direction: "output" as const, width: 1 }] });
@@ -150,4 +150,25 @@ test("reimport handles prototype-like definition identities as ordinary data", (
     assert.equal(result.file.definitions["__proto__"]?.displayName, "Local");
     assert.deepEqual(result.file.definitions["__proto__"]?.circuit.components.map((item) => item.id), ["new"]);
   }
+});
+
+test("exporting a nested definition promotes its circuit and copies only reachable dependencies", () => {
+  const source = file(circuit(sub("top", "A")), {
+    A: { displayName: "A", circuit: circuit(sub("nested", "B"), sub("shared", "B")) },
+    B: { displayName: "B", circuit: circuit(sub("leaf", "C")) },
+    C: { displayName: "C", circuit: circuit(input("x", "x")) },
+    idle: { displayName: "idle", circuit: circuit(input("unused", "unused")) },
+  }, ["A", "idle"]);
+  const before = structuredClone(source);
+  const exported = exportDefinitionProject(source, "B");
+  assert.equal(exported.ok, true);
+  if (!exported.ok) return;
+  assert.deepEqual(exported.file.circuit, source.definitions.B?.circuit);
+  assert.deepEqual(Object.keys(exported.file.definitions), ["C"]);
+  assert.deepEqual(exported.file.libraryRoots, []);
+  assert.equal(parseProjectFile(exported.file).ok, true);
+  assert.deepEqual(source, before);
+  const missing = exportDefinitionProject(source, "deleted");
+  assert.equal(missing.ok, false);
+  if (!missing.ok) assert.equal(missing.errors[0]?.code, "definition-missing");
 });

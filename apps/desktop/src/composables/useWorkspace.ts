@@ -47,7 +47,7 @@ import {
   type FlattenProjectResult,
   type HierarchyProjectReader,
 } from "../project-file/hierarchy.ts";
-import { affectedOccurrencePaths, importProjectSnapshot, portsForDefinition, reimportProjectSnapshot } from "../project-file/definitions.ts";
+import { affectedOccurrencePaths, exportDefinitionProject, importProjectSnapshot, portsForDefinition, reimportProjectSnapshot } from "../project-file/definitions.ts";
 import { buildLibraryTree, definitionDisplayNames, labelDefinitionUses, type LibraryNode } from "../project-file/library.ts";
 import {
   forgetRecentProject,
@@ -92,6 +92,13 @@ interface PlatformBridge extends DocumentEngineBridge, ProjectFileBridge {
 
 /** 顶栏保存状态的三个可见语义：已保存、有未保存改动、最近一次保存失败。 */
 export type ProjectSaveState = "saved" | "dirty" | "error";
+
+/** 导出结果只作用于当前标签的界面提示，不进入 Project、历史或仿真状态。 */
+export interface SubcircuitExportFeedback {
+  definitionId: string;
+  kind: "success" | "canceled" | "error";
+  message: string;
+}
 
 /** 父文档中一个 Subcircuit occurrence 的采用版本与独立重载状态。 */
 export interface SubcircuitOccurrenceSnapshot {
@@ -220,6 +227,10 @@ export interface WorkspaceBinding {
   renameImportedSubcircuit(definitionId: string, name: string): Promise<boolean>;
   /** 重新选择已保存的 v2 文件，兼容替换指定定义及其下层闭包；失败不建立历史帧。 */
   reimportEmbeddedDefinition(definitionId: string): Promise<boolean>;
+  /** 把已存于父 Project 的定义闭包写成独立 v2 Project；不提交编辑事务。 */
+  exportImportedSubcircuit(definitionId: string): Promise<boolean>;
+  /** 最近一次导出的明确结果，仅供当前标签的子电路页展示。 */
+  exportFeedback: DeepReadonly<Ref<SubcircuitExportFeedback | null>>;
   /** 直接导入的定义及递归依赖；每次状态更新均从父工程快照推导。 */
   libraryTree: ComputedRef<readonly LibraryNode[]>;
   /** 按父文档内的稳定 ID 读取定义副本；缺失时返回 null，不访问源文件或引擎。 */
@@ -526,6 +537,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   const isDirty = shallowRef(false);
   const saveError = shallowRef<string | null>(null);
   const openError = shallowRef<string | null>(null);
+  const exportFeedback = shallowRef<SubcircuitExportFeedback | null>(null);
   // 最近项目在本会话内的内存副本：构造时从存储恢复，此后由记录与清理函数同步维护，
   // 顶栏下拉与首启空状态（#40）直接消费这份响应式列表。
   const recentProjects = shallowRef<RecentProject[]>(readRecentProjects(preferenceStorage()));
@@ -1630,6 +1642,47 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     return committed;
   }
 
+  /** 导出只通过文件桥接写出快照，不调用编辑器命令或引擎。 */
+  async function exportImportedSubcircuit(definitionId: string): Promise<boolean> {
+    exportFeedback.value = null;
+    if (editor === null) {
+      exportFeedback.value = { definitionId, kind: "error", message: "没有可导出的项目。" };
+      return false;
+    }
+    const parent = serializeProjectFile({
+      document: editor.snapshot().document, inputValues: state.value.inputValues,
+      definitions: embeddedDefinitions, libraryRoots: embeddedLibraryRoots,
+    });
+    const exported = exportDefinitionProject(parent, definitionId);
+    if (!exported.ok) {
+      exportFeedback.value = { definitionId, kind: "error", message: exported.errors[0]?.message ?? "子电路导出失败。" };
+      return false;
+    }
+    const displayName = embeddedDefinitions[definitionId]!.displayName;
+    const defaultPath = displayName.endsWith(".circuit.json") ? displayName : `${displayName}.circuit.json`;
+    try {
+      const picked = await adapter.pickSavePath({ defaultPath });
+      if (!picked.ok) {
+        exportFeedback.value = picked.reason === "canceled"
+          ? { definitionId, kind: "canceled", message: "已取消导出。" }
+          : { definitionId, kind: "error", message: `无法选择导出位置：${picked.reason}` };
+        return false;
+      }
+      if (projectPath.value !== null && projectPathIdentity(picked.path) === projectPathIdentity(projectPath.value)) {
+        exportFeedback.value = { definitionId, kind: "error", message: "导出位置不能覆盖当前父 Project。" };
+        return false;
+      }
+      const written = await adapter.writeProjectFile(picked.path, JSON.stringify(exported.file));
+      exportFeedback.value = written.ok
+        ? { definitionId, kind: "success", message: `已导出到 ${picked.path}。修改导出文件后，需显式重新导入才会更新父 Project。` }
+        : { definitionId, kind: "error", message: `子电路导出失败：${written.reason}` };
+      return written.ok;
+    } catch (error) {
+      exportFeedback.value = { definitionId, kind: "error", message: `子电路导出失败：${error instanceof Error ? error.message : String(error)}` };
+      return false;
+    }
+  }
+
   /** 显式采用磁盘上的 Subcircuit 新快照；失败结果也以完整未解析状态原子采用。 */
   async function reloadSubcircuit(componentId: EditorComponentId): Promise<boolean> {
     if (editor === null || adoptedProjectFiles === null || projectPath.value === null) return false;
@@ -2184,6 +2237,8 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     placeImportedSubcircuit,
     renameImportedSubcircuit,
     reimportEmbeddedDefinition,
+    exportImportedSubcircuit,
+    exportFeedback: readonly(exportFeedback),
     libraryTree,
     getEmbeddedDefinition,
     reloadSubcircuit,

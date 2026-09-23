@@ -83,6 +83,8 @@ const {
   placeImportedSubcircuit,
   renameImportedSubcircuit,
   reimportEmbeddedDefinition,
+  exportImportedSubcircuit,
+  exportFeedback,
   libraryTree,
   reloadSubcircuit,
   dispose: disposeDocumentWorkspace,
@@ -295,6 +297,7 @@ onBeforeUnmount(() => {
         :component-definitions="componentDefinitions"
         :default-wire-color="defaultWireColor"
         :library-tree="libraryTree"
+        :export-feedback="exportFeedback"
         @close="showSidebar = false"
         @select-component="selectComponent"
         @set-input-bit="setInputBit"
@@ -305,6 +308,7 @@ onBeforeUnmount(() => {
         @rename-imported-subcircuit="renameImportedSubcircuit"
         @reimport-embedded-definition="reimportEmbeddedDefinition"
         @open-embedded-definition="openEmbeddedDefinition"
+        @export-imported-subcircuit="exportImportedSubcircuit"
         @default-wire-color-change="setDefaultWireColor"
       />
 

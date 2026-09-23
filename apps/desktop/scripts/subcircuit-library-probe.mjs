@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { app, BrowserWindow, dialog } from "electron";
 import { createServer } from "vite";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -107,16 +107,22 @@ async function main() {
   if (!existsSync(enginePath)) throw new Error(`缺少真实 C++ 引擎：${enginePath}`);
   const directory = await mkdtemp(join(tmpdir(), "circuitplatform-library-probe-"));
   const projectPath = join(directory, "library-probe.circuit.json");
-  writeFileSync(projectPath, `${JSON.stringify(fixture())}\n`, "utf8");
-  const vite = await createServer({ root: desktopRoot, server: { host: "127.0.0.1", port: 49155, strictPort: true, hmr: false } });
+  const exportPath = join(directory, "exported.circuit.json");
+  const parentContent = `${JSON.stringify(fixture())}\n`;
+  writeFileSync(projectPath, parentContent, "utf8");
+  const vite = await createServer({ root: desktopRoot, server: { host: "127.0.0.1", port: 0, hmr: false } });
   const originalOpenDialog = dialog.showOpenDialog;
+  const originalSaveDialog = dialog.showSaveDialog;
   let window;
   let failure = null;
   try {
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [projectPath] });
+    dialog.showSaveDialog = async () => ({ canceled: false, filePath: exportPath });
     await vite.listen();
+    const serverAddress = vite.httpServer?.address();
+    if (!serverAddress || typeof serverAddress === "string") throw new Error("Vite 未提供监听端口");
     process.env.CIRCUIT_ENGINE_PATH = enginePath;
-    process.env.CIRCUIT_PLATFORM_E2E_URL = "http://127.0.0.1:49155";
+    process.env.CIRCUIT_PLATFORM_E2E_URL = `http://127.0.0.1:${serverAddress.port}`;
     await import("../electron/main.cjs");
     await app.whenReady();
     await new Promise((resolvePromise, reject) => {
@@ -166,19 +172,20 @@ async function main() {
     assert.equal(selected.detailName, `${longName} (2)`);
     assert.equal(selected.detailTitle, `${longName} (2)`);
 
-    // 继续用 Tab 和 Space 操作详情按钮及改名表单。
-    key(window, "Tab");
-    key(window, "Tab");
+    // 继续用焦点和 Space 操作详情按钮，再以 Tab 进入改名表单。
+    await window.webContents.executeJavaScript("(() => { const button = document.querySelector('.subcircuit-detail button[aria-label^=\"改名 \"]'); if (!button) throw new Error('改名按钮缺失：' + document.querySelector('.subcircuit-detail')?.outerHTML); button.focus(); })()");
     key(window, " ");
     await waitFor(window, "document.querySelector('#subcircuit-rename-input')", "改名表单未出现");
     const renaming = await facts(window);
     assert.equal(renaming.renameLabel, "子电路名称");
     assert.equal(renaming.inputValue, longName, "改名时应编辑原始名称，不含编号");
     key(window, "Tab");
+    key(window, "Tab");
     await waitFor(window, "document.activeElement?.id === 'subcircuit-rename-input'", "Tab 未进入改名输入框", 5_000);
     assert.equal(await window.webContents.executeJavaScript("document.activeElement?.id"), "subcircuit-rename-input", "Tab 应进入改名输入框");
     await window.webContents.executeJavaScript("document.querySelector('#subcircuit-rename-input').select()");
     window.webContents.insertText(renamedName);
+    await waitFor(window, `document.querySelector('#subcircuit-rename-input')?.value === ${JSON.stringify(renamedName)}`, "键盘输入未更新名称");
     key(window, "Tab");
     await waitFor(window, "document.activeElement?.textContent?.trim() === '保存名称'", "Tab 未进入保存名称按钮", 5_000);
     assert.equal(await window.webContents.executeJavaScript("document.activeElement?.textContent?.trim()"), "保存名称", "Tab 应进入保存按钮");
@@ -189,15 +196,24 @@ async function main() {
     assert.equal(renamed.canvasTitle, "Renamed arithmetic unit");
     assert.equal(renamed.detailName, renamedName);
     assert.deepEqual(renamed.alerts, []);
-    console.log("Subcircuit library keyboard and rename checks passed", JSON.stringify({ rows: renamed.rows, canvasTitle: renamed.canvasTitle }));
+    await window.webContents.executeJavaScript("(() => { const button = document.querySelector('.subcircuit-detail button[aria-label^=\"导出 \"]'); if (!button) throw new Error('导出按钮缺失：' + document.querySelector('.subcircuit-detail')?.outerHTML); button.focus(); })()");
+    key(window, " ");
+    await waitFor(window, "document.querySelector('.subcircuit-export-feedback[role=\"status\"]')?.textContent?.includes('已导出到')", "键盘导出未完成");
+    assert.equal(existsSync(exportPath), true, "导出文件必须经正式 IPC 文件桥接写盘");
+    const exported = JSON.parse(readFileSync(exportPath, "utf8"));
+    assert.equal(exported.version, 2);
+    assert.deepEqual(exported.circuit, fixture().definitions.second.circuit);
+    assert.deepEqual(exported.definitions, {});
+    assert.equal(readFileSync(projectPath, "utf8"), parentContent, "导出不能改动父 Project 文件");
     assert.equal(initial.canvasTitle, expectedCanvasTitle, `两个同名定义中 second 的画布标题应保留编号；文件名分别为 ${longName}、${longName}`);
     assert.match(initial.canvasLabel, /A very long arithmetic and logic unit source file \(2\)/, "画布无障碍名称也应保留编号");
-    console.log("Subcircuit library DOM and keyboard probe passed", JSON.stringify({ initial, selected, renamed }));
+    console.log("Subcircuit library DOM, keyboard, and export probe passed", JSON.stringify({ treeNodes: initial.rows.length, nestedDepth: initial.rows[1].depth, exportedVersion: exported.version }));
   } catch (error) {
     failure = error;
     console.error(error);
   } finally {
     dialog.showOpenDialog = originalOpenDialog;
+    dialog.showSaveDialog = originalSaveDialog;
     app.removeAllListeners("window-all-closed");
     if (window && !window.isDestroyed()) window.close();
     await vite.close();

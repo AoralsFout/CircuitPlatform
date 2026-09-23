@@ -9,6 +9,45 @@ export type ImportProjectSnapshotResult =
 /** 兼容重导入的候选；原定义身份与本地名称不变，后代身份重新分配。 */
 export type ReimportProjectSnapshotResult = ImportProjectSnapshotResult;
 
+/** 导出的独立 v2 Project，或所选定义缺失与候选文件校验的诊断。 */
+export type ExportDefinitionProjectResult =
+  | { ok: true; file: ProjectFileData }
+  | { ok: false; errors: readonly ProjectFileError[] };
+
+/**
+ * 把父工程中一个直接或嵌套定义提升为可编辑顶层 Circuit，仅复制它实际引用的定义闭包。
+ * @param parent 已解析的父工程；不会被修改。
+ * @param definitionId 父工程内的稳定定义身份。
+ * @returns 独立且通过 v2 校验的 Project；所选定义缺失或候选无效时返回诊断。
+ */
+export function exportDefinitionProject(parent: ProjectFileData, definitionId: string): ExportDefinitionProjectResult {
+  const selected = Object.hasOwn(parent.definitions, definitionId) ? parent.definitions[definitionId] : undefined;
+  if (!selected) {
+    return { ok: false, errors: [{ code: "definition-missing", message: `所选子电路定义「${definitionId}」已不存在，无法导出。` }] };
+  }
+  const definitions: Record<string, ProjectFileData["definitions"][string]> = Object.create(null);
+  const visit = (circuit: ProjectFileCircuit): void => {
+    for (const component of circuit.components) {
+      if (component.kind !== "subcircuit" || !component.data || !("definitionId" in component.data)) continue;
+      const id = component.data.definitionId;
+      if (Object.hasOwn(definitions, id)) continue;
+      const dependency = Object.hasOwn(parent.definitions, id) ? parent.definitions[id] : undefined;
+      if (!dependency) continue; // v2 允许明确缺失的使用处；保留其原有端口缓存。
+      definitions[id] = structuredClone(dependency);
+      visit(dependency.circuit);
+    }
+  };
+  visit(selected.circuit);
+  const candidate: ProjectFileData = {
+    version: 2,
+    circuit: copyCircuit(selected.circuit),
+    definitions,
+    libraryRoots: [],
+  };
+  const validated = parseProjectFile(candidate);
+  return validated.ok ? { ok: true, file: validated.value.file } : { ok: false, errors: validated.errors };
+}
+
 /** 从已保存定义的边界 Input/Output 取得再次放置所需的端口；不读取源文件。 */
 export function portsForDefinition(circuit: ProjectFileCircuit): readonly PortSpec[] {
   const errors: ProjectFileError[] = [];

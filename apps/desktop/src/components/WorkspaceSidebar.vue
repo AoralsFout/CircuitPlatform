@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import type { LibraryNode } from "../project-file/library.ts";
+import type { SubcircuitExportFeedback } from "../composables/useWorkspace.ts";
 import type { InputControl, RailPage } from "../composables/useEditorState";
 import type { ComponentDefinition } from "../canvas";
 import type { ComponentKindName } from "@circuit-platform/protocol";
@@ -31,6 +32,7 @@ const props = defineProps<{
   componentDefinitions: readonly ComponentDefinition[];
   defaultWireColor: WireColorId;
   libraryTree: readonly LibraryNode[];
+  exportFeedback: SubcircuitExportFeedback | null;
 }>();
 
 const emit = defineEmits<{
@@ -44,6 +46,7 @@ const emit = defineEmits<{
   renameImportedSubcircuit: [definitionId: string, name: string];
   reimportEmbeddedDefinition: [definitionId: string];
   openEmbeddedDefinition: [definitionId: string];
+  exportImportedSubcircuit: [definitionId: string];
   defaultWireColorChange: [color: WireColorId];
 }>();
 
@@ -244,6 +247,7 @@ function startComponentDrag(event: DragEvent, kind: EditorComponentKind): void {
           <button type="button" :disabled="selectedDefinition.status !== 'ready'" :aria-label="`再次放置 ${selectedDefinition.displayName}`" @click="emit('placeImportedSubcircuit', selectedDefinition.definitionId)">再次放置</button>
           <button type="button" :disabled="selectedDefinition.status !== 'ready'" :aria-label="`重新导入 ${selectedDefinition.displayName}`" @click="emit('reimportEmbeddedDefinition', selectedDefinition.definitionId)">重新导入</button>
           <button type="button" :disabled="selectedDefinition.status !== 'ready'" :aria-label="`改名 ${selectedDefinition.displayName}`" @click="renameDraft = selectedDefinition.editableName">改名</button>
+          <button type="button" :aria-label="`导出 ${selectedDefinition.displayName}`" @click="emit('exportImportedSubcircuit', selectedDefinition.definitionId)">导出为 Project</button>
         </div>
         <form v-if="renameDraft !== null" class="subcircuit-rename" @submit.prevent="submitRename">
           <label for="subcircuit-rename-input">子电路名称</label>
@@ -251,6 +255,7 @@ function startComponentDrag(event: DragEvent, kind: EditorComponentKind): void {
           <div class="subcircuit-actions"><button type="submit" :disabled="!renameDraft.trim()">保存名称</button><button type="button" @click="renameDraft = null">取消</button></div>
         </form>
       </div>
+      <p v-if="exportFeedback && exportFeedback.definitionId === selectedDefinitionId" class="subcircuit-export-feedback" :class="{ 'subcircuit-export-feedback--error': exportFeedback.kind === 'error' }" :role="exportFeedback.kind === 'error' ? 'alert' : 'status'">{{ exportFeedback.message }}</p>
     </template>
 
     <template v-else>

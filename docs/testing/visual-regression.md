@@ -60,7 +60,7 @@ pnpm --filter @circuit-platform/desktop test:subcircuit-library-probe
 脚本打开临时 v2 Project，使用真实 Electron 输入事件以 Space 打开「子电路」侧栏，
 再以 Tab 进入定义树并选中同名定义。它核对长名称的完整 title、嵌套层级、
 使用次数、同名编号、详情和画布标题；随后通过键盘打开改名表单并提交名称，
-验证树与画布同步更新。画布标题省略 `.circuit.json`，树和详情保留完整名称。
+验证树与画布同步更新，最后以 Space 触发“导出为 Project”，经正式 IPC 文件通道写盘并确认父文件字节未变。画布标题省略 `.circuit.json`，树和详情保留完整名称。
 需要已构建的 C++ 引擎；在独立 worktree 运行时可用 `CIRCUIT_ENGINE_PATH`
 指向主工作区的 `engine/build/circuit-engine.exe`。
 
