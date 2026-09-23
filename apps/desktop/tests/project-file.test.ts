@@ -1,453 +1,216 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { EditorComponent, EditorConnection, EditorDocument, Point } from "../src/editor/index.ts";
-import { createAndDemoDocument } from "../src/editor/index.ts";
+import type { EditorConnection, EditorDocument, Point } from "../src/editor/index.ts";
+import { importProjectSnapshot } from "../src/project-file/definitions.ts";
 import {
   PROJECT_FILE_VERSION,
   parseProjectFile,
-  rebaseProjectFileReferences,
   serializeProjectFile,
+  type ProjectFileCircuit,
+  type ProjectFileData,
   type ProjectFileError,
   type ParsedProjectFile,
 } from "../src/project-file/index.ts";
 
 const at = (x: number, y: number): Point => ({ x, y });
+const port = (name: string, direction: "input" | "output", width = 1) => ({ name, direction, width });
+const emptyCircuit = (): ProjectFileCircuit => ({ components: [], connections: [] });
+const project = (circuit: ProjectFileCircuit = emptyCircuit(), definitions: ProjectFileData["definitions"] = {}, libraryRoots: readonly string[] = []): ProjectFileData =>
+  ({ version: 2, circuit, definitions, libraryRoots });
+const input = (id: string, label: string, width = 1) => ({
+  id, kind: "input" as const, displayName: label, position: at(0, 0), ports: [port("out", "output", width)],
+});
+const output = (id: string, label: string, width = 1) => ({
+  id, kind: "output" as const, displayName: label, position: at(200, 0), ports: [port("in", "input", width)],
+});
+const sub = (id: string, definitionId: string, cachedPorts = [port("A", "input"), port("Y", "output")]) => ({
+  id, kind: "subcircuit" as const, displayName: "子电路", position: at(100, 0),
+  data: { definitionId, cachedPorts },
+});
+const wire = (id: string, source: string, sourcePort: string, target: string, targetPort: string) => ({
+  id, source: { component: source, port: sourcePort }, target: { component: target, port: targetPort },
+});
+const passThrough = (): ProjectFileCircuit => ({
+  components: [input("in", "A"), output("out", "Y")],
+  connections: [wire("through", "in", "out", "out", "in")],
+});
 
-function component(
-  id: string,
-  kind: EditorComponent["kind"],
-  displayName: string,
-  position: Point,
-  ports?: readonly { name: string; direction: "input" | "output"; width: number; bitRange?: { msb: number; lsb: number } }[],
-): EditorComponent {
-  return {
-    id,
-    kind,
-    displayName,
-    position,
-    lifecycle: "active",
-    ...(ports ? { ports } : {}),
-  };
-}
-
-function connection(
-  id: string,
-  source: { componentId: string; port: string },
-  target: { componentId: string; port: string },
-  extra: Partial<Pick<EditorConnection, "waypoints" | "color" | "route" | "lifecycle">> = {},
-): EditorConnection {
-  return {
-    id,
-    source: { ...source, point: at(0, 0) },
-    target: { ...target, point: at(0, 0) },
-    lifecycle: "visible",
-    danglingEndpoints: [],
-    ...extra,
-  };
-}
-
-/** 断言解析失败并返回结构化错误列表；顺便确保成功分支从未被走到。 */
-function failureOf(raw: unknown): readonly ProjectFileError[] {
-  const result = parseProjectFile(raw);
-  assert.ok(!result.ok, "expected the file to be rejected");
-  return result.errors;
-}
-
-/** 断言解析成功并返回结果；失败时把全部原因拼进断言消息，方便定位。 */
 function successOf(raw: unknown): ParsedProjectFile {
   const result = parseProjectFile(raw);
-  assert.ok(result.ok, result.ok ? "" : result.errors.map((error) => `${error.code}: ${error.message}`).join("; "));
+  assert.ok(result.ok, result.ok ? "" : result.errors.map((error) => error.message).join("; "));
   return result.value;
 }
 
-const codesOf = (errors: readonly ProjectFileError[]): string[] => errors.map((error) => error.code);
+function failureOf(raw: unknown): readonly ProjectFileError[] {
+  const result = parseProjectFile(raw);
+  assert.equal(result.ok, false);
+  return result.ok ? [] : result.errors;
+}
 
-test("serializes the exact v1 file shape for a mixed circuit", () => {
-  const document: EditorDocument = {
-    components: [
-      component("input-a", "input", "输入 A", at(110, 100), [{ name: "out", direction: "output", width: 8 }]),
-      component("and-gate", "and", "AND 门", at(440, 220)),
-    ],
-    connections: [
-      connection(
-        "wire-a",
-        { componentId: "input-a", port: "out" },
-        { componentId: "and-gate", port: "in1" },
-        { waypoints: [at(330, 150), at(330, 250)], color: "cyan" },
-      ),
-    ],
-  };
+const codesOf = (errors: readonly ProjectFileError[]) => errors.map((error) => error.code);
 
-  // 整份文件对象被逐字断言：格式骨架（根、circuit、组件与连接记录）一旦漂移测试立刻失败。
-  assert.deepEqual(serializeProjectFile({ document, inputValues: { "input-a": "1010" } }), {
-    version: 1,
-    circuit: {
-      components: [
-        {
-          id: "input-a",
-          kind: "input",
-          displayName: "输入 A",
-          position: { x: 110, y: 100 },
-          ports: [{ name: "out", direction: "output", width: 8 }],
-          data: { value: "1010" },
-        },
-        { id: "and-gate", kind: "and", displayName: "AND 门", position: { x: 440, y: 220 } },
-      ],
-      connections: [
-        {
-          id: "wire-a",
-          source: { component: "input-a", port: "out" },
-          target: { component: "and-gate", port: "in1" },
-          waypoints: [{ x: 330, y: 150 }, { x: 330, y: 250 }],
-          color: "cyan",
-        },
-      ],
-    },
-  });
-});
-
-test("round-trips a data-driven document without losing or shifting any field", () => {
-  const document: EditorDocument = {
-    components: [
-      component("in-bus", "input", "输入总线", at(0, 0), [
-        { name: "out", direction: "output", width: 8 },
-      ]),
-      component("split", "splitter", "拆线器", at(200, 0), [
-        { name: "in", direction: "input", width: 8 },
-        { name: "out0", direction: "output", width: 4, bitRange: { msb: 7, lsb: 4 } },
-        { name: "out1", direction: "output", width: 4, bitRange: { msb: 3, lsb: 0 } },
-      ]),
-      component("merge", "merger", "合线器", at(400, 0), [
-        { name: "in0", direction: "input", width: 4, bitRange: { msb: 7, lsb: 4 } },
-        { name: "in1", direction: "input", width: 4, bitRange: { msb: 3, lsb: 0 } },
-        { name: "out", direction: "output", width: 8 },
-      ]),
-      component("sink", "output", "输出", at(600, 0), [{ name: "in", direction: "input", width: 8 }]),
-    ],
-    connections: [
-      connection("w1", { componentId: "in-bus", port: "out" }, { componentId: "split", port: "in" }, {
-        waypoints: [at(100, -60)],
-        color: "violet",
-      }),
-      connection("w2", { componentId: "merge", port: "out" }, { componentId: "sink", port: "in" }),
-    ],
-  };
-  const inputValues = { "in-bus": "0110X01X" };
-
-  const file = serializeProjectFile({ document, inputValues });
-  const parsed = successOf(JSON.parse(JSON.stringify(file)));
-
-  // 端点 point 是占位零点（投影层对已连接端点自行推导），除此之外文档数据原样还原。
-  assert.deepEqual(parsed.document.components, document.components);
-  assert.deepEqual(parsed.document.connections, [
-    {
-      id: "w1",
-      source: { componentId: "in-bus", port: "out", point: at(0, 0) },
-      target: { componentId: "split", port: "in", point: at(0, 0) },
-      lifecycle: "visible",
-      danglingEndpoints: [],
-      waypoints: [at(100, -60)],
-      color: "violet",
-    },
-    {
-      id: "w2",
-      source: { componentId: "merge", port: "out", point: at(0, 0) },
-      target: { componentId: "sink", port: "in", point: at(0, 0) },
-      lifecycle: "visible",
-      danglingEndpoints: [],
-    },
-  ]);
-  assert.deepEqual(parsed.inputValues, inputValues);
-  assert.equal(parsed.version, PROJECT_FILE_VERSION);
-});
-
-test("round-trips a subcircuit reference, cached interface, and explicit order", () => {
-  const cachedPorts = [
-    { name: "Y", direction: "output" as const, width: 1 },
-    { name: "A", direction: "input" as const, width: 8 },
-  ];
+test("serializes a new circuit as the complete v2 file shape", () => {
   const document: EditorDocument = {
     components: [{
-      id: "u1",
-      kind: "subcircuit",
-      displayName: "算术子电路",
-      position: at(100, 80),
-      lifecycle: "active",
-      ports: cachedPorts,
-      data: { subcircuit: { reference: "./arith.circuit.json", cachedPorts, portOrder: ["Y", "A"] } },
+      id: "source", kind: "input", displayName: "输入", position: at(4, 8), lifecycle: "active",
+      ports: [port("out", "output", 4)],
     }],
     connections: [],
   };
-
-  const file = serializeProjectFile({ document });
-  assert.deepEqual(file.circuit.components[0]?.data, {
-    reference: "./arith.circuit.json",
-    cachedPorts,
-    portOrder: ["Y", "A"],
+  assert.deepEqual(serializeProjectFile({ document, inputValues: { source: "10X1" } }), {
+    version: PROJECT_FILE_VERSION,
+    circuit: {
+      components: [{ id: "source", kind: "input", displayName: "输入", position: at(4, 8), ports: [port("out", "output", 4)], data: { value: "10X1" } }],
+      connections: [],
+    },
+    definitions: {},
+    libraryRoots: [],
   });
-  const parsed = successOf(file);
+});
+
+test("round-trips embedded definitions, direct roots, cached ports, and connection geometry", () => {
+  const cachedPorts = [port("Y", "output"), port("A", "input", 8)];
+  const definitions = {
+    arithmetic: { displayName: "arith.circuit.json", circuit: passThrough() },
+    unused: { displayName: "unused.circuit.json", circuit: emptyCircuit() },
+  };
+  const document: EditorDocument = {
+    components: [{
+      id: "u1", kind: "subcircuit", displayName: "arith.circuit.json", position: at(120, 80),
+      lifecycle: "active", ports: cachedPorts,
+      data: { subcircuit: { definitionId: "arithmetic", cachedPorts, portOrder: ["Y", "A"], status: "resolved" } },
+    }],
+    connections: [{
+      id: "w1",
+      source: { componentId: "u1", port: "Y", point: at(0, 0) },
+      target: { componentId: "u1", port: "A", point: at(0, 0) },
+      lifecycle: "visible", danglingEndpoints: [],
+      waypoints: [at(140, 20)], color: "cyan",
+    } satisfies EditorConnection],
+  };
+  const file = serializeProjectFile({ document, definitions, libraryRoots: ["arithmetic"] });
+  assert.deepEqual(file.circuit.components[0]?.data, { definitionId: "arithmetic", cachedPorts, portOrder: ["Y", "A"] });
+  assert.equal(JSON.stringify(file).includes("reference"), false);
+  const parsed = successOf(JSON.parse(JSON.stringify(file)));
   assert.deepEqual(parsed.file, file);
-  assert.deepEqual(parsed.document.components[0]?.data?.subcircuit, {
-    reference: "./arith.circuit.json",
-    cachedPorts,
-    portOrder: ["Y", "A"],
-  });
+  assert.deepEqual(parsed.file.libraryRoots, ["arithmetic"]);
+  assert.deepEqual(Object.keys(parsed.file.definitions).sort(), ["arithmetic", "unused"]);
+  assert.deepEqual(parsed.document.components[0]?.data?.subcircuit, { definitionId: "arithmetic", cachedPorts, portOrder: ["Y", "A"] });
+  assert.deepEqual(parsed.document.connections[0]?.waypoints, [at(140, 20)]);
+  assert.equal(parsed.document.connections[0]?.color, "cyan");
 });
 
-test("rebases every subcircuit reference atomically for Save As", () => {
-  const file = {
-    version: 1,
-    circuit: {
-      components: [
-        {
-          id: "u1",
-          kind: "subcircuit" as const,
-          displayName: "子电路 1",
-          position: at(0, 0),
-          data: { reference: "../lib/child.circuit.json", cachedPorts: [{ name: "A", direction: "input" as const, width: 1 }] },
-        },
-      ],
-      connections: [],
-    },
-  };
-  const rebased = rebaseProjectFileReferences(file, "/repo/projects/root.circuit.json", "/archive/root.circuit.json", "posix");
-  assert.ok(rebased.ok);
-  assert.equal(rebased.value.circuit.components[0]?.data && "reference" in rebased.value.circuit.components[0].data
-    ? rebased.value.circuit.components[0].data.reference
-    : undefined, "../repo/lib/child.circuit.json");
-  assert.equal(file.circuit.components[0]?.data && "reference" in file.circuit.components[0].data
-    ? file.circuit.components[0].data.reference
-    : undefined, "../lib/child.circuit.json");
-
-  const mixed = {
-    ...file,
-    circuit: {
-      ...file.circuit,
-      components: [
-        ...file.circuit.components,
-        {
-          id: "u2",
-          kind: "subcircuit" as const,
-          displayName: "跨盘子电路",
-          position: at(20, 0),
-          data: { reference: "D:\\other\\child.circuit.json", cachedPorts: [] },
-        },
-      ],
-    },
-  };
-  const failed = rebaseProjectFileReferences(mixed, "C:\\work\\root.circuit.json", "C:\\archive\\root.circuit.json", "windows");
-  assert.equal(failed.ok, false);
-  if (!failed.ok) {
-    assert.equal(failed.error.code, "reference-rebase-cross-root");
-    assert.equal(failed.error.componentId, "u2");
+test("rejects every non-v2 version before interpreting the file", () => {
+  for (const version of [0, 1, 3]) {
+    const errors = failureOf({ version, circuit: emptyCircuit() });
+    assert.deepEqual(codesOf(errors), ["version-unsupported"]);
+    assert.match(errors[0]?.message ?? "", /不支持/);
   }
-  assert.equal(mixed.circuit.components[0]?.data && "reference" in mixed.circuit.components[0].data
-    ? mixed.circuit.components[0].data.reference
-    : undefined, "../lib/child.circuit.json");
+  assert.deepEqual(codesOf(failureOf({ circuit: emptyCircuit() })), ["version-missing"]);
+  assert.deepEqual(codesOf(failureOf({ version: "2", circuit: emptyCircuit() })), ["version-not-integer"]);
 });
 
-test("derives semantic waypoints from a render-only route, as the editor session does", () => {
-  // 示例文档的连接只带渲染 Route 没有 Waypoint 投影；序列化按会话移动元件时的同一条
-  // 规则取 Route 的中间点作 Waypoint，直连（两个端点）不产生 Waypoint。
-  const file = serializeProjectFile({ document: createAndDemoDocument() });
-  const connections = file.circuit.connections;
-  assert.deepEqual(connections[0]!.waypoints, [at(330, 150), at(330, 250)]);
-  assert.deepEqual(connections[1]!.waypoints, [at(330, 405), at(330, 290)]);
-  assert.equal(connections[2]!.waypoints, undefined);
+test("requires the v2 definition table and direct root list", () => {
+  assert.deepEqual(codesOf(failureOf({ version: 2, circuit: emptyCircuit() })), ["definitions-not-object"]);
+  assert.deepEqual(codesOf(failureOf({ version: 2, circuit: emptyCircuit(), definitions: {} })), ["library-roots-invalid"]);
+  assert.deepEqual(codesOf(failureOf(project(emptyCircuit(), {}, ["missing"]))), ["library-root-missing"]);
+  assert.deepEqual(codesOf(failureOf(project(emptyCircuit(), {}, ["same", "same"]))), ["library-roots-invalid"]);
+});
+
+test("accepts a missing definition and dangling Port while retaining the component and wire", () => {
+  const file = project({
+    components: [input("src", "SRC"), sub("missing-use", "deleted", [port("A", "input")])],
+    connections: [wire("w", "src", "out", "missing-use", "old-port")],
+  });
   const parsed = successOf(file);
-  assert.deepEqual(parsed.document.connections[0]!.waypoints, [at(330, 150), at(330, 250)]);
+  assert.equal(parsed.file.circuit.components[1]?.kind, "subcircuit");
+  assert.equal(parsed.file.circuit.connections[0]?.target.port, "old-port");
+  assert.equal(parsed.document.connections[0]?.target.port, "old-port");
 });
 
-test("keeps port lists off built-in gates and ignores stray ones in files", () => {
-  const document: EditorDocument = {
-    components: [component("gate", "and", "与门", at(0, 0))],
-    connections: [],
-  };
-  const file = serializeProjectFile({ document });
-  assert.equal("ports" in file.circuit.components[0]!, false);
-
-  // 文件里给内置门带 ports 属于未知数据：容忍忽略，不报错也不进结果。
-  const parsed = successOf({
-    version: 1,
-    circuit: {
-      components: [
-        { id: "gate", kind: "and", displayName: "与门", position: { x: 0, y: 0 }, ports: [{ name: "out", direction: "output", width: 1 }] },
-      ],
-      connections: [],
-    },
-  });
-  assert.equal("ports" in parsed.document.components[0]!, false);
+test("rejects definition cycles while accepting repeated uses of one definition", () => {
+  const shared = { displayName: "Shared", circuit: passThrough() };
+  const valid = project({ components: [sub("a", "shared"), sub("b", "shared")], connections: [] }, { shared }, ["shared"]);
+  assert.equal(successOf(valid).file.circuit.components.length, 2);
+  const cyclic = project(emptyCircuit(), {
+    a: { displayName: "A", circuit: { components: [sub("to-b", "b")], connections: [] } },
+    b: { displayName: "B", circuit: { components: [sub("to-a", "a")], connections: [] } },
+  }, ["a"]);
+  assert.ok(codesOf(failureOf(cyclic)).includes("definition-cycle"));
 });
 
-test("leaves session-only state out of the file", () => {
-  const document: EditorDocument = {
+test("treats prototype-like definition IDs as data rather than inherited definitions", () => {
+  const missing = project({ components: [sub("u", "toString")], connections: [] });
+  assert.equal(successOf(missing).file.circuit.components[0]?.data && "definitionId" in successOf(missing).file.circuit.components[0]!.data!, true);
+  const definitions = Object.fromEntries([
+    ["__proto__", { displayName: "Proto", circuit: passThrough() }],
+    ["toString", { displayName: "String", circuit: passThrough() }],
+  ]);
+  const parsed = successOf(project(emptyCircuit(), definitions, ["__proto__", "toString"]));
+  assert.equal(Object.hasOwn(parsed.file.definitions, "__proto__"), true);
+  assert.equal(Object.hasOwn(parsed.file.definitions, "toString"), true);
+});
+
+test("rejects malformed components and missing endpoint components atomically", () => {
+  const malformed = project({
     components: [
-      component("kept", "input", "保留", at(0, 0)),
-      { ...component("gone", "or", "已删除", at(10, 10)), lifecycle: "deleted" },
+      input("same", "A"),
+      input("same", "B"),
+      { id: "unknown", kind: "future" as "and", displayName: "?", position: at(0, 0) },
     ],
-    connections: [
-      // 悬空连线（端点指向已删除元件）也不是文件内容：引用必须可解析，否则保存出的文件永远打不开。
-      connection("dangling-wire", { componentId: "kept", port: "out" }, { componentId: "gone", port: "in" }),
-      { ...connection("hidden-wire", { componentId: "kept", port: "out" }, { componentId: "gone", port: "in" }), lifecycle: "hidden" },
-    ],
-  };
-  const file = serializeProjectFile({ document });
-  assert.deepEqual(
-    file.circuit.components.map((entry) => entry.id),
-    ["kept"],
-  );
-  assert.deepEqual(file.circuit.connections, []);
+    connections: [wire("orphan", "same", "out", "absent", "in")],
+  });
+  const codes = codesOf(failureOf(malformed));
+  assert.ok(codes.includes("component-id-duplicate"));
+  assert.ok(codes.includes("component-kind-unknown"));
+  assert.ok(codes.includes("connection-endpoint-unresolved"));
 });
 
-test("rejects a missing, non-integer, or newer version with a displayable reason", () => {
-  const shape = { circuit: { components: [], connections: [] } };
-  assert.deepEqual(codesOf(failureOf(shape)), ["version-missing"]);
-  for (const version of [1.5, "1", null, true]) {
-    assert.deepEqual(codesOf(failureOf({ ...shape, version })), ["version-not-integer"]);
-  }
-  const newer = failureOf({ ...shape, version: 2 });
-  assert.deepEqual(codesOf(newer), ["version-unsupported"]);
-  assert.match(newer[0]!.message, /更新版本/);
-  assert.ok(successOf({ ...shape, version: 1 }).version === 1);
+test("an import creates a fresh source-independent definition without changing the parent", () => {
+  const source = project(passThrough());
+  const parent = project();
+  let sequence = 0;
+  const allocate = () => "import-" + ++sequence;
+  const first = importProjectSnapshot(parent, source, "first.circuit.json", allocate);
+  assert.ok(first.ok, first.ok ? "" : first.errors.map((error) => error.message).join("; "));
+  assert.deepEqual(first.ports, [port("A", "input"), port("Y", "output")]);
+  assert.equal(parent.libraryRoots.length, 0);
+  assert.equal(first.file.definitions[first.definitionId]?.displayName, "first.circuit.json");
+  const second = importProjectSnapshot(first.file, source, "second.circuit.json", allocate);
+  assert.ok(second.ok, second.ok ? "" : second.errors.map((error) => error.message).join("; "));
+  assert.notEqual(first.definitionId, second.definitionId);
+  assert.deepEqual(second.file.libraryRoots, [first.definitionId, second.definitionId]);
+  Object.assign(source.circuit.components[0]!, { displayName: "changed source" });
+  assert.equal(second.file.definitions[first.definitionId]?.circuit.components[0]?.displayName, "A");
+  assert.equal(second.file.definitions[second.definitionId]?.circuit.components[0]?.displayName, "A");
 });
 
-test("tolerates unknown fields anywhere inside v1", () => {
-  const parsed = successOf({
-    version: 1,
-    meta: { savedBy: "future-app" },
-    circuit: {
-      components: [
-        {
-          id: "input-a",
-          kind: "input",
-          displayName: "输入 A",
-          position: { x: 110, y: 100, z: 9 },
-          rotation: 90,
-          data: { value: "10", pin: 3 },
-        },
-      ],
-      connections: [
-        {
-          id: "wire-a",
-          source: { component: "input-a", port: "out" },
-          target: { component: "input-a", port: "out" },
-          route: [{ x: 1, y: 2 }, { x: 3, y: 4 }],
-        },
-      ],
-    },
-  });
-  // 渲染 Route 即便出现在文件里也被忽略——文件只存语义 Waypoint。
-  assert.deepEqual(parsed.document.components[0]!.position, { x: 110, y: 100 });
-  assert.deepEqual(parsed.inputValues, { "input-a": "10" });
-  assert.equal("route" in parsed.document.connections[0]!, false);
+test("import includes only recursively reachable definitions and preserves sharing within one closure", () => {
+  const source = project({
+    components: [sub("b1", "B"), sub("b2", "B")], connections: [],
+  }, {
+    B: { displayName: "B", circuit: { components: [sub("c", "C")], connections: [] } },
+    C: { displayName: "C", circuit: passThrough() },
+    idle: { displayName: "idle", circuit: emptyCircuit() },
+  }, ["B", "idle"]);
+  const result = importProjectSnapshot(project(), source, "A", (() => { let id = 0; return () => "new-" + ++id; })());
+  assert.ok(result.ok, result.ok ? "" : result.errors.map((error) => error.message).join("; "));
+  assert.equal(Object.keys(result.file.definitions).length, 3);
+  assert.equal(result.file.libraryRoots.length, 1);
+  const root = result.file.definitions[result.definitionId]!;
+  const bIds = root.circuit.components.map((component) => component.data && "definitionId" in component.data ? component.data.definitionId : null);
+  assert.equal(bIds[0], bIds[1]);
+  assert.equal(Object.values(result.file.definitions).some((definition) => definition.displayName === "idle"), false);
 });
 
-test("rejects the whole file on duplicate component ids and unresolved endpoint references", () => {
-  const duplicate = failureOf({
-    version: 1,
-    circuit: {
-      components: [
-        { id: "dup", kind: "input", displayName: "A", position: { x: 0, y: 0 } },
-        { id: "dup", kind: "output", displayName: "B", position: { x: 1, y: 1 } },
-      ],
-      connections: [],
-    },
-  });
-  assert.deepEqual(codesOf(duplicate), ["component-id-duplicate"]);
-
-  // 多处缺陷一次报全：结构化错误列表，不是 fail-fast 的第一条。
-  const broken = failureOf({
-    version: 1,
-    circuit: {
-      components: [
-        { id: "a", kind: "input", displayName: "A", position: { x: 0, y: 0 } },
-        { id: "a", kind: "output", displayName: "B", position: { x: 1, y: 1 } },
-      ],
-      connections: [
-        { id: "w", source: { component: "a", port: "out" }, target: { component: "ghost", port: "in" } },
-      ],
-    },
-  });
-  assert.deepEqual(codesOf(broken).sort(), ["component-id-duplicate", "connection-endpoint-unresolved"]);
-
-  // 整体拒绝：结果里没有可用的半成品文档。
-  const result = parseProjectFile({
-    version: 1,
-    circuit: {
-      components: [{ id: "a", kind: "input", displayName: "A", position: { x: 0, y: 0 } }],
-      connections: [
-        { id: "w", source: { component: "ghost", port: "in" }, target: { component: "a", port: "in" } },
-      ],
-    },
-  });
-  assert.ok(!result.ok);
-  assert.equal("value" in result, false);
-});
-
-test("reports malformed structure with specific reasons", () => {
-  assert.deepEqual(codesOf(failureOf("not an object")), ["root-not-object"]);
-  assert.deepEqual(codesOf(failureOf({ version: 1 })), ["circuit-not-object"]);
-  assert.deepEqual(
-    codesOf(failureOf({ version: 1, circuit: { components: "no", connections: [] } })),
-    ["components-not-array"],
-  );
-  assert.deepEqual(
-    codesOf(failureOf({ version: 1, circuit: { components: [], connections: 42 } })),
-    ["connections-not-array"],
-  );
-
-  const cases: readonly [unknown, string][] = [
-    [{ kind: "input", displayName: "A", position: { x: 0, y: 0 } }, "component-id-invalid"],
-    [{ id: "a", kind: "future_gate", displayName: "A", position: { x: 0, y: 0 } }, "component-kind-unknown"],
-    [{ id: "a", kind: "input", displayName: "A", position: { x: 0, y: "0" } }, "component-position-invalid"],
-    [
-      { id: "a", kind: "input", displayName: "A", position: { x: 0, y: 0 }, ports: [{ name: "out", direction: "output", width: 0 }] },
-      "component-ports-invalid",
-    ],
-    [
-      { id: "a", kind: "splitter", displayName: "S", position: { x: 0, y: 0 }, ports: [{ name: "in", direction: "input", width: 2, bitRange: { msb: 0, lsb: 3 } }] },
-      "component-ports-invalid",
-    ],
-    [{ id: "a", kind: "input", displayName: "A", position: { x: 0, y: 0 }, data: { value: 10 } }, "component-data-invalid"],
-  ];
-  for (const [componentRecord, code] of cases) {
-    const errors = failureOf({
-      version: 1,
-      circuit: { components: [componentRecord], connections: [] },
-    });
-    assert.ok(codesOf(errors).includes(code), `expected ${code} in ${JSON.stringify(codesOf(errors))}`);
-  }
-
-  const connectionCases: readonly [unknown, string][] = [
-    [{ source: { component: "a", port: "out" }, target: { component: "a", port: "in" } }, "connection-id-invalid"],
-    [{ id: "w", source: { component: "a" }, target: { component: "a", port: "in" } }, "connection-endpoint-invalid"],
-    [{ id: "w", source: { component: "a", port: "out" }, target: { component: "a", port: "in" }, waypoints: [{ x: 1 }] }, "connection-waypoints-invalid"],
-    [{ id: "w", source: { component: "a", port: "out" }, target: { component: "a", port: "in" }, color: "mauve" }, "connection-color-invalid"],
-  ];
-  for (const [connectionRecord, code] of connectionCases) {
-    const errors = failureOf({
-      version: 1,
-      circuit: {
-        components: [{ id: "a", kind: "input", displayName: "A", position: { x: 0, y: 0 } }],
-        connections: [connectionRecord],
-      },
-    });
-    assert.ok(codesOf(errors).includes(code), `expected ${code} in ${JSON.stringify(codesOf(errors))}`);
-  }
-});
-
-test("round-trips an empty circuit and a portless input without errors", () => {
-  const empty = successOf(serializeProjectFile({ document: { components: [], connections: [] } }));
-  assert.deepEqual(empty.document, { components: [], connections: [] });
-  assert.deepEqual(empty.inputValues, {});
-
-  // 从未被引擎推送过的文档元件没有端口清单：文件里不写 ports，解析后同样不带。
-  const fresh = serializeProjectFile({
-    document: { components: [component("in", "input", "输入", at(0, 0))], connections: [] },
-    inputValues: { in: "1" },
-  });
-  assert.equal("ports" in fresh.circuit.components[0]!, false);
-  const parsed = successOf(fresh);
-  assert.equal("ports" in parsed.document.components[0]!, false);
-  assert.deepEqual(parsed.inputValues, { in: "1" });
+test("failed import leaves the parent untouched", () => {
+  const parent = project();
+  const source = project(passThrough());
+  const duplicate = importProjectSnapshot(parent, source, "A", () => "");
+  assert.equal(duplicate.ok, false);
+  assert.deepEqual(parent, project());
+  const clock = project({ components: [{ id: "clock", kind: "clock", displayName: "Clock", position: at(0, 0) }], connections: [] });
+  const rejected = importProjectSnapshot(parent, clock, "Clock", () => "clock-root");
+  assert.equal(rejected.ok, false);
+  assert.deepEqual(parent, project());
 });
