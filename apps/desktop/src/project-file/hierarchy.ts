@@ -2,7 +2,7 @@ import type { ComponentKindName, PortSpec } from "@circuit-platform/protocol";
 import type { SubcircuitComponentData, SubcircuitDiagnostic } from "../editor/component.ts";
 import type { EditorComponent, EditorConnection, EditorDocument, InternalComponentDescriptor, Point } from "../editor/index.ts";
 import type { ProjectFileComponent, ProjectFileData } from "./index.ts";
-import { projectPathIdentity, resolveProjectReference, type PathPlatform } from "./paths.ts";
+import { projectPathIdentity, type PathPlatform } from "./paths.ts";
 
 /** 供层次解析模块使用的最小子 Project 读取器；实现可以接文件、内存图或测试夹具。 */
 export interface HierarchyProjectReader {
@@ -157,7 +157,15 @@ export async function flattenProjectHierarchy(input: FlattenProjectInput): Promi
     visibleSubcircuits: {},
     diagnostics: [],
   };
-  await flattenOccurrence(input.root, rootIdentity, [], [], false, [], output, input.reader, platform);
+  const embeddedReader: HierarchyProjectReader = {
+    async read(definitionId) {
+      const definition = Object.hasOwn(input.root.definitions, definitionId) ? input.root.definitions[definitionId] : undefined;
+      return definition === undefined
+        ? { ok: false, code: "definition-missing", message: `父 Project 中缺少子电路定义「${definitionId}」。` }
+        : { ok: true, value: { ...input.root, circuit: definition.circuit } };
+    },
+  };
+  await flattenOccurrence(input.root, rootIdentity, [], [], false, [], output, embeddedReader, platform);
   const rootDocument = documentForProject(input.root, output);
 
   return {
@@ -242,8 +250,7 @@ async function flattenOccurrence(
   for (const component of project.circuit.components) {
     if (component.kind === "subcircuit") {
       const data = subcircuitDataOf(component);
-      const childIdentity = data === undefined ? null : resolveProjectReference(data.reference, identity, platform);
-      const childKey = childIdentity === null ? null : projectPathIdentity(childIdentity, platform);
+      const childKey = data?.definitionId ?? null;
       if (data === undefined || childKey === null) {
         const diagnostic = diagnosticFor("subcircuit-data-invalid", "Subcircuit 缺少有效引用数据。", identity, component.id, [...stack, identity]);
         output.diagnostics.push(diagnostic);
@@ -291,7 +298,7 @@ async function flattenOccurrence(
       mergeOutput(output, childOutput);
       const subData: SubcircuitComponentData = {
         ...(data ?? { reference: "", cachedPorts: [] }),
-        reference: data?.reference ?? "",
+        definitionId: childKey,
         cachedPorts: childInterface.ports,
         ...(data?.portOrder !== undefined ? { portOrder: [...data.portOrder] } : {}),
         status: "resolved",
@@ -589,9 +596,10 @@ async function readChild(reader: HierarchyProjectReader, identity: string, occur
 }
 
 function subcircuitDataOf(entry: ProjectFileComponent): SubcircuitComponentData | undefined {
-  if (entry.kind !== "subcircuit" || entry.data === undefined || !("reference" in entry.data)) return undefined;
+  if (entry.kind !== "subcircuit" || entry.data === undefined || !("definitionId" in entry.data)) return undefined;
   return {
-    reference: entry.data.reference,
+    definitionId: entry.data.definitionId,
+    reference: "",
     cachedPorts: entry.data.cachedPorts.map(clonePort),
     ...(entry.data.portOrder !== undefined ? { portOrder: [...entry.data.portOrder] } : {}),
   };
@@ -604,6 +612,7 @@ function updateVisibleSubcircuit(output: MutableOutput, componentId: string, dat
 function unresolvedData(data: SubcircuitComponentData | undefined, diagnostic: HierarchyDiagnostic): SubcircuitComponentData {
   return {
     reference: data?.reference ?? "",
+    ...(data?.definitionId !== undefined ? { definitionId: data.definitionId } : {}),
     cachedPorts: data?.cachedPorts ?? [],
     ...(data?.portOrder !== undefined ? { portOrder: [...data.portOrder] } : {}),
     status: "unresolved",

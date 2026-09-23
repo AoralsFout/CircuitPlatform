@@ -18,15 +18,16 @@ export interface SubcircuitDiagnostic {
 
 /** Subcircuit 保存在 EditorComponent 上的类型数据。 */
 export interface SubcircuitComponentData {
-  /** 文件中保存的原始相对引用。 */
-  reference: string;
+  /** 父 Project 内的定义身份；定义缺失时仍保留此 ID 供修复。 */
+  definitionId?: string;
   /** 最近一次采用的有序缓存接口。 */
   cachedPorts: readonly PortSpec[];
   /** 可选的完整、无重复 Port 名顺序。 */
   portOrder?: readonly string[];
   /** 运行时解析状态；未落盘的会话信息不参与序列化。 */
   status?: SubcircuitStatus;
-  /** 运行时规范化目标身份；不参与序列化。 */
+  /** 兼容旧工作区运行时的暂存字段；v2 项目文件不保存源路径。 */
+  reference: string;
   targetIdentity?: string;
   /** 运行时诊断；不参与序列化。 */
   diagnostic?: SubcircuitDiagnostic;

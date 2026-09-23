@@ -48,6 +48,7 @@ import {
   type FlattenProjectResult,
   type HierarchyProjectReader,
 } from "../project-file/hierarchy.ts";
+import { importProjectSnapshot } from "../project-file/definitions.ts";
 import {
   forgetRecentProject,
   projectDisplayName,
@@ -412,6 +413,9 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   let adoptedCircuit: CircuitDocument | null = null;
   /** 当前显式采用的 Project 图快照；普通编辑与引擎重建只读这份内存图。 */
   let adoptedProjectFiles: Map<string, ProjectFileData> | null = null;
+  /** 当前文档拥有的内嵌定义；未保存文档也从此处序列化。 */
+  let embeddedDefinitions: ProjectFileData["definitions"] = {};
+  let embeddedLibraryRoots: ProjectFileData["libraryRoots"] = [];
   /** 每个顶层 Subcircuit occurrence 独立记录它实际采用的磁盘快照版本。 */
   const adoptedOccurrenceVersions = new Map<string, string>();
   /** 只存 occurrence key，不把 stale 合并到文档 dirty 或解析 status。 */
@@ -512,6 +516,8 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     return JSON.stringify(serializeProjectFile({
       document: snapshot.document,
       inputValues: state.value.inputValues,
+      definitions: embeddedDefinitions,
+      libraryRoots: embeddedLibraryRoots,
     }));
   }
 
@@ -846,9 +852,14 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     readThrough: boolean,
     refreshRoots?: readonly HierarchyRefreshRoot[],
   ): Promise<FlattenProjectResult | null> {
-    const rootPath = projectPath.value;
-    if (rootPath === null) return null;
-    const rootFile = serializeProjectFile({ document, inputValues: state.value.inputValues });
+    const rootPath = projectPath.value ?? "untitled.circuit.json";
+    const proposed = projectFiles.get(projectPathIdentity(rootPath));
+    const rootFile = serializeProjectFile({
+      document,
+      inputValues: state.value.inputValues,
+      definitions: proposed?.definitions ?? embeddedDefinitions,
+      libraryRoots: proposed?.libraryRoots ?? embeddedLibraryRoots,
+    });
     projectFiles.set(projectPathIdentity(rootPath), rootFile);
     const flattened = await flattenProjectHierarchy({
       rootIdentity: rootPath,
@@ -870,7 +881,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
 
   /** 成功的普通编辑同步到已采用层次快照；这里只重算内存投影，不触发任何引擎调用。 */
   async function syncAdoptedHierarchyFromEditor(): Promise<void> {
-    if (adoptedHierarchy === null || adoptedProjectFiles === null || projectPath.value === null || editor === null) return;
+    if (adoptedHierarchy === null || adoptedProjectFiles === null || editor === null) return;
     const cache = new Map(adoptedProjectFiles);
     const flattened = await flattenVisibleDocument(editor.snapshot().document, cache, false);
     if (flattened === null) return;
@@ -917,6 +928,11 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     adoptedHierarchy = hierarchy;
     adoptedCircuit = circuitFromHierarchy(hierarchy);
     adoptedProjectFiles = projectFiles;
+    const rootFile = projectFiles.get(projectPathIdentity(projectPath.value ?? "untitled.circuit.json"));
+    if (rootFile !== undefined) {
+      embeddedDefinitions = rootFile.definitions;
+      embeddedLibraryRoots = rootFile.libraryRoots;
+    }
     captureOccurrenceVersions(hierarchy, projectFiles);
     adoptedProjectionRevisions.set(revision, {
       hierarchy,
@@ -938,6 +954,9 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     adoptedHierarchy = { ...adopted.hierarchy, document: editor!.snapshot().document };
     adoptedCircuit = circuitFromHierarchy(adopted.hierarchy);
     adoptedProjectFiles = new Map(adopted.projectFiles);
+    const rootFile = adoptedProjectFiles.get(projectPathIdentity(projectPath.value ?? "untitled.circuit.json"));
+    embeddedDefinitions = rootFile?.definitions ?? {};
+    embeddedLibraryRoots = rootFile?.libraryRoots ?? [];
     adoptedOccurrenceVersions.clear();
     for (const [key, version] of adopted.occurrenceVersions) adoptedOccurrenceVersions.set(key, version);
     staleOccurrences.clear();
@@ -1127,6 +1146,9 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     adoptedHierarchy = adopted;
     adoptedCircuit = circuit;
     adoptedProjectFiles = projectFiles;
+    const rootFile = path === null ? undefined : projectFiles?.get(projectPathIdentity(path));
+    embeddedDefinitions = rootFile?.definitions ?? {};
+    embeddedLibraryRoots = rootFile?.libraryRoots ?? [];
     adoptedOccurrenceVersions.clear();
     staleOccurrences.clear();
     projectPath.value = path;
@@ -1353,7 +1375,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
 
   /** 复制 Subcircuit 的引用与当前缓存接口；内部结构由同一内存快照重新展平。 */
   async function duplicateSubcircuit(source: EditorComponent): Promise<boolean> {
-    if (adoptedProjectFiles === null || projectPath.value === null || editor === null) return false;
+    if (adoptedProjectFiles === null || editor === null) return false;
     const snapshot = editor.snapshot();
     const duplicate: EditorComponent = {
       ...source,
@@ -1376,30 +1398,47 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     return hierarchy !== null && replaceHierarchyProjection(hierarchy, cache);
   }
 
-  /**
-   * 从文件选择器添加 Subcircuit。父文档没有路径时先沿用既有保存流程建立身份；
-   * 取消、读取失败、接口非法或成环都不会发布文档或历史。
-   */
+  /** 从已保存的 v2 文件导入独立定义并放置；失败和取消均不改变父文档。 */
   async function addSubcircuitFromDialog(center: Point = { x: 240, y: 180 }): Promise<boolean> {
     if (editor === null) return false;
-    if (projectPath.value === null && !(await saveAs())) return false;
-    const parentPath = projectPath.value;
-    if (parentPath === null) return false;
     const picked = await adapter.pickOpenPath();
     if (!picked.ok) {
       if (picked.reason !== "canceled") openError.value = picked.reason;
       return false;
     }
-    if (projectPathIdentity(picked.path) === projectPathIdentity(parentPath)) {
-      openError.value = "检测到 Subcircuit 直接自引用，不能把父 Project 作为自身的 Subcircuit。";
+    const read = await adapter.readProjectFile(picked.path);
+    if (!read.ok) {
+      openError.value = read.reason;
       return false;
     }
-    const reference = relativeProjectReference(picked.path, parentPath);
-    if (reference === null) {
-      openError.value = "所选 Project 与父 Project 不在同一路径根下，无法保存为可移植的相对引用。";
+    let raw: unknown;
+    try {
+      raw = JSON.parse(read.content);
+    } catch (error) {
+      openError.value = `项目文件不是合法的 JSON：${error instanceof Error ? error.message : "解析失败"}`;
+      return false;
+    }
+    const parsed = parseProjectFile(raw);
+    if (!parsed.ok) {
+      openError.value = parsed.errors[0]?.message ?? "项目文件校验失败。";
       return false;
     }
     const snapshot = editor.snapshot();
+    const parent = serializeProjectFile({
+      document: snapshot.document,
+      inputValues: state.value.inputValues,
+      definitions: embeddedDefinitions,
+      libraryRoots: embeddedLibraryRoots,
+    });
+    const imported = importProjectSnapshot(parent, parsed.value.file, projectDisplayName(picked.path), (used) => {
+      let index = 1;
+      while (used.has(`definition-${index}`)) index += 1;
+      return `definition-${index}`;
+    });
+    if (!imported.ok) {
+      openError.value = imported.errors[0]?.message ?? "不能导入这个 Project。";
+      return false;
+    }
     const id = nextComponentId(snapshot.document);
     const candidate: EditorComponent = {
       id,
@@ -1407,12 +1446,13 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
       displayName: projectDisplayName(picked.path),
       position: { ...center },
       lifecycle: "active",
-      ports: [],
-      data: { subcircuit: { reference, cachedPorts: [], status: "resolving" } },
+      ports: imported.ports,
+      data: { subcircuit: { definitionId: imported.definitionId, reference: "", cachedPorts: imported.ports } },
     };
     const document = { ...snapshot.document, components: [...snapshot.document.components, candidate] };
     const cache = new Map(adoptedProjectFiles ?? []);
-    const hierarchy = await flattenVisibleDocument(document, cache, true, [{ identity: projectPathIdentity(picked.path), occurrencePath: [id] }]);
+    cache.set(projectPathIdentity(projectPath.value ?? "untitled.circuit.json"), imported.file);
+    const hierarchy = await flattenVisibleDocument(document, cache, false);
     const added = hierarchy?.document.components.find((component) => component.id === id);
     if (hierarchy === null || added?.data?.subcircuit?.status !== "resolved") {
       const diagnostic = hierarchy?.diagnostics.find((item) => item.componentId === id);
@@ -1560,45 +1600,25 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
       return false;
     }
     const previousPath = projectPath.value;
-    if (fileOverride !== undefined && editor !== null) {
-      const references = Object.fromEntries(fileOverride.circuit.components.flatMap((component) =>
-        component.kind === "subcircuit" && component.data !== undefined && "reference" in component.data
-          ? [[component.id, component.data.reference] as const]
-          : []));
-      editor.rewriteSubcircuitReferences(references);
-      editorState.value = editor.snapshot();
-      if (previousPath !== null) {
-        for (const [revision, adopted] of adoptedProjectionRevisions) {
-          const oldRoot = adopted.projectFiles.get(projectPathIdentity(previousPath));
-          if (oldRoot === undefined) continue;
-          const rebased = rebaseProjectFileReferences(oldRoot, previousPath, path);
-          if (!rebased.ok) continue;
-          const historicalReferences = Object.fromEntries(rebased.value.circuit.components.flatMap((component) =>
-            component.kind === "subcircuit" && component.data !== undefined && "reference" in component.data
-              ? [[component.id, component.data.reference] as const]
-              : []));
-          const projectFiles = new Map(adopted.projectFiles);
-          projectFiles.delete(projectPathIdentity(previousPath));
-          projectFiles.set(projectPathIdentity(path), rebased.value);
-          adoptedProjectionRevisions.set(revision, {
-            hierarchy: {
-              ...adopted.hierarchy,
-              document: documentWithReferences(adopted.hierarchy.document, historicalReferences),
-            },
-            projectFiles,
-            occurrenceVersions: new Map(adopted.occurrenceVersions),
-            staleOccurrences: new Set(adopted.staleOccurrences),
-          });
-        }
+    const previousKey = projectPathIdentity(previousPath ?? "untitled.circuit.json");
+    const nextKey = projectPathIdentity(path);
+    if (previousKey !== nextKey) {
+      for (const adopted of adoptedProjectionRevisions.values()) {
+        const historicalFile = adopted.projectFiles.get(previousKey);
+        if (historicalFile === undefined) continue;
+        adopted.projectFiles.delete(previousKey);
+        adopted.projectFiles.set(nextKey, historicalFile);
       }
     }
     projectPath.value = path;
     if (adoptedProjectFiles !== null) {
       const cache = new Map(adoptedProjectFiles);
-      if (previousPath !== null) cache.delete(projectPathIdentity(previousPath));
+      cache.delete(previousKey);
       const currentFile = fileOverride ?? serializeProjectFile({
         document: editor!.snapshot().document,
         inputValues: state.value.inputValues,
+        definitions: embeddedDefinitions,
+        libraryRoots: embeddedLibraryRoots,
       });
       cache.set(projectPathIdentity(path), currentFile);
       adoptedProjectFiles = cache;
@@ -1623,7 +1643,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
       return false;
     }
     const current = editor.snapshot();
-    const file = serializeProjectFile({ document: current.document, inputValues: state.value.inputValues });
+    const file = serializeProjectFile({ document: current.document, inputValues: state.value.inputValues, definitions: embeddedDefinitions, libraryRoots: embeddedLibraryRoots });
     return saveToPath(dialog.path, file);
   }
 
@@ -1635,7 +1655,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
    */
   async function saveToPath(path: string, preparedFile?: ProjectFileData): Promise<boolean> {
     if (!editor) return false;
-    const current = preparedFile ?? serializeProjectFile({ document: editor.snapshot().document, inputValues: state.value.inputValues });
+    const current = preparedFile ?? serializeProjectFile({ document: editor.snapshot().document, inputValues: state.value.inputValues, definitions: embeddedDefinitions, libraryRoots: embeddedLibraryRoots });
     if (projectPath.value === null || projectPathIdentity(projectPath.value) === projectPathIdentity(path)) {
       return commitSave(path, current);
     }
@@ -1750,9 +1770,9 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
             for (const component of parsed.value.file.circuit.components) {
               if (component.kind !== "subcircuit") continue;
               const data = component.data;
-              if (!data || !("reference" in data)) continue;
+              if (!data || !("definitionId" in data)) continue;
               refreshing.add(hierarchyCacheKey(
-                resolveProjectReference(data.reference, identity),
+                data.definitionId,
                 [...occurrencePath, component.id],
               ));
             }
