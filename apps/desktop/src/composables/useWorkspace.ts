@@ -46,7 +46,7 @@ import {
   type FlattenProjectResult,
   type HierarchyProjectReader,
 } from "../project-file/hierarchy.ts";
-import { importProjectSnapshot, portsForDefinition } from "../project-file/definitions.ts";
+import { affectedOccurrencePaths, importProjectSnapshot, portsForDefinition, reimportProjectSnapshot } from "../project-file/definitions.ts";
 import { buildLibraryTree, definitionDisplayNames, labelDefinitionUses, type LibraryNode } from "../project-file/library.ts";
 import {
   forgetRecentProject,
@@ -210,6 +210,8 @@ export interface WorkspaceBinding {
   placeImportedSubcircuit(definitionId: string, center?: Point): Promise<boolean>;
   /** 修改单个定义的名称，并同步所有使用处的非画布显示名称。 */
   renameImportedSubcircuit(definitionId: string, name: string): Promise<boolean>;
+  /** 重新选择已保存的 v2 文件，兼容替换指定定义及其下层闭包；失败不建立历史帧。 */
+  reimportEmbeddedDefinition(definitionId: string): Promise<boolean>;
   /** 直接导入的定义及递归依赖；每次状态更新均从父工程快照推导。 */
   libraryTree: ComputedRef<readonly LibraryNode[]>;
   /** 显式重新读取并采用一个 Subcircuit 及其递归依赖；磁盘变化不会自动传播。 */
@@ -828,6 +830,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     hierarchy: FlattenProjectResult,
     forceReplaceOwner?: EditorComponentId,
     revision?: string,
+    forceReplaceFlatIds?: readonly string[],
   ): EditorProjectionInput {
     const portSources = Object.fromEntries(
       Object.entries(hierarchy.sources.ports).map(([componentId, ports]) => [
@@ -856,6 +859,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
       portSources,
       ...(forceReplaceOwner !== undefined ? { forceReplaceOwner } : {}),
       ...(revision !== undefined ? { revision } : {}),
+      ...(forceReplaceFlatIds !== undefined ? { forceReplaceFlatIds } : {}),
     };
   }
 
@@ -926,13 +930,14 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     hierarchy: FlattenProjectResult,
     projectFiles: Map<string, ProjectFileData>,
     forceReplaceOwner?: EditorComponentId,
+    forceReplaceFlatIds?: readonly string[],
   ): Promise<boolean> {
     if (editor === null) return false;
     const revision = `hierarchy-${nextProjectionRevision++}`;
     pendingHierarchyForBindings = hierarchy;
     let result: CommandResult;
     try {
-      result = await editor.replaceProjection(editorProjectionFromHierarchy(hierarchy, forceReplaceOwner, revision));
+      result = await editor.replaceProjection(editorProjectionFromHierarchy(hierarchy, forceReplaceOwner, revision, forceReplaceFlatIds));
     } finally {
       pendingHierarchyForBindings = null;
     }
@@ -1216,7 +1221,11 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
         // EditorSession 只询问一个布尔可用性 seam；引擎状态仍留在 Workspace 快照中。
         isEngineAvailable: () => workspace.snapshot().engineState === "ready",
         onBindingsChanged(nextBindings) {
-          const hierarchyForBindings = pendingHierarchyForBindings ?? adoptedHierarchy;
+          // 撤销/重做先由 EditorSession 切换投影，再回调绑定；按目标 revision 取对应
+          // 内部元件描述，避免新定义的描述混入恢复后的旧引擎状态。
+          const revision = editor?.projection()?.revision;
+          const hierarchyForBindings = pendingHierarchyForBindings ??
+            (revision === undefined ? undefined : adoptedProjectionRevisions.get(revision)?.hierarchy) ?? adoptedHierarchy;
           const projected = hierarchyForBindings === null
             ? nextBindings
             : {
@@ -1554,6 +1563,52 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     if (hierarchy === null) return false;
     const committed = await replaceHierarchyProjection(hierarchy, cache);
     openError.value = committed ? null : (editor.snapshot().error?.message ?? "子电路改名失败。");
+    return committed;
+  }
+
+  /** 从文件重新导入选中定义；只在完整候选展平和引擎事务成功后采用定义图。 */
+  async function reimportEmbeddedDefinition(definitionId: string): Promise<boolean> {
+    if (editor === null || !embeddedDefinitions[definitionId]) {
+      openError.value = "所选子电路定义已不存在。";
+      return false;
+    }
+    const picked = await adapter.pickOpenPath();
+    if (!picked.ok) {
+      if (picked.reason !== "canceled") openError.value = picked.reason;
+      return false;
+    }
+    const read = await adapter.readProjectFile(picked.path);
+    if (!read.ok) { openError.value = read.reason; return false; }
+    let raw: unknown;
+    try { raw = JSON.parse(read.content); }
+    catch (error) {
+      openError.value = `项目文件不是合法的 JSON：${error instanceof Error ? error.message : "解析失败"}`;
+      return false;
+    }
+    const parsed = parseProjectFile(raw);
+    if (!parsed.ok) { openError.value = parsed.errors[0]?.message ?? "项目文件校验失败。"; return false; }
+    const snapshot = editor.snapshot();
+    const parent = serializeProjectFile({
+      document: snapshot.document, inputValues: state.value.inputValues,
+      definitions: embeddedDefinitions, libraryRoots: embeddedLibraryRoots,
+    });
+    const paths = affectedOccurrencePaths(parent, definitionId);
+    const candidate = reimportProjectSnapshot(parent, parsed.value.file, definitionId, (used) => {
+      let index = 1;
+      while (used.has(`definition-${index}`)) index += 1;
+      return `definition-${index}`;
+    });
+    if (!candidate.ok) { openError.value = candidate.errors[0]?.message ?? "重新导入失败。"; return false; }
+    const file = labelDefinitionUses(candidate.file);
+    const cache = new Map(adoptedProjectFiles ?? []);
+    cache.set(projectPathIdentity(projectPath.value ?? "untitled.circuit.json"), file);
+    const hierarchy = await flattenVisibleDocument(withDefinitionLabels(snapshot.document, file), cache, false);
+    if (hierarchy === null) { openError.value = "无法展开新子电路定义。"; return false; }
+    const previousFlat = adoptedHierarchy?.circuit.components.map((component) => component.id) ?? [];
+    const nextFlat = hierarchy.circuit.components.map((component) => component.id);
+    const forceReplaceFlatIds = [...new Set([...previousFlat, ...nextFlat].filter((id) => paths.some((path) => id.startsWith(`${path}/`))))];
+    const committed = await replaceHierarchyProjection(hierarchy, cache, undefined, forceReplaceFlatIds);
+    openError.value = committed ? null : (editor.snapshot().error?.message ?? "重新导入失败，父工程保持原状。");
     return committed;
   }
 
@@ -2110,6 +2165,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     importSubcircuitOnlyFromDialog,
     placeImportedSubcircuit,
     renameImportedSubcircuit,
+    reimportEmbeddedDefinition,
     libraryTree,
     reloadSubcircuit,
     staleSubcircuits,

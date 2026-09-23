@@ -23,6 +23,7 @@ type ComponentState = {
 class StatefulHierarchyEngine implements EngineAdapter {
   readonly files = new Map<string, string>();
   readonly resetCalls: number[] = [];
+  readonly openChoices: string[] = [];
   private nextComponentId = 1;
   private nextConnectionId = 1;
   private readonly components = new Map<number, ComponentState>();
@@ -146,6 +147,11 @@ class StatefulHierarchyEngine implements EngineAdapter {
     return content === undefined
       ? { ok: false, reason: "项目文件不存在。", code: "PROJECT_FILE_NOT_FOUND" }
       : { ok: true, content };
+  }
+
+  async pickOpenPath() {
+    const path = this.openChoices.shift();
+    return path === undefined ? { ok: false as const, reason: "canceled" } : { ok: true as const, path };
   }
 
   private propagate(): void {
@@ -365,6 +371,84 @@ test("two occurrences of a shared nested definition keep separate DFF state", as
     await binding.step();
     assert.equal(binding.state.value.signals["u1:q"], "1");
     assert.equal(binding.state.value.signals["u2:q"], "0");
+  } finally {
+    restore();
+  }
+});
+
+test("reimport resets both uses of a nested DFF definition without rewinding simulation time", async () => {
+  const engine = new StatefulHierarchyEngine();
+  const parentPath = "E:\\circuits\\nested-parent.circuit.json";
+  const replacementPath = "G:\\moved\\register.circuit.json";
+  engine.files.set(parentPath.toLowerCase(), projectText(nestedSharedParentProject()));
+  engine.files.set(replacementPath.toLowerCase(), projectText(dffChildProject()));
+  const restore = installWindow(engine);
+  try {
+    const binding = useWorkspace();
+    await binding.bootstrap();
+    assert.equal(await binding.openProjectFromPath(parentPath), true);
+    await binding.step();
+    await binding.setInputBit("data-1", 0, "1");
+    await binding.setInputBit("clock-1", 0, "1");
+    await binding.step();
+    await binding.setInputBit("clock-1", 0, "0");
+    await binding.setInputBit("clock-2", 0, "1");
+    await binding.step();
+    assert.deepEqual([binding.state.value.signals["u1:q"], binding.state.value.signals["u2:q"]], ["1", "0"]);
+    const step = binding.state.value.simulationStep;
+    engine.openChoices.push(replacementPath);
+    assert.equal(await binding.reimportEmbeddedDefinition("register"), true, binding.openError.value ?? "");
+    assert.deepEqual([binding.state.value.signals["u1:q"], binding.state.value.signals["u2:q"]], ["X", "X"]);
+    assert.equal(binding.state.value.simulationStep, step);
+    assert.deepEqual(engine.resetCalls, []);
+    await binding.step();
+    await binding.setInputBit("clock-1", 0, "1");
+    await binding.step();
+    assert.equal(binding.state.value.signals["u1:q"], "1");
+    assert.equal(await binding.renameImportedSubcircuit("register", "Renamed"), true);
+    await binding.undo();
+    assert.equal(binding.state.value.signals["u1:q"], "1", "普通改名撤销不应继承重导入的强制重建标记");
+    const afterRenameUndo = binding.state.value.simulationStep;
+    await binding.undo();
+    assert.equal(binding.state.value.simulationStep, afterRenameUndo);
+    assert.deepEqual([binding.state.value.signals["u1:q"], binding.state.value.signals["u2:q"]], ["X", "X"]);
+    await binding.dispose();
+  } finally {
+    restore();
+  }
+});
+
+test("reimport preserves a different definition's DFF state in the same parent", async () => {
+  const engine = new StatefulHierarchyEngine();
+  const parentPath = "E:\\circuits\\separate-parent.circuit.json";
+  const replacementPath = "G:\\moved\\register.circuit.json";
+  const parent = parentProject();
+  const separated: ProjectFileData = {
+    ...parent,
+    circuit: { ...parent.circuit, components: parent.circuit.components.map((component) => component.id === "u2" && component.data && "definitionId" in component.data
+      ? { ...component, data: { ...component.data, definitionId: "unaffected" } } : component) },
+    definitions: { ...parent.definitions, unaffected: { displayName: "Independent", circuit: dffChildProject().circuit } },
+    libraryRoots: ["register", "unaffected"],
+  };
+  engine.files.set(parentPath.toLowerCase(), projectText(separated));
+  engine.files.set(replacementPath.toLowerCase(), projectText(dffChildProject()));
+  const restore = installWindow(engine);
+  try {
+    const binding = useWorkspace();
+    await binding.bootstrap();
+    assert.equal(await binding.openProjectFromPath(parentPath), true);
+    await binding.step();
+    await binding.setInputBit("data-1", 0, "1");
+    await binding.setInputBit("clock-1", 0, "1");
+    await binding.step();
+    await binding.setInputBit("clock-1", 0, "0");
+    await binding.setInputBit("clock-2", 0, "1");
+    await binding.step();
+    assert.deepEqual([binding.state.value.signals["u1:q"], binding.state.value.signals["u2:q"]], ["1", "0"]);
+    engine.openChoices.push(replacementPath);
+    assert.equal(await binding.reimportEmbeddedDefinition("register"), true, binding.openError.value ?? "");
+    assert.deepEqual([binding.state.value.signals["u1:q"], binding.state.value.signals["u2:q"]], ["X", "0"]);
+    await binding.dispose();
   } finally {
     restore();
   }

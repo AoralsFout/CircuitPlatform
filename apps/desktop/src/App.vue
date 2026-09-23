@@ -79,6 +79,7 @@ const {
   importSubcircuitOnlyFromDialog,
   placeImportedSubcircuit,
   renameImportedSubcircuit,
+  reimportEmbeddedDefinition,
   libraryTree,
   reloadSubcircuit,
   dispose: disposeDocumentWorkspace,
@@ -298,6 +299,7 @@ onBeforeUnmount(() => {
         @import-subcircuit-only="importSubcircuitOnlyFromDialog"
         @place-imported-subcircuit="placeImportedSubcircuit"
         @rename-imported-subcircuit="renameImportedSubcircuit"
+        @reimport-embedded-definition="reimportEmbeddedDefinition"
         @default-wire-color-change="setDefaultWireColor"
       />
 

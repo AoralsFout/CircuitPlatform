@@ -6,6 +6,9 @@ export type ImportProjectSnapshotResult =
   | { ok: true; file: ProjectFileData; definitionId: string; ports: readonly PortSpec[] }
   | { ok: false; errors: readonly ProjectFileError[] };
 
+/** 兼容重导入的候选；原定义身份与本地名称不变，后代身份重新分配。 */
+export type ReimportProjectSnapshotResult = ImportProjectSnapshotResult;
+
 /** 从已保存定义的边界 Input/Output 取得再次放置所需的端口；不读取源文件。 */
 export function portsForDefinition(circuit: ProjectFileCircuit): readonly PortSpec[] {
   const errors: ProjectFileError[] = [];
@@ -91,6 +94,112 @@ export function importProjectSnapshot(
   return validated.ok
     ? { ok: true, file: validated.value.file, definitionId: rootId, ports }
     : { ok: false, errors: validated.errors };
+}
+
+/**
+ * 用已保存的源工程替换指定定义及其可达下层闭包，保留指定定义的身份和父工程名称。
+ * 只接受发布 Port 名称、方向、位宽兼容的更新；调用方提交前可安全保留现有连接。
+ * @param parent 已采用的父工程快照。
+ * @param source 从文件读取并校验过的 v2 源工程。
+ * @param definitionId 可为直接导入或嵌套定义的现有身份。
+ * @param allocateId 为新后代生成未占用身份的分配器。
+ * @returns 完整候选和原定义身份，或不改变父工程的诊断。
+ */
+export function reimportProjectSnapshot(
+  parent: ProjectFileData,
+  source: ProjectFileData,
+  definitionId: string,
+  allocateId: (usedIds: ReadonlySet<string>) => string,
+): ReimportProjectSnapshotResult {
+  const previous = Object.hasOwn(parent.definitions, definitionId) ? parent.definitions[definitionId] : undefined;
+  if (previous === undefined) return { ok: false, errors: [{ code: "definition-missing", message: `子电路定义「${definitionId}」已不存在。` }] };
+  const oldPorts = portsForDefinition(previous.circuit);
+  const newPorts = portsForDefinition(source.circuit);
+  const samePorts = oldPorts.length === newPorts.length && oldPorts.every((port) =>
+    newPorts.some((candidate) => candidate.name === port.name && candidate.direction === port.direction && candidate.width === port.width));
+  if (!samePorts) return { ok: false, errors: [{ code: "interface-incompatible", message: "新子电路的 Port 名称、方向或位宽与现有定义不兼容。" }] };
+
+  const imported = importProjectSnapshot(parent, source, previous.displayName, allocateId);
+  if (!imported.ok) return imported;
+  const definitions = Object.assign(Object.create(null) as Record<string, ProjectFileData["definitions"][string]>, imported.file.definitions);
+  const freshRoot = definitions[imported.definitionId]!;
+  delete definitions[imported.definitionId];
+  definitions[definitionId] = { ...freshRoot, displayName: previous.displayName };
+  const updateUses = (circuit: ProjectFileCircuit): ProjectFileCircuit => ({
+    ...circuit,
+    components: circuit.components.map((component) => component.kind === "subcircuit" && component.data &&
+      "definitionId" in component.data && component.data.definitionId === definitionId
+      ? { ...component, data: { ...component.data, cachedPorts: newPorts.map((port) => ({ ...port })) } }
+      : component),
+  });
+  for (const [id, definition] of Object.entries(definitions)) {
+    definitions[id] = { ...definition, circuit: updateUses(definition.circuit) };
+  }
+
+  // 旧后代只有失去所有顶层使用和直接导入根的可达路径后才移除；共享的其他闭包不受影响。
+  const oldDescendants = new Set<string>();
+  const visitOld = (id: string): void => {
+    const definition = Object.hasOwn(parent.definitions, id) ? parent.definitions[id] : undefined;
+    if (!definition) return;
+    for (const component of definition.circuit.components) {
+      if (component.kind !== "subcircuit" || !component.data || !("definitionId" in component.data)) continue;
+      const child = component.data.definitionId;
+      if (child === definitionId || oldDescendants.has(child)) continue;
+      oldDescendants.add(child);
+      visitOld(child);
+    }
+  };
+  visitOld(definitionId);
+  const reachable = new Set<string>();
+  const visitNew = (id: string): void => {
+    if (reachable.has(id)) return;
+    reachable.add(id);
+    const definition = Object.hasOwn(definitions, id) ? definitions[id] : undefined;
+    if (!definition) return;
+    for (const component of definition.circuit.components) {
+      if (component.kind === "subcircuit" && component.data && "definitionId" in component.data) visitNew(component.data.definitionId);
+    }
+  };
+  for (const component of parent.circuit.components) {
+    if (component.kind === "subcircuit" && component.data && "definitionId" in component.data) visitNew(component.data.definitionId);
+  }
+  for (const id of parent.libraryRoots) visitNew(id);
+  for (const id of oldDescendants) if (!reachable.has(id)) delete definitions[id];
+
+  const candidate = parseProjectFile({
+    version: 2,
+    circuit: updateUses(structuredClone(parent.circuit)),
+    definitions,
+    libraryRoots: [...parent.libraryRoots],
+  });
+  return candidate.ok
+    ? { ok: true, file: candidate.value.file, definitionId, ports: newPorts }
+    : { ok: false, errors: candidate.errors };
+}
+
+/**
+ * 找出选中定义在顶层画布中的每条使用路径；扁平身份以这些路径为前缀。
+ * @param parent 更新前的父工程快照。
+ * @param definitionId 要替换的定义身份。
+ * @returns 每个受影响使用处的稳定 Component ID 路径，包括嵌套使用处。
+ */
+export function affectedOccurrencePaths(parent: ProjectFileData, definitionId: string): readonly string[] {
+  const paths: string[] = [];
+  const visit = (circuit: ProjectFileCircuit, prefix: readonly string[]): void => {
+    for (const component of circuit.components) {
+      if (component.kind !== "subcircuit" || !component.data || !("definitionId" in component.data)) continue;
+      const path = [...prefix, component.id];
+      if (component.data.definitionId === definitionId) {
+        paths.push(path.join("/"));
+      } else {
+        const child = Object.hasOwn(parent.definitions, component.data.definitionId)
+          ? parent.definitions[component.data.definitionId] : undefined;
+        if (child) visit(child.circuit, path);
+      }
+    }
+  };
+  visit(parent.circuit, []);
+  return paths;
 }
 
 /** 源文件只读数据的深拷贝；重映射只作用于新副本。 */

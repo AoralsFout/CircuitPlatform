@@ -261,3 +261,94 @@ test("a nested library dependency can be placed with its saved interface", async
     else Reflect.deleteProperty(globalThis, "window");
   }
 });
+
+test("reimport from a new file updates every use in one undoable frame and keeps the local name", async () => {
+  const engine = new EmbeddedEngine();
+  const originalPath = "E:\\circuits\\original.circuit.json";
+  const replacementPath = "G:\\moved\\replacement.circuit.json";
+  engine.files.set(originalPath, sourceFile());
+  const initial = JSON.parse(sourceFile()) as ProjectFileData;
+  const replacement: ProjectFileData = { ...initial, circuit: {
+    components: initial.circuit.components.map((component) => component.id === "gate" ? { ...component, id: "replacement-gate" } : component),
+    connections: initial.circuit.connections.map((connection) => ({
+      ...connection,
+      source: connection.source.component === "gate" ? { ...connection.source, component: "replacement-gate" } : connection.source,
+      target: connection.target.component === "gate" ? { ...connection.target, component: "replacement-gate" } : connection.target,
+    })),
+  } };
+  engine.files.set(replacementPath, JSON.stringify(replacement));
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", { configurable: true, value: { circuitPlatform: engine } });
+  const binding = useWorkspace();
+  try {
+    await binding.bootstrap();
+    await binding.requestNew();
+    engine.openChoices.push({ ok: true, path: originalPath });
+    assert.equal(await binding.addSubcircuitFromDialog(), true);
+    const definitionId = binding.libraryTree.value[0]!.definitionId;
+    assert.equal(await binding.placeImportedSubcircuit(definitionId, { x: 440, y: 180 }), true);
+    assert.equal(await binding.renameImportedSubcircuit(definitionId, "本地名称"), true);
+    engine.openChoices.push({ ok: true, path: replacementPath });
+    assert.equal(await binding.reimportEmbeddedDefinition(definitionId), true, binding.openError.value ?? "");
+    assert.equal(binding.libraryTree.value[0]?.definitionId, definitionId);
+    assert.equal(binding.libraryTree.value[0]?.displayName, "本地名称");
+    assert.deepEqual(binding.editorState.value?.document.components.map((component) => component.data?.subcircuit?.definitionId), [definitionId, definitionId]);
+    assert.deepEqual(binding.state.value.internalComponents?.filter((item) => item.kind === "not").map((item) => item.path.at(-1)), ["replacement-gate", "replacement-gate"]);
+    await binding.undo();
+    assert.deepEqual(binding.state.value.internalComponents?.filter((item) => item.kind === "not").map((item) => item.path.at(-1)), ["gate", "gate"]);
+    assert.equal(binding.libraryTree.value[0]?.displayName, "本地名称");
+    await binding.redo();
+    assert.deepEqual(binding.state.value.internalComponents?.filter((item) => item.kind === "not").map((item) => item.path.at(-1)), ["replacement-gate", "replacement-gate"]);
+    assert.deepEqual(engine.readPaths, [originalPath, replacementPath]);
+  } finally {
+    await binding.dispose();
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
+});
+
+test("cancel, malformed file, and engine rejection leave reimport definitions and history intact", async () => {
+  const engine = new EmbeddedEngine();
+  const path = "E:\\circuits\\source.circuit.json";
+  engine.files.set(path, sourceFile());
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", { configurable: true, value: { circuitPlatform: engine } });
+  const binding = useWorkspace();
+  try {
+    await binding.bootstrap();
+    await binding.requestNew();
+    engine.openChoices.push({ ok: true, path });
+    assert.equal(await binding.addSubcircuitFromDialog(), true);
+    const id = binding.libraryTree.value[0]!.definitionId;
+    const before = JSON.stringify(binding.editorState.value?.document);
+    const beforeTree = JSON.stringify(binding.libraryTree.value);
+    const reads = engine.readPaths.length;
+    assert.equal(await binding.reimportEmbeddedDefinition(id), false);
+    assert.equal(engine.readPaths.length, reads);
+    engine.files.set("E:\\bad.circuit.json", "{broken");
+    engine.openChoices.push({ ok: true, path: "E:\\bad.circuit.json" });
+    assert.equal(await binding.reimportEmbeddedDefinition(id), false);
+    engine.openChoices.push({ ok: true, path: "E:\\missing.circuit.json" });
+    assert.equal(await binding.reimportEmbeddedDefinition(id), false);
+    const cyclic: ProjectFileData = {
+      version: 2,
+      circuit: { components: [{ id: "nested", kind: "subcircuit", displayName: "nested", position: { x: 0, y: 0 }, data: { definitionId: "cycle", cachedPorts: [] } }], connections: [] },
+      definitions: { cycle: { displayName: "Cycle", circuit: { components: [{ id: "self", kind: "subcircuit", displayName: "self", position: { x: 0, y: 0 }, data: { definitionId: "cycle", cachedPorts: [] } }], connections: [] } } },
+      libraryRoots: ["cycle"],
+    };
+    engine.files.set("E:\\cycle.circuit.json", JSON.stringify(cyclic));
+    engine.openChoices.push({ ok: true, path: "E:\\cycle.circuit.json" });
+    assert.equal(await binding.reimportEmbeddedDefinition(id), false);
+    engine.failNextAdd = true;
+    engine.openChoices.push({ ok: true, path });
+    assert.equal(await binding.reimportEmbeddedDefinition(id), false);
+    assert.equal(JSON.stringify(binding.editorState.value?.document), before);
+    assert.equal(JSON.stringify(binding.libraryTree.value), beforeTree);
+    await binding.undo();
+    assert.equal(binding.libraryTree.value.length, 0, "失败不增加历史帧");
+  } finally {
+    await binding.dispose();
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
+});

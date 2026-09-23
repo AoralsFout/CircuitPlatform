@@ -42,6 +42,7 @@ const emit = defineEmits<{
   importSubcircuitOnly: [];
   placeImportedSubcircuit: [definitionId: string];
   renameImportedSubcircuit: [definitionId: string, name: string];
+  reimportEmbeddedDefinition: [definitionId: string];
   defaultWireColorChange: [color: WireColorId];
 }>();
 
@@ -239,6 +240,7 @@ function startComponentDrag(event: DragEvent, kind: EditorComponentKind): void {
         <span>{{ selectedDefinition.status === 'ready' ? `使用 ${selectedDefinition.usageCount} 次` : selectedDefinition.diagnostic }}</span>
         <div class="subcircuit-actions">
           <button type="button" :disabled="selectedDefinition.status !== 'ready'" :aria-label="`再次放置 ${selectedDefinition.displayName}`" @click="emit('placeImportedSubcircuit', selectedDefinition.definitionId)">再次放置</button>
+          <button type="button" :disabled="selectedDefinition.status !== 'ready'" :aria-label="`重新导入 ${selectedDefinition.displayName}`" @click="emit('reimportEmbeddedDefinition', selectedDefinition.definitionId)">重新导入</button>
           <button type="button" :disabled="selectedDefinition.status !== 'ready'" :aria-label="`改名 ${selectedDefinition.displayName}`" @click="renameDraft = selectedDefinition.editableName">改名</button>
         </div>
         <form v-if="renameDraft !== null" class="subcircuit-rename" @submit.prevent="submitRename">
