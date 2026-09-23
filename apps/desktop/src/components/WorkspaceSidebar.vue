@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed, ref } from "vue";
+import type { LibraryNode } from "../project-file/library.ts";
 import type { InputControl, RailPage } from "../composables/useEditorState";
 import type { ComponentDefinition } from "../canvas";
 import type { ComponentKindName } from "@circuit-platform/protocol";
@@ -19,7 +20,7 @@ interface SidebarComponent {
   selected: boolean;
 }
 
-defineProps<{
+const props = defineProps<{
   activeRailPage: RailPage;
   inputControls: readonly InputControl[];
   /** 可以设置 Input 的位；运行中同样成立——那次设置会在下一次推进时生效。 */
@@ -29,6 +30,7 @@ defineProps<{
   componentCount: number;
   componentDefinitions: readonly ComponentDefinition[];
   defaultWireColor: WireColorId;
+  libraryTree: readonly LibraryNode[];
 }>();
 
 const emit = defineEmits<{
@@ -37,8 +39,36 @@ const emit = defineEmits<{
   setInputBit: [key: InputKey, index: number, bit: InputBit];
   placeComponent: [kind: ComponentKindName, continuous: boolean];
   selectSubcircuit: [];
+  importSubcircuitOnly: [];
+  placeImportedSubcircuit: [definitionId: string];
+  renameImportedSubcircuit: [definitionId: string, name: string];
   defaultWireColorChange: [color: WireColorId];
 }>();
+
+const selectedDefinitionId = ref<string | null>(null);
+const renameDraft = ref<string | null>(null);
+const flatLibrary = computed(() => {
+  const rows: Array<{ key: string; node: LibraryNode; depth: number }> = [];
+  const visit = (node: LibraryNode, depth: number, key: string): void => {
+    rows.push({ key, node, depth });
+    node.children.forEach((child, index) => visit(child, depth + 1, `${key}/${index}`));
+  };
+  props.libraryTree.forEach((node, index) => visit(node, 0, `${index}`));
+  return rows;
+});
+const selectedDefinition = computed(() => flatLibrary.value.find((row) => row.node.definitionId === selectedDefinitionId.value)?.node ?? null);
+
+function selectDefinition(node: LibraryNode): void {
+  selectedDefinitionId.value = node.definitionId;
+  renameDraft.value = null;
+}
+
+function submitRename(): void {
+  const selected = selectedDefinition.value;
+  if (!selected || renameDraft.value === null || !renameDraft.value.trim()) return;
+  emit("renameImportedSubcircuit", selected.definitionId, renameDraft.value.trim());
+  renameDraft.value = null;
+}
 
 /**
  * 位按钮组的展开状态，键为编辑器元件 ID。
@@ -113,8 +143,8 @@ function startComponentDrag(event: DragEvent, kind: EditorComponentKind): void {
 </script>
 
 <template>
-  <aside v-if="activeRailPage !== 'settings'" class="sidebar" :aria-label="activeRailPage === 'components' ? '元件库' : activeRailPage === 'inputs' ? '输入设置' : '电路层级'">
-    <div class="sidebar-heading"><div><span class="eyebrow">WORKSPACE / {{ activeRailPage }}</span><h1>{{ activeRailPage === "components" ? "元件库" : activeRailPage === "inputs" ? "输入设置" : "层级" }}</h1></div><button class="icon-button" type="button" aria-label="收起侧栏" title="收起侧栏" @click="emit('close')">‹</button></div>
+  <aside v-if="activeRailPage !== 'settings'" class="sidebar" :aria-label="activeRailPage === 'components' ? '元件库' : activeRailPage === 'inputs' ? '输入设置' : activeRailPage === 'subcircuits' ? '子电路' : '电路层级'">
+    <div class="sidebar-heading"><div><span class="eyebrow">WORKSPACE / {{ activeRailPage }}</span><h1>{{ activeRailPage === "components" ? "元件库" : activeRailPage === "inputs" ? "输入设置" : activeRailPage === "subcircuits" ? "子电路" : "层级" }}</h1></div><button class="icon-button" type="button" aria-label="收起侧栏" title="收起侧栏" @click="emit('close')">‹</button></div>
 
     <template v-if="activeRailPage === 'components'">
       <div class="sidebar-section-title"><span>元件库</span><span class="component-count">{{ componentDefinitions.length }}</span></div>
@@ -190,6 +220,33 @@ function startComponentDrag(event: DragEvent, kind: EditorComponentKind): void {
         </div>
       </div>
       <p class="sidebar-hint">左键在 0 与 1 之间切换，右键把该位设为 X。键盘：Tab 进入位按钮组，方向键在组内移动，空格或回车切换 0 与 1，X 把当前位设为 X。停止或暂停时切换会立即求值；连续运行中切换会在下一次推进时生效。</p>
+    </template>
+
+    <template v-else-if="activeRailPage === 'subcircuits'">
+      <div class="sidebar-section-title"><span>已导入定义</span><span class="component-count">{{ libraryTree.length }}</span></div>
+      <div class="subcircuit-actions"><button type="button" @click="emit('importSubcircuitOnly')">仅导入子电路</button></div>
+      <p v-if="libraryTree.length === 0" class="sidebar-hint">还没有导入的子电路。选择“仅导入子电路”后，可从这里再次放置。</p>
+      <ul v-else class="subcircuit-tree" aria-label="子电路定义树">
+        <li v-for="row in flatLibrary" :key="row.key" :style="{ '--tree-depth': row.depth }">
+          <button type="button" class="subcircuit-tree-node" :class="{ 'subcircuit-tree-node--selected': row.node.definitionId === selectedDefinitionId }" :aria-pressed="row.node.definitionId === selectedDefinitionId" :aria-label="`选择子电路 ${row.node.displayName}，使用 ${row.node.usageCount} 次，${row.node.status === 'ready' ? '可用' : '定义缺失'}`" :title="row.node.displayName" @click="selectDefinition(row.node)">
+            <span class="subcircuit-branch" aria-hidden="true">{{ row.depth ? '└' : '◇' }}</span><span class="subcircuit-name">{{ row.node.displayName }}</span><span class="subcircuit-use-count" :title="`使用 ${row.node.usageCount} 次`">{{ row.node.usageCount }}</span>
+          </button>
+          <small v-if="row.node.status === 'missing'" class="subcircuit-diagnostic">{{ row.node.diagnostic }}</small>
+        </li>
+      </ul>
+      <div v-if="selectedDefinition" class="subcircuit-detail">
+        <strong :title="selectedDefinition.displayName">{{ selectedDefinition.displayName }}</strong>
+        <span>{{ selectedDefinition.status === 'ready' ? `使用 ${selectedDefinition.usageCount} 次` : selectedDefinition.diagnostic }}</span>
+        <div class="subcircuit-actions">
+          <button type="button" :disabled="selectedDefinition.status !== 'ready'" :aria-label="`再次放置 ${selectedDefinition.displayName}`" @click="emit('placeImportedSubcircuit', selectedDefinition.definitionId)">再次放置</button>
+          <button type="button" :disabled="selectedDefinition.status !== 'ready'" :aria-label="`改名 ${selectedDefinition.displayName}`" @click="renameDraft = selectedDefinition.editableName">改名</button>
+        </div>
+        <form v-if="renameDraft !== null" class="subcircuit-rename" @submit.prevent="submitRename">
+          <label for="subcircuit-rename-input">子电路名称</label>
+          <input id="subcircuit-rename-input" v-model="renameDraft" type="text" maxlength="200" autocomplete="off" />
+          <div class="subcircuit-actions"><button type="submit" :disabled="!renameDraft.trim()">保存名称</button><button type="button" @click="renameDraft = null">取消</button></div>
+        </form>
+      </div>
     </template>
 
     <template v-else>

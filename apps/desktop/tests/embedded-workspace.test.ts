@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ComponentKindName, EngineResponse, PortSpec } from "@circuit-platform/protocol";
 import { useWorkspace } from "../src/composables/useWorkspace.ts";
-import { serializeProjectFile } from "../src/project-file/index.ts";
+import { serializeProjectFile, type ProjectFileData } from "../src/project-file/index.ts";
 import { portsForAddComponent } from "./fake-ports.ts";
+import { canvasSubcircuitName } from "../src/project-file/library.ts";
 
 /** 公开工作区操作的可控文件与引擎适配器。 */
 class EmbeddedEngine {
@@ -138,6 +139,122 @@ test("a failed snapshot import leaves no definition, component, or history frame
     const saved = JSON.parse(engine.files.get("D:\\archive\\parent.circuit.json")!);
     assert.deepEqual(saved.definitions, {});
     assert.deepEqual(saved.libraryRoots, []);
+  } finally {
+    await binding.dispose();
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
+});
+
+test("import only persists an unused root and placing it later reuses the same definition", async () => {
+  const engine = new EmbeddedEngine();
+  const sourcePath = "E:\\circuits\\source.circuit.json";
+  const parentPath = "D:\\archive\\parent.circuit.json";
+  engine.files.set(sourcePath, sourceFile());
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", { configurable: true, value: { circuitPlatform: engine } });
+  let first: ReturnType<typeof useWorkspace> | null = null;
+  let reopened: ReturnType<typeof useWorkspace> | null = null;
+  try {
+    first = useWorkspace();
+    await first.bootstrap();
+    await first.requestNew();
+    engine.openChoices.push({ ok: true, path: sourcePath });
+    assert.equal(await first.importSubcircuitOnlyFromDialog(), true);
+    assert.equal(first.editorState.value?.document.components.length, 0);
+    assert.equal(first.libraryTree.value.length, 1);
+    assert.equal(first.libraryTree.value[0]?.usageCount, 0);
+    assert.equal(first.libraryTree.value[0]?.status, "ready");
+    const definitionId = first.libraryTree.value[0]!.definitionId;
+    await first.undo();
+    assert.equal(first.libraryTree.value.length, 0);
+    await first.redo();
+    assert.equal(first.libraryTree.value[0]?.definitionId, definitionId);
+    engine.saveChoices.push({ ok: true, path: parentPath });
+    assert.equal(await first.saveAs(), true);
+    engine.files.delete(sourcePath);
+    reopened = useWorkspace();
+    await reopened.bootstrap();
+    assert.equal(await reopened.openProjectFromPath(parentPath), true);
+    assert.equal(reopened.libraryTree.value[0]?.usageCount, 0);
+    assert.equal(await reopened.placeImportedSubcircuit(definitionId), true);
+    assert.equal(await reopened.placeImportedSubcircuit(definitionId, { x: 440, y: 180 }), true);
+    assert.equal(reopened.libraryTree.value[0]?.usageCount, 2);
+    assert.deepEqual(reopened.editorState.value?.document.components.map((component) => component.data?.subcircuit?.definitionId), [definitionId, definitionId]);
+    assert.deepEqual(engine.readPaths, [sourcePath, parentPath]);
+  } finally {
+    await reopened?.dispose();
+    await first?.dispose();
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
+});
+
+test("reimport creates a numbered independent definition and rename preserves canvas-only suffix behavior", async () => {
+  const engine = new EmbeddedEngine();
+  const sourcePath = "E:\\circuits\\ALU.circuit.json";
+  engine.files.set(sourcePath, sourceFile());
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", { configurable: true, value: { circuitPlatform: engine } });
+  const binding = useWorkspace();
+  try {
+    await binding.bootstrap();
+    await binding.requestNew();
+    engine.openChoices.push({ ok: true, path: sourcePath }, { ok: true, path: sourcePath });
+    assert.equal(await binding.addSubcircuitFromDialog(), true);
+    assert.equal(await binding.addSubcircuitFromDialog({ x: 440, y: 180 }), true);
+    const [first, second] = binding.libraryTree.value;
+    assert.ok(first && second);
+    assert.notEqual(first.definitionId, second.definitionId);
+    assert.deepEqual([first.displayName, second.displayName], ["ALU.circuit.json", "ALU.circuit.json (2)"]);
+    assert.deepEqual(binding.editorState.value?.document.components.map((component) => component.displayName), [first.displayName, second.displayName]);
+    assert.equal(canvasSubcircuitName(first.displayName), "ALU");
+    assert.equal(canvasSubcircuitName(second.displayName), "ALU (2)");
+    assert.equal(await binding.renameImportedSubcircuit(second.definitionId, "算术单元"), true);
+    assert.equal(binding.libraryTree.value[1]?.displayName, "算术单元");
+    assert.equal(binding.editorState.value?.document.components[1]?.displayName, "算术单元");
+    await binding.undo();
+    assert.equal(binding.libraryTree.value[1]?.displayName, "ALU.circuit.json (2)");
+    await binding.redo();
+    assert.equal(binding.libraryTree.value[1]?.displayName, "算术单元");
+  } finally {
+    await binding.dispose();
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
+});
+
+test("a nested library dependency can be placed with its saved interface", async () => {
+  const engine = new EmbeddedEngine();
+  const sourcePath = "E:\\circuits\\parent.circuit.json";
+  const child = JSON.parse(sourceFile()) as ProjectFileData;
+  const ports: PortSpec[] = [
+    { name: "A", direction: "input", width: 1 },
+    { name: "Y", direction: "output", width: 1 },
+  ];
+  const source: ProjectFileData = {
+    version: 2,
+    circuit: { components: [{ id: "nested", kind: "subcircuit", displayName: "child.circuit.json", position: { x: 0, y: 0 }, data: { definitionId: "child", cachedPorts: ports } }], connections: [] },
+    definitions: { child: { displayName: "child.circuit.json", circuit: child.circuit } },
+    libraryRoots: ["child"],
+  };
+  engine.files.set(sourcePath, JSON.stringify(source));
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", { configurable: true, value: { circuitPlatform: engine } });
+  const binding = useWorkspace();
+  try {
+    await binding.bootstrap();
+    await binding.requestNew();
+    engine.openChoices.push({ ok: true, path: sourcePath });
+    assert.equal(await binding.importSubcircuitOnlyFromDialog(), true);
+    const nested = binding.libraryTree.value[0]?.children[0];
+    assert.ok(nested);
+    assert.equal(nested.displayName, "child.circuit.json");
+    assert.equal(await binding.placeImportedSubcircuit(nested.definitionId), true);
+    const instance = binding.editorState.value?.document.components[0];
+    assert.equal(instance?.data?.subcircuit?.status, "resolved");
+    assert.deepEqual(instance?.ports?.map(({ name, direction, width }) => ({ name, direction, width })), ports);
+    assert.equal(binding.libraryTree.value[0]?.children[0]?.usageCount, 2);
   } finally {
     await binding.dispose();
     if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);

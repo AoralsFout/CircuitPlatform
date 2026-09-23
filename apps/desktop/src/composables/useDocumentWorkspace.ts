@@ -497,7 +497,7 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
       staleSubcircuitCount: record.binding.staleSubcircuits.value.length,
     })));
 
-  const refNames = new Set([...mutableWorkspaceRefs, "canSave", "projectName", "saveState", "recentProjects"]);
+  const refNames = new Set([...mutableWorkspaceRefs, "canSave", "projectName", "saveState", "recentProjects", "libraryTree"]);
   const editorRefNames = new Set(["showDetails", "showSidebar", "activeRailPage", "bottomTab", "zoom", "viewport", "interaction"]);
 
   function projectRef(name: string): ComputedRef<unknown> {

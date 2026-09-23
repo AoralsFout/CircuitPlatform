@@ -6,6 +6,12 @@ export type ImportProjectSnapshotResult =
   | { ok: true; file: ProjectFileData; definitionId: string; ports: readonly PortSpec[] }
   | { ok: false; errors: readonly ProjectFileError[] };
 
+/** 从已保存定义的边界 Input/Output 取得再次放置所需的端口；不读取源文件。 */
+export function portsForDefinition(circuit: ProjectFileCircuit): readonly PortSpec[] {
+  const errors: ProjectFileError[] = [];
+  return publishedPorts(circuit, errors);
+}
+
 /**
  * 将已校验源 Project 的顶层电路及实际可达定义复制进父工程。
  * 每次调用由 allocateId 分配全新身份；失败时父工程不发生任何修改。

@@ -76,6 +76,10 @@ const {
   returnToParent,
   requestLoadExample,
   addSubcircuitFromDialog,
+  importSubcircuitOnlyFromDialog,
+  placeImportedSubcircuit,
+  renameImportedSubcircuit,
+  libraryTree,
   reloadSubcircuit,
   dispose: disposeDocumentWorkspace,
 } = documentWorkspace;
@@ -285,11 +289,15 @@ onBeforeUnmount(() => {
         :component-count="editorState?.document.components.length ?? 0"
         :component-definitions="componentDefinitions"
         :default-wire-color="defaultWireColor"
+        :library-tree="libraryTree"
         @close="showSidebar = false"
         @select-component="selectComponent"
         @set-input-bit="setInputBit"
         @place-component="beginPlacementFromSidebar"
         @select-subcircuit="addSubcircuitFromDialog"
+        @import-subcircuit-only="importSubcircuitOnlyFromDialog"
+        @place-imported-subcircuit="placeImportedSubcircuit"
+        @rename-imported-subcircuit="renameImportedSubcircuit"
         @default-wire-color-change="setDefaultWireColor"
       />
 

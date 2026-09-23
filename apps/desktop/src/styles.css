@@ -192,6 +192,7 @@ button:disabled { cursor: not-allowed; }
 .rail-glyph--switch i { display: block; width: 16px; height: 1px; background: currentColor; }
 .rail-glyph--switch i::after { display: block; width: 5px; height: 5px; border: 1px solid currentColor; border-radius: 50%; background: var(--color-bg); content: ""; transform: translateY(-2px); }
 .rail-glyph--switch i:nth-child(2)::after { margin-left: 9px; }
+.rail-glyph--subcircuits { font-size: 23px; line-height: 1; }
 
 .sidebar { display: flex; min-width: 0; min-height: 0; flex-direction: column; border-right: 1px solid var(--color-border); background: var(--theme-sidebar); }
 .sidebar-heading { display: flex; align-items: center; justify-content: space-between; padding: 18px 15px 14px; }
@@ -267,6 +268,25 @@ button:disabled { cursor: not-allowed; }
 .layer-dot { width: 8px; height: 8px; border: 1px solid var(--color-signal-high); border-radius: 50%; }
 .layer-dot--gate { border-radius: 2px; background: var(--color-signal-high); }
 .layer-dot--output { border-color: var(--color-status-success); }
+.subcircuit-tree { flex: 1; min-height: 0; margin: 4px 9px 0; padding: 0; overflow: auto; list-style: none; }
+.subcircuit-tree li { min-width: 0; margin-left: calc(var(--tree-depth) * 12px); border-left: 1px solid var(--color-border); }
+.subcircuit-tree-node { display: flex; align-items: center; gap: 6px; width: 100%; min-width: 0; min-height: 34px; border: 1px solid transparent; padding: 5px 6px; color: var(--color-text-muted); background: transparent; cursor: pointer; text-align: left; }
+.subcircuit-tree-node:hover, .subcircuit-tree-node--selected { border-color: var(--color-border); background: var(--color-surface); color: var(--color-text); }
+.subcircuit-tree-node--selected { border-left-color: var(--color-signal-high); }
+.subcircuit-branch { flex: 0 0 14px; color: var(--color-text-faint); font-family: var(--font-data); text-align: center; }
+.subcircuit-name { min-width: 0; overflow: hidden; color: var(--color-text); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.subcircuit-use-count { flex: 0 0 auto; margin-left: auto; color: var(--color-text-faint); font-family: var(--font-data); font-size: 10px; }
+.subcircuit-diagnostic { display: block; padding: 0 6px 5px 25px; color: var(--color-status-warning); font-size: 10px; }
+.subcircuit-detail { display: grid; gap: 8px; min-width: 0; margin-top: auto; padding: 14px 15px; border-top: 1px solid var(--color-border); }
+.subcircuit-detail > strong { overflow: hidden; color: var(--color-text); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.subcircuit-detail > span, .subcircuit-rename label { color: var(--color-text-faint); font-size: 10px; }
+.subcircuit-actions { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 15px 8px; }
+.subcircuit-detail .subcircuit-actions { padding: 0; }
+.subcircuit-actions button { min-height: 28px; border: 1px solid var(--color-border); padding: 5px 8px; color: var(--color-text); background: var(--color-surface); cursor: pointer; font-size: 11px; }
+.subcircuit-actions button:hover:not(:disabled) { border-color: var(--color-border-strong); }
+.subcircuit-actions button:disabled { opacity: .5; cursor: not-allowed; }
+.subcircuit-rename { display: grid; gap: 7px; min-width: 0; }
+.subcircuit-rename input { min-width: 0; width: 100%; border: 1px solid var(--color-border-strong); padding: 6px; color: var(--color-text); background: var(--color-bg); }
 .inspector-header { display: flex; align-items: center; justify-content: space-between; }
 .inspector-kind { color: var(--color-text-faint); font-family: var(--font-data); font-size: 8px; }
 .inspector-name { display: block; margin: 9px 0 5px; color: var(--color-text); font-size: 14px; font-weight: 600; }
