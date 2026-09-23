@@ -188,7 +188,7 @@ const dffPorts = [
 
 function dffChildProject(): ProjectFileData {
   return {
-    version: 1,
+    version: 2,
     circuit: {
       components: [
         { id: "d", kind: "input", displayName: "d", position: { x: 0, y: 0 }, ports: inputPorts },
@@ -202,6 +202,8 @@ function dffChildProject(): ProjectFileData {
         { id: "ff-q", source: { component: "ff", port: "q" }, target: { component: "q", port: "in" } },
       ],
     },
+    definitions: {},
+    libraryRoots: [],
   };
 }
 
@@ -219,12 +221,12 @@ function parentProject(): ProjectFileData {
     data: { value: "0" },
   }));
   return {
-    version: 1,
+    version: 2,
     circuit: {
       components: [
         ...components,
-        { id: "u1", kind: "subcircuit", displayName: "register.circuit.json", position: { x: 240, y: 40 }, data: { reference: ".\\register.circuit.json", cachedPorts: subcircuitPorts } },
-        { id: "u2", kind: "subcircuit", displayName: "register.circuit.json", position: { x: 240, y: 240 }, data: { reference: ".\\register.circuit.json", cachedPorts: subcircuitPorts } },
+        { id: "u1", kind: "subcircuit", displayName: "register.circuit.json", position: { x: 240, y: 40 }, data: { definitionId: "register", cachedPorts: subcircuitPorts } },
+        { id: "u2", kind: "subcircuit", displayName: "register.circuit.json", position: { x: 240, y: 240 }, data: { definitionId: "register", cachedPorts: subcircuitPorts } },
         { id: "out-1", kind: "output", displayName: "Q 1", position: { x: 520, y: 40 }, ports: outputPorts },
         { id: "out-2", kind: "output", displayName: "Q 2", position: { x: 520, y: 240 }, ports: outputPorts },
       ],
@@ -237,6 +239,8 @@ function parentProject(): ProjectFileData {
         { id: "u2-q", source: { component: "u2", port: "q" }, target: { component: "out-2", port: "in" } },
       ],
     },
+    definitions: { register: { displayName: "register.circuit.json", circuit: dffChildProject().circuit } },
+    libraryRoots: ["register"],
   };
 }
 
@@ -262,9 +266,7 @@ function installWindow(engine: StatefulHierarchyEngine): () => void {
 test("hierarchy DFF occurrences retain independent state across unrelated component edits", async () => {
   const engine = new StatefulHierarchyEngine();
   const parentPath = "E:\\circuits\\parent.circuit.json";
-  const childPath = "e:\\circuits\\register.circuit.json";
   engine.files.set(parentPath.toLowerCase(), projectText(parentProject()));
-  engine.files.set(childPath.toLowerCase(), projectText(dffChildProject()));
   const restore = installWindow(engine);
 
   try {
