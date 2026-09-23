@@ -40,6 +40,7 @@ import {
   serializeProjectFile,
   type ParsedProjectFile,
   type ProjectFileData,
+  type ProjectFileCircuit,
 } from "../project-file/index.ts";
 import {
   flattenProjectHierarchy,
@@ -101,6 +102,13 @@ export interface SubcircuitOccurrenceSnapshot {
   needsReload: boolean;
   status: "resolved" | "unresolved" | "resolving";
   diagnostic: string | null;
+}
+
+/** 只读内嵌定义的可展示快照；不包含实例信号或仿真状态。 */
+export interface EmbeddedDefinitionSnapshot {
+  definitionId: string;
+  displayName: string;
+  circuit: ProjectFileCircuit;
 }
 
 /** 未保存文档在另存为对话框里的默认文件名；与顶栏占位名一致。 */
@@ -212,6 +220,8 @@ export interface WorkspaceBinding {
   renameImportedSubcircuit(definitionId: string, name: string): Promise<boolean>;
   /** 直接导入的定义及递归依赖；每次状态更新均从父工程快照推导。 */
   libraryTree: ComputedRef<readonly LibraryNode[]>;
+  /** 按父文档内的稳定 ID 读取定义副本；缺失时返回 null，不访问源文件或引擎。 */
+  getEmbeddedDefinition(definitionId: string): EmbeddedDefinitionSnapshot | null;
   /** 显式重新读取并采用一个 Subcircuit 及其递归依赖；磁盘变化不会自动传播。 */
   reloadSubcircuit(componentId: EditorComponentId): Promise<boolean>;
   /** 当前父文档的 occurrence-local 旧版本列表；不会把 stale 混入 isDirty。 */
@@ -433,6 +443,14 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
       libraryRoots: embeddedLibraryRoots,
     }));
   });
+  function getEmbeddedDefinition(definitionId: string): EmbeddedDefinitionSnapshot | null {
+    const definition = embeddedDefinitions[definitionId];
+    return definition === undefined ? null : {
+      definitionId,
+      displayName: definitionDisplayNames(embeddedDefinitions)[definitionId] ?? definition.displayName,
+      circuit: structuredClone(definition.circuit),
+    };
+  }
   /** 每个顶层 Subcircuit occurrence 独立记录它实际采用的磁盘快照版本。 */
   const adoptedOccurrenceVersions = new Map<string, string>();
   /** 只存 occurrence key，不把 stale 合并到文档 dirty 或解析 status。 */
@@ -2109,6 +2127,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     placeImportedSubcircuit,
     renameImportedSubcircuit,
     libraryTree,
+    getEmbeddedDefinition,
     reloadSubcircuit,
     staleSubcircuits,
     needsReload,

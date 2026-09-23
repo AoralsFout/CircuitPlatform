@@ -42,6 +42,7 @@ const emit = defineEmits<{
   importSubcircuitOnly: [];
   placeImportedSubcircuit: [definitionId: string];
   renameImportedSubcircuit: [definitionId: string, name: string];
+  openEmbeddedDefinition: [definitionId: string];
   defaultWireColorChange: [color: WireColorId];
 }>();
 
@@ -228,7 +229,7 @@ function startComponentDrag(event: DragEvent, kind: EditorComponentKind): void {
       <p v-if="libraryTree.length === 0" class="sidebar-hint">还没有导入的子电路。选择“仅导入子电路”后，可从这里再次放置。</p>
       <ul v-else class="subcircuit-tree" aria-label="子电路定义树">
         <li v-for="row in flatLibrary" :key="row.key" :style="{ '--tree-depth': row.depth }">
-          <button type="button" class="subcircuit-tree-node" :class="{ 'subcircuit-tree-node--selected': row.node.definitionId === selectedDefinitionId }" :aria-pressed="row.node.definitionId === selectedDefinitionId" :aria-label="`选择子电路 ${row.node.displayName}，使用 ${row.node.usageCount} 次，${row.node.status === 'ready' ? '可用' : '定义缺失'}`" :title="row.node.displayName" @click="selectDefinition(row.node)">
+          <button type="button" class="subcircuit-tree-node" :class="{ 'subcircuit-tree-node--selected': row.node.definitionId === selectedDefinitionId }" :aria-pressed="row.node.definitionId === selectedDefinitionId" :aria-label="`选择子电路 ${row.node.displayName}，使用 ${row.node.usageCount} 次，${row.node.status === 'ready' ? '可用' : '定义缺失'}，回车查看`" :title="row.node.displayName" @click="selectDefinition(row.node)" @dblclick="emit('openEmbeddedDefinition', row.node.definitionId)" @keydown.enter.prevent="emit('openEmbeddedDefinition', row.node.definitionId)">
             <span class="subcircuit-branch" aria-hidden="true">{{ row.depth ? '└' : '◇' }}</span><span class="subcircuit-name">{{ row.node.displayName }}</span><span class="subcircuit-use-count" :title="`使用 ${row.node.usageCount} 次`">{{ row.node.usageCount }}</span>
           </button>
           <small v-if="row.node.status === 'missing'" class="subcircuit-diagnostic">{{ row.node.diagnostic }}</small>
@@ -238,6 +239,7 @@ function startComponentDrag(event: DragEvent, kind: EditorComponentKind): void {
         <strong :title="selectedDefinition.displayName">{{ selectedDefinition.displayName }}</strong>
         <span>{{ selectedDefinition.status === 'ready' ? `使用 ${selectedDefinition.usageCount} 次` : selectedDefinition.diagnostic }}</span>
         <div class="subcircuit-actions">
+          <button type="button" :disabled="selectedDefinition.status !== 'ready'" :aria-label="`查看定义 ${selectedDefinition.displayName}`" @click="emit('openEmbeddedDefinition', selectedDefinition.definitionId)">查看定义</button>
           <button type="button" :disabled="selectedDefinition.status !== 'ready'" :aria-label="`再次放置 ${selectedDefinition.displayName}`" @click="emit('placeImportedSubcircuit', selectedDefinition.definitionId)">再次放置</button>
           <button type="button" :disabled="selectedDefinition.status !== 'ready'" :aria-label="`改名 ${selectedDefinition.displayName}`" @click="renameDraft = selectedDefinition.editableName">改名</button>
         </div>

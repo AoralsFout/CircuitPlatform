@@ -1,6 +1,7 @@
 import { computed, reactive, ref, shallowRef, watch, type ComputedRef, type Ref } from "vue";
 import type { ComponentKindName, PortSpec } from "@circuit-platform/protocol";
-import { projectPathIdentity, resolveProjectReference } from "../project-file/paths.ts";
+import type { EmbeddedDefinitionSnapshot } from "./useWorkspace.ts";
+import { projectPathIdentity } from "../project-file/paths.ts";
 import { readRecentProjects, type RecentProject } from "../project-file/recent-projects.ts";
 import type { EditorComponentId, EditorSelection, Point, WireColorId } from "../editor/index.ts";
 import { useEditorState } from "./useEditorState.ts";
@@ -35,6 +36,15 @@ interface DocumentController {
   binding: WorkspaceBinding;
   editor: EditorBinding;
   stopPathWatch: () => void;
+}
+
+interface DefinitionTab {
+  key: string;
+  parentKey: string;
+  definitionId: string;
+  displayName: string;
+  returnKey: string;
+  sourceComponentId?: EditorComponentId;
 }
 
 const mutableWorkspaceRefs = new Set(["state", "editorState", "projectPath", "isDirty", "saveError", "openError", "pendingFileAction", "recentProjects", "staleSubcircuits", "needsReload", "projectVersion"]);
@@ -72,6 +82,8 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
   // Keep nested per-document refs intact; `ref()` deep-unpacks binding/editor refs inside records.
   const records = shallowRef<DocumentController[]>([]);
   const activeKey = ref<string | null>(null);
+  const activeDefinitionKey = ref<string | null>(null);
+  const definitionTabs = shallowRef<DefinitionTab[]>([]);
   const sequence = ref(1);
   const temporarySequence = ref(1);
   const pathKeys = new Map<string, string>();
@@ -109,8 +121,11 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
   // older pause finish after a newer activation and publish the wrong active view.
   let activationChain: Promise<void> = Promise.resolve();
 
-  function platform(): Window["circuitPlatform"] {
-    return window.circuitPlatform;
+  function platform(): {
+    pickOpenPath(): Promise<{ ok: true; path: string } | { ok: false; reason: string }>;
+    pickSavePath(options?: { defaultPath?: string }): Promise<{ ok: true; path: string } | { ok: false; reason: string }>;
+  } {
+    return (window as unknown as { circuitPlatform: ReturnType<typeof platform> }).circuitPlatform;
   }
 
   function createController(assignTemporaryName = true): DocumentController {
@@ -159,6 +174,7 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
   function setActive(record: DocumentController): void {
     if (disposed || record.disposed) return;
     activeKey.value = record.key;
+    activeDefinitionKey.value = null;
     actionError.value = null;
   }
 
@@ -168,7 +184,10 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
       if (disposed || record.disposed) return;
       // The initial empty controller is projected while activeKey is null. It still
       // needs an explicit key when its first Project becomes a real document.
-      if (activeKey.value === record.key) return;
+      if (activeKey.value === record.key) {
+        activeDefinitionKey.value = null;
+        return;
+      }
       const previous = active.value;
       if (previous?.hasDocument && previous.binding.state.value.simulationState === "running") {
         await previous.binding.pause();
@@ -215,29 +234,57 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
     try { return await operation; } finally { opening.delete(identity); }
   }
 
-  /**
-   * 从活动父文档的已解析 Subcircuit 打开普通子文档。
-   * 先完成普通 open/dedupe 流程，再写入来源，避免失败打开留下悬空记录。
-   */
-  async function openSubcircuit(componentId: EditorComponentId): Promise<boolean> {
+  /** 打开父文档拥有的定义；已有标签按父键和定义 ID 复用，不读取源文件。 */
+  async function openEmbeddedDefinition(definitionId: string, sourceComponentId?: EditorComponentId): Promise<boolean> {
     const parent = active.value;
-    const parentPath = parent?.binding.projectPath.value;
-    const snapshot = parent?.binding.editorState.value;
-    const component = snapshot?.document.components.find((candidate) => candidate.id === componentId);
-    const subcircuit = component?.kind === "subcircuit" ? component.data?.subcircuit : undefined;
-    const status = subcircuit?.status ?? (subcircuit?.diagnostic ? "unresolved" : "resolved");
-    if (!parent || !parent.hasDocument || parentPath === null || !subcircuit || status !== "resolved") return false;
-    const childPath = resolveProjectReference(subcircuit.reference, parentPath);
-    const opened = await openProject(childPath);
-    if (!opened) return false;
-    const childKey = pathKeys.get(projectPathIdentity(childPath));
-    if (childKey === undefined || childKey === parent.key) return false;
-    drillDownSources.set(childKey, { parentKey: parent.key, componentId });
+    if (!parent?.hasDocument || parent.binding.getEmbeddedDefinition(definitionId) === null) return false;
+    const existing = definitionTabs.value.find((tab) => tab.parentKey === parent.key && tab.definitionId === definitionId);
+    if (existing) {
+      activeDefinitionKey.value = existing.key;
+      return true;
+    }
+    const key = `definition:${parent.key}:${encodeURIComponent(definitionId)}`;
+    const snapshot = parent.binding.getEmbeddedDefinition(definitionId)!;
+    const returnKey = activeDefinitionKey.value ?? parent.key;
+    definitionTabs.value = [...definitionTabs.value, {
+      key, parentKey: parent.key, definitionId, displayName: snapshot.displayName, returnKey,
+      ...(sourceComponentId ? { sourceComponentId } : {}),
+    }];
+    if (parent.binding.state.value.simulationState === "running") await parent.binding.pause();
+    activeDefinitionKey.value = key;
     return true;
   }
 
+  /** 从父画布的具体使用处下钻；实例信号仍留在父画布检查器。 */
+  async function openSubcircuit(componentId: EditorComponentId): Promise<boolean> {
+    const component = active.value?.binding.editorState.value?.document.components.find((candidate) => candidate.id === componentId);
+    const definitionId = component?.kind === "subcircuit" ? component.data?.subcircuit?.definitionId : undefined;
+    return definitionId ? openEmbeddedDefinition(definitionId, componentId) : false;
+  }
+
+  const activeDefinition = computed<EmbeddedDefinitionSnapshot & { key: string; missing: boolean } | null>(() => {
+    const tab = definitionTabs.value.find((candidate) => candidate.key === activeDefinitionKey.value);
+    if (!tab) return null;
+    const parent = records.value.find((record) => record.key === tab.parentKey);
+    void parent?.binding.editorState.value;
+    const snapshot = parent?.binding.getEmbeddedDefinition(tab.definitionId);
+    return snapshot ? { ...snapshot, key: tab.key, missing: false } : {
+      key: tab.key, definitionId: tab.definitionId, displayName: tab.displayName,
+      circuit: { components: [], connections: [] }, missing: true,
+    };
+  });
+
   /** 将一个子文档切回其仍打开的父文档，并选择、居中、聚焦最近来源。 */
   async function returnToParent(): Promise<boolean> {
+    const definitionTab = definitionTabs.value.find((tab) => tab.key === activeDefinitionKey.value);
+    if (definitionTab) {
+      const parent = records.value.find((record) => record.key === definitionTab.parentKey && record.hasDocument);
+      if (!parent) return false;
+      const returnTab = definitionTabs.value.find((tab) => tab.key === definitionTab.returnKey);
+      activeDefinitionKey.value = returnTab?.key ?? null;
+      if (!returnTab && definitionTab.sourceComponentId) await parent.editor.revealComponent(definitionTab.sourceComponentId);
+      return true;
+    }
     const child = active.value;
     const source = child ? drillDownSources.get(child.key) : undefined;
     if (!child || !source) return false;
@@ -343,6 +390,8 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
 
   async function discardRecord(record: DocumentController): Promise<void> {
     clearDrillDownSources(record.key);
+    definitionTabs.value = definitionTabs.value.filter((tab) => tab.parentKey !== record.key);
+    if (activeDefinitionKey.value && !definitionTabs.value.some((tab) => tab.key === activeDefinitionKey.value)) activeDefinitionKey.value = null;
     const next = records.value.filter((candidate) => candidate !== record);
     const path = record.binding.projectPath.value;
     if (path !== null && pathKeys.get(projectPathIdentity(path)) === record.key) {
@@ -441,6 +490,12 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
 
   async function closeTab(key: string, discard = false): Promise<void> {
     if (disposed || pendingSaveConflict.value !== null) return;
+    const definitionTab = definitionTabs.value.find((tab) => tab.key === key);
+    if (definitionTab) {
+      definitionTabs.value = definitionTabs.value.filter((tab) => tab.key !== key);
+      if (activeDefinitionKey.value === key) activeDefinitionKey.value = null;
+      return;
+    }
     const index = records.value.findIndex((record) => record.key === key);
     const record = records.value[index];
     if (!record || !record.hasDocument) return;
@@ -450,6 +505,8 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
       return;
     }
     clearDrillDownSources(key);
+    definitionTabs.value = definitionTabs.value.filter((tab) => tab.parentKey !== key);
+    if (activeDefinitionKey.value && !definitionTabs.value.some((tab) => tab.key === activeDefinitionKey.value)) activeDefinitionKey.value = null;
     const next = records.value.filter((candidate) => candidate.key !== key);
     const identity = record.binding.projectPath.value;
     if (identity !== null && pathKeys.get(projectPathIdentity(identity)) === key) pathKeys.delete(projectPathIdentity(identity));
@@ -471,6 +528,14 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
 
   async function activateTab(key: string): Promise<void> {
     if (disposed) return Promise.resolve();
+    const definitionTab = definitionTabs.value.find((tab) => tab.key === key);
+    if (definitionTab) {
+      const parent = records.value.find((record) => record.key === definitionTab.parentKey && record.hasDocument);
+      if (!parent) return;
+      await activateRecord(parent);
+      activeDefinitionKey.value = key;
+      return;
+    }
     const record = records.value.find((candidate) => candidate.key === key && candidate.hasDocument);
     if (!record) return;
     const previous = active.value;
@@ -482,7 +547,7 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
     if (!revealed) drillDownSources.delete(previous.key);
   }
 
-  const tabs = computed<readonly DocumentTabSnapshot[]>(() => records.value
+  const tabs = computed<readonly DocumentTabSnapshot[]>(() => [...records.value
     .filter((record) => record.hasDocument)
     .map((record) => ({
       key: record.key,
@@ -495,7 +560,18 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
       simulationState: record.binding.state.value.simulationState,
       needsReload: record.binding.needsReload.value,
       staleSubcircuitCount: record.binding.staleSubcircuits.value.length,
-    })));
+    })), ...definitionTabs.value.map((tab) => {
+      const parent = records.value.find((record) => record.key === tab.parentKey);
+      void parent?.binding.editorState.value;
+      const definition = parent?.binding.getEmbeddedDefinition(tab.definitionId);
+      return {
+        key: tab.key, kind: "definition" as const, path: null,
+        displayName: definition?.displayName ?? tab.displayName,
+        isDirty: false, saveError: null, openError: null,
+        engineState: parent?.binding.state.value.engineState ?? "unavailable",
+        simulationState: "stopped" as const,
+      };
+    })]);
 
   const refNames = new Set([...mutableWorkspaceRefs, "canSave", "projectName", "saveState", "recentProjects", "libraryTree"]);
   const editorRefNames = new Set(["showDetails", "showSidebar", "activeRailPage", "bottomTab", "zoom", "viewport", "interaction"]);
@@ -534,11 +610,14 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
     get(_target, property: string) {
       if (property === "editor") return editorFacade;
       if (property === "tabs") return tabs;
-      if (property === "activeDocumentKey") return computed(() => activeKey.value);
+      if (property === "activeDocumentKey") return computed(() => activeDefinitionKey.value ?? activeKey.value);
+      if (property === "activeDefinition") return activeDefinition;
+      if (property === "openEmbeddedDefinition") return openEmbeddedDefinition;
       if (property === "activateTab") return activateTab;
       if (property === "openSubcircuit") return openSubcircuit;
       if (property === "returnToParent") return returnToParent;
       if (property === "canReturnToParent") return computed(() => {
+        if (activeDefinitionKey.value !== null) return true;
         const record = active.value;
         const source = record ? drillDownSources.get(record.key) : undefined;
         return Boolean(source && records.value.some((candidate) => candidate.key === source.parentKey && candidate.hasDocument));
@@ -593,6 +672,8 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
     pendingCloseKey.value = null;
     pendingSaveConflict.value = null;
     activeKey.value = null;
+    activeDefinitionKey.value = null;
+    definitionTabs.value = [];
     pathKeys.clear();
     drillDownSources.clear();
     for (const record of controllers) void disposeController(record);

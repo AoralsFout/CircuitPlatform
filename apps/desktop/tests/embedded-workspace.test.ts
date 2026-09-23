@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ComponentKindName, EngineResponse, PortSpec } from "@circuit-platform/protocol";
 import { useWorkspace } from "../src/composables/useWorkspace.ts";
+import { useDocumentWorkspace } from "../src/composables/useDocumentWorkspace.ts";
 import { serializeProjectFile, type ProjectFileData } from "../src/project-file/index.ts";
 import { portsForAddComponent } from "./fake-ports.ts";
 import { canvasSubcircuitName } from "../src/project-file/library.ts";
@@ -257,6 +258,88 @@ test("a nested library dependency can be placed with its saved interface", async
     assert.equal(binding.libraryTree.value[0]?.children[0]?.usageCount, 2);
   } finally {
     await binding.dispose();
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
+});
+
+test("definition tabs use parent identity, survive source deletion, and follow undo without file IO", async () => {
+  const engine = new EmbeddedEngine();
+  const sourcePath = "E:\\circuits\\source.circuit.json";
+  engine.files.set(sourcePath, sourceFile());
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", { configurable: true, value: { circuitPlatform: engine } });
+  const workspace = useDocumentWorkspace();
+  try {
+    await workspace.requestNew();
+    const parentKey = workspace.activeDocumentKey.value;
+    engine.openChoices.push({ ok: true, path: sourcePath });
+    assert.equal(await workspace.importSubcircuitOnlyFromDialog(), true);
+    const definitionId = workspace.libraryTree.value[0].definitionId;
+    const externalCopy = workspace.getEmbeddedDefinition(definitionId);
+    assert.equal(externalCopy?.circuit.components.length, 3);
+    (externalCopy!.circuit.components as unknown[]).pop();
+    assert.equal(workspace.getEmbeddedDefinition(definitionId)?.circuit.components.length, 3);
+
+    engine.files.delete(sourcePath);
+    const readCount = engine.readPaths.length;
+    assert.equal(await workspace.openEmbeddedDefinition(definitionId), true);
+    const definitionKey = workspace.activeDocumentKey.value;
+    assert.notEqual(definitionKey, parentKey);
+    assert.equal(workspace.activeDefinition.value?.circuit.components[1]?.kind, "not");
+    assert.equal(workspace.tabs.value.length, 2);
+    assert.equal(workspace.tabs.value[1]?.kind, "definition");
+    assert.equal(await workspace.openEmbeddedDefinition(definitionId), true);
+    assert.equal(workspace.activeDocumentKey.value, definitionKey);
+    assert.equal(workspace.tabs.value.length, 2);
+    assert.equal(engine.readPaths.length, readCount);
+
+    assert.equal(await workspace.returnToParent(), true);
+    assert.equal(workspace.activeDocumentKey.value, parentKey);
+    await workspace.undo();
+    await workspace.activateTab(definitionKey);
+    assert.equal(workspace.activeDefinition.value?.missing, true);
+    await workspace.activateTab(parentKey);
+    await workspace.redo();
+    await workspace.activateTab(definitionKey);
+    assert.equal(workspace.activeDefinition.value?.missing, false);
+    assert.equal(workspace.activeDefinition.value?.circuit.connections.length, 2);
+    assert.equal(engine.readPaths.length, readCount);
+  } finally {
+    workspace.dispose();
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
+});
+
+test("canvas drill-down opens a read-only definition without changing editable path tabs", async () => {
+  const engine = new EmbeddedEngine();
+  const sourcePath = "E:\\circuits\\source.circuit.json";
+  engine.files.set(sourcePath, sourceFile());
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", { configurable: true, value: { circuitPlatform: engine } });
+  const workspace = useDocumentWorkspace();
+  try {
+    await workspace.requestNew();
+    const parentKey = workspace.activeDocumentKey.value;
+    engine.openChoices.push({ ok: true, path: sourcePath });
+    assert.equal(await workspace.addSubcircuitFromDialog(), true);
+    const componentId = workspace.editorState.value!.document.components[0]!.id;
+    assert.equal(await workspace.openSubcircuit(componentId), true);
+    assert.equal(workspace.tabs.value.length, 2);
+    assert.equal(workspace.tabs.value[1]?.path, null);
+    assert.equal(workspace.activeDefinition.value?.missing, false);
+    assert.equal(await workspace.returnToParent(), true);
+    assert.equal(workspace.activeDocumentKey.value, parentKey);
+    assert.equal(workspace.editorState.value?.selection?.kind, "component");
+    const parentPath = "D:\\archive\\parent.circuit.json";
+    engine.saveChoices.push({ ok: true, path: parentPath });
+    assert.equal(await workspace.saveAs(), true);
+    await workspace.requestOpenRecent(parentPath);
+    assert.equal(workspace.tabs.value.length, 2);
+    assert.equal(workspace.activeDocumentKey.value, parentKey);
+  } finally {
+    workspace.dispose();
     if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
     else Reflect.deleteProperty(globalThis, "window");
   }

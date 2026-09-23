@@ -2,6 +2,7 @@
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import BottomPanel from "./components/BottomPanel.vue";
 import CircuitCanvas from "./components/CircuitCanvas.vue";
+import EmbeddedDefinitionView from "./components/EmbeddedDefinitionView.vue";
 import ClearCanvasDialog from "./components/ClearCanvasDialog.vue";
 import EditorToolbar from "./components/EditorToolbar.vue";
 import EmptyStatePanel from "./components/EmptyStatePanel.vue";
@@ -69,10 +70,12 @@ const {
   requestOpenRecent,
   tabs,
   activeDocumentKey,
+  activeDefinition,
   canReturnToParent,
   activateTab,
   closeTab,
   openSubcircuit,
+  openEmbeddedDefinition,
   returnToParent,
   requestLoadExample,
   addSubcircuitFromDialog,
@@ -154,8 +157,8 @@ const isBottomPanelExpanded = ref(true);
 // Internal instance reads are visibility-driven. The document binding keeps the
 // latest selection/projection revision and cancels publication of stale results.
 watch(
-  [isBottomPanelExpanded, bottomTab, () => editorState.value?.selection],
-  () => setInternalSignalTableVisible(isBottomPanelExpanded.value && bottomTab.value === "inspector"),
+  [isBottomPanelExpanded, bottomTab, activeDefinition, () => editorState.value?.selection],
+  () => setInternalSignalTableVisible(!activeDefinition.value && isBottomPanelExpanded.value && bottomTab.value === "inspector"),
   { immediate: true, deep: true },
 );
 
@@ -199,6 +202,7 @@ function onEditorKeydown(event: KeyboardEvent): void {
   });
   if (!shortcut) return;
   event.preventDefault();
+  if (activeDefinition.value && !["new-document", "open-document", "cancel"].includes(shortcut)) return;
   if (shortcut === "cancel") {
     // Esc 只取消当前最上层状态：文件操作确认 → 清空确认框 → 恢复提示 → 草稿 → 拖动预览 → 选择。
     if (pendingFileAction.value) cancelPendingFileAction();
@@ -256,10 +260,10 @@ onBeforeUnmount(() => {
       :engine-state-label="engineStateLabel"
       :theme-label="themeLabel"
       :is-busy="state.isBusy || state.engineState === 'checking'"
-      :project-name="projectName"
-      :save-state="saveState"
+      :project-name="activeDefinition?.displayName ?? projectName"
+      :save-state="activeDefinition ? 'saved' : saveState"
       :save-error="saveError"
-      :can-save="canSave"
+      :can-save="canSave && !activeDefinition"
       :recent-projects="recentProjects"
       :tabs="tabs"
       :active-document-key="activeDocumentKey"
@@ -276,11 +280,11 @@ onBeforeUnmount(() => {
       @return-to-parent="returnToParent"
     />
 
-    <section class="editor-layout" :class="{ 'editor-layout--sidebar-collapsed': !showSidebar || activeRailPage === 'settings' }">
-      <ToolRail :active-rail-page="activeRailPage" @select-page="selectRailPage" />
+    <section class="editor-layout" :class="{ 'editor-layout--sidebar-collapsed': !showSidebar || activeRailPage === 'settings', 'editor-layout--definition': activeDefinition }">
+      <ToolRail v-if="!activeDefinition" :active-rail-page="activeRailPage" @select-page="selectRailPage" />
 
       <WorkspaceSidebar
-        v-if="showSidebar && activeRailPage !== 'settings'"
+        v-if="!activeDefinition && showSidebar && activeRailPage !== 'settings'"
         :active-rail-page="activeRailPage"
         :input-controls="inputControls"
         :can-toggle-input="state.canToggleInput"
@@ -298,10 +302,12 @@ onBeforeUnmount(() => {
         @import-subcircuit-only="importSubcircuitOnlyFromDialog"
         @place-imported-subcircuit="placeImportedSubcircuit"
         @rename-imported-subcircuit="renameImportedSubcircuit"
+        @open-embedded-definition="openEmbeddedDefinition"
         @default-wire-color-change="setDefaultWireColor"
       />
 
-      <section v-if="activeRailPage !== 'settings'" class="editor-main" :class="{ 'editor-main--bottom-panel-collapsed': !isBottomPanelExpanded }" aria-label="电路编辑器">
+      <EmbeddedDefinitionView v-if="activeDefinition" :definition="activeDefinition" @open-definition="openEmbeddedDefinition" />
+      <section v-else-if="activeRailPage !== 'settings'" class="editor-main" :class="{ 'editor-main--bottom-panel-collapsed': !isBottomPanelExpanded }" aria-label="电路编辑器">
         <p v-if="editorState?.operation === 'recovery-required'" class="bottom-error" role="alert">编辑器与仿真引擎的结构状态可能不一致。请关闭并重新打开应用后再继续编辑。</p>
         <p v-else-if="saveError" class="bottom-error" role="alert" :title="saveError">{{ saveError }}</p>
         <p v-else-if="openError" class="bottom-error" role="alert" :title="openError">{{ openError }}</p>
