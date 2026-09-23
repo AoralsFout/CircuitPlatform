@@ -78,7 +78,7 @@ test("round-trips embedded definitions, direct roots, cached ports, and connecti
     components: [{
       id: "u1", kind: "subcircuit", displayName: "arith.circuit.json", position: at(120, 80),
       lifecycle: "active", ports: cachedPorts,
-      data: { subcircuit: { definitionId: "arithmetic", cachedPorts, portOrder: ["Y", "A"], status: "resolved" } },
+      data: { subcircuit: { definitionId: "arithmetic", reference: "", cachedPorts, portOrder: ["Y", "A"], status: "resolved" } },
     }],
     connections: [{
       id: "w1",
@@ -95,7 +95,7 @@ test("round-trips embedded definitions, direct roots, cached ports, and connecti
   assert.deepEqual(parsed.file, file);
   assert.deepEqual(parsed.file.libraryRoots, ["arithmetic"]);
   assert.deepEqual(Object.keys(parsed.file.definitions).sort(), ["arithmetic", "unused"]);
-  assert.deepEqual(parsed.document.components[0]?.data?.subcircuit, { definitionId: "arithmetic", cachedPorts, portOrder: ["Y", "A"] });
+  assert.deepEqual(parsed.document.components[0]?.data?.subcircuit, { definitionId: "arithmetic", reference: "", cachedPorts, portOrder: ["Y", "A"] });
   assert.deepEqual(parsed.document.connections[0]?.waypoints, [at(140, 20)]);
   assert.equal(parsed.document.connections[0]?.color, "cyan");
 });
