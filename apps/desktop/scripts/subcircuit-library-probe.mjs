@@ -154,6 +154,7 @@ async function main() {
     // 从树前的原生按钮出发，使用真实 Tab 进入定义树。
     await window.webContents.executeJavaScript("document.querySelector('.subcircuit-actions > button').focus()");
     key(window, "Tab");
+    await waitFor(window, "document.activeElement?.classList.contains('subcircuit-tree-node')", "Tab 未进入定义树", 5_000);
     const firstFocus = await facts(window);
     assert.match(firstFocus.active, new RegExp(`^选择子电路 ${longName.replaceAll(".", "\\.")}`));
     key(window, "Tab");
@@ -174,10 +175,12 @@ async function main() {
     assert.equal(renaming.renameLabel, "子电路名称");
     assert.equal(renaming.inputValue, longName, "改名时应编辑原始名称，不含编号");
     key(window, "Tab");
+    await waitFor(window, "document.activeElement?.id === 'subcircuit-rename-input'", "Tab 未进入改名输入框", 5_000);
     assert.equal(await window.webContents.executeJavaScript("document.activeElement?.id"), "subcircuit-rename-input", "Tab 应进入改名输入框");
     await window.webContents.executeJavaScript("document.querySelector('#subcircuit-rename-input').select()");
     window.webContents.insertText(renamedName);
     key(window, "Tab");
+    await waitFor(window, "document.activeElement?.textContent?.trim() === '保存名称'", "Tab 未进入保存名称按钮", 5_000);
     assert.equal(await window.webContents.executeJavaScript("document.activeElement?.textContent?.trim()"), "保存名称", "Tab 应进入保存按钮");
     key(window, " ");
     await waitFor(window, `document.querySelectorAll('.subcircuit-tree-node')[2]?.querySelector('.subcircuit-name')?.textContent?.trim() === ${JSON.stringify(renamedName)}`, "改名未更新树");
