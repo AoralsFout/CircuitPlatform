@@ -443,10 +443,6 @@ export interface SubcircuitCanvasState {
   relativePath: string;
   status: "resolved" | "resolving" | "unresolved";
   diagnostic: string | null;
-  /** 父侧是否仍采用磁盘上的旧展平副本。 */
-  needsReload?: boolean;
-  /** 父侧实际采用的子 Project 版本 token。 */
-  adoptedVersion?: string | null;
 }
 
 export interface CanvasWireEndpoint {
@@ -792,11 +788,9 @@ export function projectCanvasScene(
     const geometry = componentGeometryFor(definition, ports);
     const subcircuit: SubcircuitCanvasState | undefined = subcircuitData
       ? {
-        relativePath: subcircuitData.reference,
+        relativePath: component.displayName,
         status: subcircuitData.status ?? (subcircuitData.diagnostic ? "unresolved" : "resolved"),
         diagnostic: subcircuitData.diagnostic?.message ?? null,
-        needsReload: subcircuitData.needsReload === true,
-        adoptedVersion: subcircuitData.adoptedVersion ?? null,
       }
       : undefined;
     return {

@@ -146,7 +146,9 @@ Engine ID。健康检查、重启、待处理请求清理和关闭回收均按�
 
 保存另一个可编辑 Project 不会广播基于源路径的 stale 状态。父文档的内嵌快照保持不变，
 只在用户重新选文件并确认重新导入后更新；因此父文档没有 `needsReload` 提示，也不依赖
-原文件仍存在。普通文件标签的保存和路径身份规则不受内嵌标签影响。
+原文件仍存在。普通文件标签的保存和路径身份规则不受内嵌标签影响。生产 facade 与无头
+`createDocumentCoordinator` 均直接保存 v2 内容；跨目录另存为只更改当前 Project 的路径身份，
+不计算子电路相对路径，也没有跨磁盘引用重定位错误。
 
 内部信号是只读的 occurrence-local projection。展平器为每个 occurrence 生成稳定的
 `ownerId`、`flatId` 和端口来源，工作区把已有 tick 快照投影成 `flatId:port`；不把临时

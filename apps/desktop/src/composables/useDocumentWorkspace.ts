@@ -47,7 +47,7 @@ interface DefinitionTab {
   sourceComponentId?: EditorComponentId;
 }
 
-const mutableWorkspaceRefs = new Set(["state", "editorState", "projectPath", "isDirty", "saveError", "openError", "pendingFileAction", "pendingDefinitionDeletion", "pendingReimport", "recentProjects", "staleSubcircuits", "needsReload", "projectVersion"]);
+const mutableWorkspaceRefs = new Set(["state", "editorState", "projectPath", "isDirty", "saveError", "openError", "pendingFileAction", "pendingDefinitionDeletion", "pendingReimport", "recentProjects"]);
 const mutableEditorRefs = new Set(["showDetails", "showSidebar", "activeRailPage", "bottomTab", "zoom"]);
 
 /**
@@ -106,17 +106,6 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
     recentProjects.value = readSharedRecentProjects();
   }
 
-  /** 广播已确认写盘的子 Project 版本；仅更新仍打开父文档的 stale 投影。 */
-  function publishSuccessfulSave(record: DocumentController): void {
-    const path = record.binding.projectPath.value;
-    const version = record.binding.projectVersion.value;
-    if (path === null || version === null) return;
-    const identity = projectPathIdentity(path);
-    for (const candidate of records.value) {
-      if (candidate === record || candidate.disposed || !candidate.hasDocument) continue;
-      candidate.binding.markSubcircuitsStale(identity, version);
-    }
-  }
   // Tab activation is serialized so a rapid A → B → C sequence cannot let an
   // older pause finish after a newer activation and publish the wrong active view.
   let activationChain: Promise<void> = Promise.resolve();
@@ -240,6 +229,11 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
     if (!parent?.hasDocument || parent.binding.getEmbeddedDefinition(definitionId) === null) return false;
     const existing = definitionTabs.value.find((tab) => tab.parentKey === parent.key && tab.definitionId === definitionId);
     if (existing) {
+      if (sourceComponentId) {
+        definitionTabs.value = definitionTabs.value.map((tab) => tab.key === existing.key
+          ? { ...tab, sourceComponentId, returnKey: activeDefinitionKey.value ?? parent.key }
+          : tab);
+      }
       activeDefinitionKey.value = existing.key;
       return true;
     }
@@ -416,9 +410,7 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
     const record = active.value;
     if (!record?.hasDocument) return false;
     if (record.binding.projectPath.value === null) return saveProjectAs();
-    const succeeded = await record.binding.save();
-    if (succeeded) publishSuccessfulSave(record);
-    return succeeded;
+    return record.binding.save();
   }
 
   /** 打开另存为对话框并在任何写盘前检查路径身份冲突。 */
@@ -452,7 +444,6 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
     if (succeeded) {
       pathKeys.set(targetIdentity, record.key);
       syncRecentProjects();
-      publishSuccessfulSave(record);
     }
     return succeeded;
   }
@@ -479,7 +470,6 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
     if (!succeeded) return false;
     pathKeys.set(projectPathIdentity(conflict.targetPath), source.key);
     syncRecentProjects();
-    publishSuccessfulSave(source);
     await discardRecord(target);
     return true;
   }
@@ -558,8 +548,6 @@ export function useDocumentWorkspace(options: DocumentWorkspaceOptions = {}): an
       openError: record.binding.openError.value,
       engineState: record.binding.state.value.engineState,
       simulationState: record.binding.state.value.simulationState,
-      needsReload: record.binding.needsReload.value,
-      staleSubcircuitCount: record.binding.staleSubcircuits.value.length,
     })), ...definitionTabs.value.map((tab) => {
       const parent = records.value.find((record) => record.key === tab.parentKey);
       void parent?.binding.editorState.value;

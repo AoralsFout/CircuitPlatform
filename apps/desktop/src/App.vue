@@ -96,7 +96,6 @@ const {
   confirmDeleteImportedSubcircuit,
   cancelDeleteImportedSubcircuit,
   pendingDefinitionDeletion,
-  reloadSubcircuit,
   dispose: disposeDocumentWorkspace,
 } = documentWorkspace;
 const {
@@ -424,7 +423,6 @@ onBeforeUnmount(() => {
           :inspector="inspector"
           @set-port-width="setPortWidth"
           @set-bit-ranges="setBitRanges"
-          @reload-subcircuit="reloadSubcircuit"
           @open-subcircuit="openSubcircuit"
           :waveform="state.waveform"
           :waveform-rows="waveformRows"

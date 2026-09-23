@@ -37,18 +37,19 @@
 | `long-name` | 长路径/长项目名截断但仍可通过 ARIA 名称识别 | 通过（2/2） | 通过（2/2） |
 | `unnamed-tabs` | 多个未命名文档的稳定序号与去重 | 通过（2/2） | 通过（2/2） |
 | `unsaved-tab` | dirty 标记、关闭确认、取消后焦点回到原标签 | 通过（2/2） | 通过（2/2） |
-| `needs-reload` | 父 occurrence 的 stale/需重新加载提示，不误报为 dirty | 通过（2/2） | 通过（2/2） |
+| `snapshot-isolated` | 源文件不可用时仍显示父 Project 的内嵌定义，且无旧重载入口 | DOM 探针通过；截图待重采 | DOM 探针通过；截图待重采 |
 | `unresolved-drill` | 未解析实例的下钻入口禁用并展示诊断 | 通过（2/2） | 通过（2/2） |
 | `engine-unavailable` | 单文档不可用，不把其他标签染成 unavailable | 通过（2/2） | 通过（2/2） |
 | `internal-signals` | occurrence-local 行、值、只读标记和可恢复读取错误 | 通过（2/2） | 通过（2/2） |
 | `source-return` | 返回父文档后来源选中、居中和焦点状态 | 通过（2/2） | 通过（2/2） |
 
-2026-09-21 已运行以下取证命令；10 个状态在深色/浅色、普通/窄窗口下共生成 40 张截图，
-`visual:probe` 的 21 个状态全部通过：
+2026-09-21 的 40 张截图记录了 Phase 5.6 历史状态，其中 `needs-reload` 已被内嵌快照语义取代。
+2026-09-23 已单独验证 `hierarchy-resolved`、`hierarchy-unresolved`、`unresolved-drill` 和
+`snapshot-isolated` 的 DOM 事实；新状态的完整截图矩阵尚待重采。当前命令为：
 
 ```powershell
-pnpm --filter @circuit-platform/desktop visual:test -- --state=multi-tabs,multi-tabs-narrow,long-name,unnamed-tabs,unsaved-tab,needs-reload,unresolved-drill,engine-unavailable,internal-signals,source-return
-pnpm --filter @circuit-platform/desktop visual:probe
+pnpm --filter @circuit-platform/desktop visual:test -- --state=multi-tabs,multi-tabs-narrow,long-name,unnamed-tabs,unsaved-tab,snapshot-isolated,unresolved-drill,engine-unavailable,internal-signals,source-return
+pnpm --filter @circuit-platform/desktop visual:probe --state=snapshot-isolated
 ```
 
 Spec #67 的子电路库另有真实桌面窗口 DOM 探针：
@@ -65,7 +66,7 @@ pnpm --filter @circuit-platform/desktop test:subcircuit-library-probe
 指向主工作区的 `engine/build/circuit-engine.exe`。
 
 `visual:test` 成功只证明页面和夹具能产出截图，不能证明像素哈希稳定；以上状态的 tab
-数量、ARIA 标签、dirty/stale/unresolved/unavailable 文案或类名、禁用下钻、来源选中/
+数量、ARIA 标签、dirty/unresolved/unavailable 文案或类名、禁用下钻、来源选中/
 居中以及内部行和值，必须由 `visual:probe` 逐条断言。截图矩阵已抽查多标签、未命名标签、
 内部信号和来源返回；截图证据仍不替代 DOM 事实断言。
 

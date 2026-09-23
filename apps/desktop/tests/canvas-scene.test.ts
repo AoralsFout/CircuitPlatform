@@ -74,10 +74,10 @@ test("unresolved subcircuits render cached ports and projected status", () => {
         id: "child-1", kind: "subcircuit", displayName: "alu.cp", position: { x: 10, y: 20 }, lifecycle: "active",
         data: {
           subcircuit: {
-            reference: "blocks/alu.cp",
+            reference: "",
             cachedPorts,
             status: "unresolved",
-            diagnostic: { code: "missing-file", message: "找不到子电路文件" },
+            diagnostic: { code: "definition-missing", message: "缺少内嵌子电路定义" },
           },
         },
       }],
@@ -89,9 +89,9 @@ test("unresolved subcircuits render cached ports and projected status", () => {
 
   const node = scene.nodes[0]!;
   assert.equal(node.displayName, "alu.cp");
-  assert.equal(node.subcircuit?.relativePath, "blocks/alu.cp");
+  assert.equal(node.subcircuit?.relativePath, "alu.cp");
   assert.equal(node.subcircuit?.status, "unresolved");
-  assert.equal(node.subcircuit?.diagnostic, "找不到子电路文件");
+  assert.equal(node.subcircuit?.diagnostic, "缺少内嵌子电路定义");
   assert.deepEqual(node.ports.map((port) => port.id), ["in", "out"]);
   assert.deepEqual(node.ports.map((port) => port.width), [4, 4]);
 });

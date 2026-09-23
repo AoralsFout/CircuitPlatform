@@ -36,7 +36,7 @@ test("visual fixture covers the required state matrix and reduced motion mode", 
   assert.doesNotMatch(fixture, /fixture-node|style="left:|<path[^>]+ d="/);
 });
 
-/** 层次化画面里的状态、诊断和重载动作必须能由键盘到达，并向辅助技术提供完整上下文。 */
+/** 层次化画面里的状态和诊断必须向辅助技术提供完整上下文。 */
 test("hierarchy controls expose keyboard and accessible state semantics", async () => {
   const sidebar = await readFile(join(desktopRoot, "src", "components", "WorkspaceSidebar.vue"), "utf8");
   const panel = await readFile(join(desktopRoot, "src", "components", "BottomPanel.vue"), "utf8");
@@ -48,12 +48,12 @@ test("hierarchy controls expose keyboard and accessible state semantics", async 
   // 检查器页签保留原生按钮的 Enter/Space 激活，同时对读屏器声明选中页签。
   assert.match(panel, /class="bottom-tabs" role="tablist" aria-label="仿真结果视图"/);
   assert.match(panel, /role="tab" :aria-selected="bottomTab === 'inspector'"/);
-  // 子电路状态、诊断和重载命令共享可追踪的描述关系；重载按钮无需鼠标即可聚焦并激活。
+  // 子电路状态与诊断可读；内嵌定义不提供旧源路径重载入口。
   assert.match(panel, /<span role="status">状态：\{\{ subcircuitStatusLabel\(inspector\.subcircuit\.status\) \}\}<\/span>/);
   assert.match(panel, /:id="`subcircuit-diagnostic-\$\{inspector\.id\}`" class="inspector-hint" role="alert"/);
   assert.match(panel, /:aria-describedby="inspector\.subcircuit\.diagnostic \? `subcircuit-diagnostic-\$\{inspector\.id\}` : undefined"/);
-  assert.match(panel, /:aria-label="`重新加载子电路 \$\{inspector\.subcircuit\.relativePath\}`"/);
-  // 窄而矮的窗口里诊断不能把重载按钮挤出面板；内容可滚动且从顶部开始布局。
+  assert.doesNotMatch(panel, /重新加载子电路/);
+  // 窄而矮的窗口里诊断仍应可见；内容可滚动且从顶部开始布局。
   assert.match(styles, /@media \(max-height: 600px\)[\s\S]*\.bottom-content \{ overflow: auto; \}/);
   assert.match(styles, /@media \(max-height: 600px\)[\s\S]*\.bottom-content--inspector \{ align-items: flex-start; \}/);
 });

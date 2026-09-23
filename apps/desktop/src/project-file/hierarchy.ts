@@ -51,8 +51,8 @@ export interface HierarchyDiagnostic extends SubcircuitDiagnostic {
 export interface FlattenProjectInput {
   rootIdentity: string;
   root: ProjectFileData;
-  /** 兼容旧调用方；v2 不从文件读取定义。 */
-  reader: HierarchyProjectReader;
+  /** 兼容旧调用方；v2 忽略此项并只读取 root.definitions。 */
+  reader?: HierarchyProjectReader;
   platform?: PathPlatform;
 }
 

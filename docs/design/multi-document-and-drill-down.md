@@ -2,12 +2,12 @@
 
 ## 文档状态
 
-- 版本：1.0
-- 状态：已实现并完成验收
+- 版本：1.0（Phase 5.6 历史设计）
+- 状态：多文档隔离与使用处信号投影仍适用；路径下钻、保存广播和 stale 入口已由 ADR 0027 取代
 - 适用范围：`apps/desktop`（Vue 渲染进程 + Electron 主进程）
 - 依赖：[ADR 0014](../decisions/0014-subcircuit-by-reference-flattened-simulation.md)、[ADR 0018](../decisions/0018-subproject-changes-do-not-propagate-automatically.md)、[ADR 0007](../decisions/0007-editor-session-and-stable-editor-ids.md)、[ADR 0023](../decisions/0023-document-keyed-engine-client-pool.md)、[ADR 0024](../decisions/0024-multi-document-coordinator.md)、[ADR 0025](../decisions/0025-subcircuit-save-staleness.md)、[ADR 0026](../decisions/0026-readonly-subcircuit-signal-projection.md)
 - 对应阶段：[Phase 5.6](../roadmap.md)
-- 历史范围：本文的按源路径下钻、保存后 stale 提示由 [内嵌子电路设计](embedded-subcircuits.md) 取代；普通 Project 标签的路径身份与使用处内部实时信号投影继续适用。
+- 历史范围：下文对源 Project 相对路径、同一路径子标签复用、`needsReload`、显式按路径重载、Save As 引用重定位的描述仅记录旧实现，当前不执行。当前行为见 [内嵌子电路设计](embedded-subcircuits.md) 与 [ADR 0027](../decisions/0027-embedded-subcircuit-snapshots.md)；普通 Project 标签的路径身份与使用处内部实时信号投影继续适用。
 
 本文的运行时边界已经落到 `createDocumentCoordinator`（无头测试 seam）和
 `useDocumentWorkspace`（生产 live facade）。下文描述的是 Phase 5.6 的历史实现契约；真实

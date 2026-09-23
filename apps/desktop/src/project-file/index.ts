@@ -16,7 +16,6 @@ import type { ComponentKindName, PortSpec, Signal } from "@circuit-platform/prot
 import type { EditorComponentKind, EditorComponentData, SubcircuitComponentData } from "../editor/component.ts";
 import type { EditorComponent, EditorConnection, EditorDocument, Point } from "../editor/index.ts";
 import { isWireColorId, type WireColorId } from "../editor/wire-appearance.ts";
-import type { PathPlatform } from "./paths.ts";
 
 export {
   currentPathPlatform,
@@ -123,38 +122,6 @@ export interface ProjectSerializationInput {
    * 与工作区 `inputValues` 同键空间；省略的输入不写 `data`。
    */
   inputValues?: Readonly<Record<string, Signal>>;
-}
-
-/** 旧调用方兼容类型；v2 内嵌定义无需引用重定位。 */
-export interface ProjectFileRebaseError {
-  code: "reference-rebase-cross-root";
-  message: string;
-  componentId: string;
-  target: string;
-}
-
-export type ProjectFileRebaseResult =
-  | { ok: true; value: ProjectFileData }
-  | { ok: false; error: ProjectFileRebaseError };
-
-/**
- * 兼容旧保存调用方的恒等操作。v2 项目文件没有源路径，另存为不改内容。
- * @param file 已通过 `parseProjectFile` 的规范化项目文件。
- * @param oldParentProject 原父 Project 路径。
- * @param newParentProject Save As 后的新父 Project 路径。
- * @param platform 路径语义平台。
- * @returns 全部引用重定位后的新文件，或稳定的跨根错误。
- */
-export function rebaseProjectFileReferences(
-  file: ProjectFileData,
-  oldParentProject: string,
-  newParentProject: string,
-  platform?: PathPlatform,
-): ProjectFileRebaseResult {
-  void oldParentProject;
-  void newParentProject;
-  void platform;
-  return { ok: true, value: file };
 }
 
 /** 一次校验失败的单一原因；`code` 供程序分支，`message` 可直接展示。 */
