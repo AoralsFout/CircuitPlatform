@@ -2,7 +2,7 @@
 
 ## 状态与依据
 
-- 状态：设计已确认；尚未实现。
+- 状态：设计已确认，已按 Spec #67 实现。
 - 决策：[ADR 0027](../decisions/0027-embedded-subcircuit-snapshots.md)。
 - 实施规格：[Issue #67](https://github.com/AoralsFout/CircuitPlatform/issues/67)。
 - 取代的现有行为：按路径引用、打开时读取子文件、按源文件保存事件显示 `needsReload`、下钻打开源文件。展平仿真与每个放置位置独立的时序状态继续使用。
