@@ -89,6 +89,8 @@ export function createWindowDocumentRuntimeFactory(): DocumentRuntimeFactory {
 /** 标签栏只消费的文档摘要，不暴露运行时对象或引擎身份。 */
 export interface DocumentTabSnapshot {
   key: string;
+  /** 内嵌定义共享父文档运行时；普通文件标签省略此字段。 */
+  kind?: "definition";
   path: string | null;
   displayName: string;
   isDirty: boolean;
