@@ -1354,6 +1354,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
       : { ok: false, message: parsed.errors[0]?.message ?? "项目文件校验失败。" };
   }
 
+  /** 未放置的导入根不会进入顶层展平；用临时使用处检查其闭包诊断，不提交到文档。 */
   async function definitionGraphWarnings(file: ProjectFileData, definitionId: string): Promise<readonly string[]> {
     const definition = file.definitions[definitionId];
     if (!definition) return [];
