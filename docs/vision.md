@@ -21,11 +21,14 @@ CircuitPlatform 是一个简易的数字电路仿真桌面应用。用户可以�
 
 第一版支持组合逻辑和基础时序逻辑，包括基础逻辑门、Clock、D Flip-Flop、`0 / 1 / X` 信号、手动和连续仿真、保存加载以及简单波形查看。
 
-在此之上，第一版还包含三个阶段的能力，具体范围与验收见[项目路线图](roadmap.md)：
+在此之上，第一版还包含以下能力，具体范围与验收见[项目路线图](roadmap.md)：
 
 - 多位 Port 与总线（Phase 4.5）：单个 Port 承载多位信号，用拆线器和合线器拆分与合并；
 - 层次化电路（Phase 5.5）：把一份 Project 作为 Subcircuit 放进另一份电路复用；
 - 多文档与下钻（Phase 5.6）：多份 Project 同时打开，并沿 Subcircuit 引用关系导航。
+- 内嵌子电路快照（[Spec #67](https://github.com/AoralsFout/CircuitPlatform/issues/67)）：父 Project 保存导入定义及实际依赖，提供定义树、只读浏览和显式重新导入；源文件移动或删除不影响已保存的父工程。
+
+Phase 5.5 和 Phase 5.6 中按源路径引用、下钻及 stale 提示的旧语义由 Spec #67 取代；普通 Project 的多标签工作区、Port 接口和展平仿真继续使用。
 
 ## 非目标
 

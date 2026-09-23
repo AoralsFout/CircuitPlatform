@@ -55,17 +55,16 @@
         clock: [bit("out", "output")],
         d_flip_flop: [bit("d", "input"), bit("clock", "input"), bit("q", "output")],
       };
-      // 层次视觉状态使用真实项目加载路径：父文件含一个 Subcircuit，子文件提供 A/Y 接口。
-      // 这里仅提供夹具文本与桥接响应，不在视觉页实现解析或展平。
+      // 层次视觉状态从父 Project 的内嵌定义展开；源路径不参与打开与恢复。
       const hierarchyParent = {
-        version: 1,
+        version: 2,
         circuit: {
           components: [
             { id: "root-input", kind: "input", displayName: "输入 A", position: { x: 72, y: 212 }, data: { value: "0" } },
             {
               id: "alu-instance", kind: "subcircuit", displayName: "ALU 子电路", position: { x: 320, y: 160 },
               data: {
-                reference: "./child.circuit.json",
+                definitionId: "visual-child",
                 cachedPorts: [bit("A", "input"), bit("Y", "output")],
                 portOrder: ["A", "Y"],
               },
@@ -77,9 +76,11 @@
             { id: "root-out", source: { component: "alu-instance", port: "Y" }, target: { component: "root-output", port: "in" } },
           ],
         },
+        definitions: {},
+        libraryRoots: state === "hierarchy-unresolved" || state === "unresolved-drill" ? [] : ["visual-child"],
       };
       const hierarchyChild = {
-        version: 1,
+        version: 2,
         circuit: {
           components: [
             { id: "child-input", kind: "input", displayName: "A", position: { x: 72, y: 140 }, ports: [bit("out", "output")] },
@@ -91,17 +92,22 @@
             { id: "child-wire-out", source: { component: "child-not", port: "out" }, target: { component: "child-output", port: "in" } },
           ],
         },
+        definitions: {},
+        libraryRoots: [],
       };
+      if (state !== "hierarchy-unresolved" && state !== "unresolved-drill") {
+        hierarchyParent.definitions["visual-child"] = { displayName: "ALU 子电路", circuit: hierarchyChild.circuit };
+      }
       const hierarchyState = state === "hierarchy-resolved" || state === "hierarchy-unresolved" || [
         "multi-tabs", "multi-tabs-narrow",
-        "needs-reload", "unresolved-drill", "internal-signals", "source-return",
+        "snapshot-isolated", "unresolved-drill", "internal-signals", "source-return",
       ].includes(state);
       const openPaths = state === "multi-tabs" || state === "multi-tabs-narrow"
         ? [parentPath, peerPath]
         : state === "long-name" ? [longPath] : [parentPath];
       let openPathIndex = 0;
       const simpleProject = (name) => ({
-        version: 1,
+        version: 2,
         circuit: {
           components: [
             { id: `${name}-input`, kind: "input", displayName: "输入", position: { x: 80, y: 180 }, data: { value: "0" } },
@@ -109,6 +115,8 @@
           ],
           connections: [{ id: `${name}-wire`, source: { component: `${name}-input`, port: "out" }, target: { component: `${name}-output`, port: "in" } }],
         },
+        definitions: {},
+        libraryRoots: [],
       });
       const response = (value) => Promise.resolve(value);
       window.circuitPlatform = {
@@ -179,10 +187,7 @@
           if (filePath.endsWith("peer.circuit.json")) return response({ ok: true, content: JSON.stringify(simpleProject("peer")) });
           if (filePath.endsWith("this-is-a-deliberately-long-project-file-name-for-tab-overflow.circuit.json")) return response({ ok: true, content: JSON.stringify(simpleProject("long")) });
           if (!hierarchyState) return response({ ok: false, reason: "视觉夹具未启用层次项目" });
-          if (filePath.endsWith("child.circuit.json")) {
-            if (state === "hierarchy-unresolved" || state === "unresolved-drill") return response({ ok: false, reason: "找不到子电路文件", code: "PROJECT_FILE_NOT_FOUND" });
-            return response({ ok: true, content: JSON.stringify(hierarchyChild) });
-          }
+          if (filePath.endsWith("child.circuit.json")) return response({ ok: false, reason: "源文件已删除", code: "PROJECT_FILE_NOT_FOUND" });
           return response({ ok: true, content: JSON.stringify(hierarchyParent) });
         },
       };
@@ -315,7 +320,7 @@
         // 首启空状态（#40）本身就是画面：启动不再自动加载示例，其余状态先从空状态面板
         // 显式加载示例，再等电路出现在画布上。
         if (state === "first-start" || state === "first-start-recent") return;
-        if (["hierarchy-resolved", "hierarchy-unresolved", "unresolved-drill", "internal-signals", "source-return", "multi-tabs", "multi-tabs-narrow", "needs-reload"].includes(state)) {
+        if (["hierarchy-resolved", "hierarchy-unresolved", "unresolved-drill", "internal-signals", "source-return", "multi-tabs", "multi-tabs-narrow", "snapshot-isolated"].includes(state)) {
           // 通过真实的「打开」入口加载父 Project；桥接返回的子文件是否存在决定两种状态。
           // 首启时顶栏文件按钮尚未启用，真实入口在空状态面板；从这里发起同一个 requestOpen。
           const openProjectButton = await waitFor('.empty-state__actions button:first-child');
@@ -336,27 +341,7 @@
             await waitFor('[title="返回父电路"]');
             return;
           }
-          if (state === "needs-reload") {
-            // Open the child, make one deterministic input edit, and save it. The
-            // parent remains open and receives only the stale/reload marker.
-            click(await waitFor('[aria-label^="打开子电路"]'));
-            await waitFor('.document-tab');
-            click(await waitFor('[aria-label="输入设置"]'));
-            const bitButton = await waitFor('.input-bit:not(:disabled)');
-            if (bitButton) click(bitButton);
-            await settle(80);
-            click(await waitFor('[title="保存 (Ctrl/Cmd+S)"]'));
-            await settle(100);
-            const parentTab = [...document.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent?.includes("parent"));
-            if (parentTab) click(parentTab);
-            await settle(100);
-            const subcircuitNode = await waitFor('[data-subcircuit-status]');
-            if (subcircuitNode) click(subcircuitNode);
-            await settle(80);
-            click(inspectorTab());
-            await settle(80);
-            return;
-          }
+          if (state === "snapshot-isolated") return;
           if (state === "multi-tabs" || state === "multi-tabs-narrow") {
             // The parent is clean because it came from a file; opening peer uses
             // the second deterministic path from the same picker seam.

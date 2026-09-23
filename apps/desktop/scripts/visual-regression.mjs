@@ -25,7 +25,7 @@ const states = [
   "hierarchy-resolved", "hierarchy-unresolved",
   // 多文档和故障/层次视觉验收：这些状态仍由真实 Vue App 交互摆放，截图只是观察结果。
   "multi-tabs", "multi-tabs-narrow", "long-name", "unnamed-tabs", "unsaved-tab",
-  "needs-reload", "unresolved-drill", "engine-unavailable", "internal-signals", "source-return",
+  "snapshot-isolated", "unresolved-drill", "engine-unavailable", "internal-signals", "source-return",
 ];
 const themes = ["dark", "light"];
 const viewports = {

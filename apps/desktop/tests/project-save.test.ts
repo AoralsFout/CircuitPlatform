@@ -176,7 +176,7 @@ test("saving a pathless document asks for a location, writes the file and clears
     const parsed = parseProjectFile(JSON.parse(engine.writtenFiles[0]?.content ?? "{}"));
     assert.equal(parsed.ok, true);
     if (parsed.ok) {
-      assert.equal(parsed.value.version, 1);
+      assert.equal(parsed.value.version, 2);
       assert.equal(parsed.value.inputValues["input-a"], "0");
       assert.equal(parsed.value.inputValues["input-b"], "1");
       const inputA = parsed.value.document.components.find((component) => component.id === "input-a");

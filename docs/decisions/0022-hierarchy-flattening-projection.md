@@ -2,7 +2,7 @@
 
 ## 状态
 
-已接受
+部分继续适用。纯 TypeScript 展平、稳定 occurrence 身份和来源映射继续有效；按路径递归读取子 Project 的输入方式由 [ADR 0027](0027-embedded-subcircuit-snapshots.md) 的内嵌定义图取代。
 
 ## 背景
 

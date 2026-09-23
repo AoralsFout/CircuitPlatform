@@ -259,6 +259,8 @@ export interface EditorProjectionInput {
   portSources?: Readonly<Partial<Record<EditorComponentId, Readonly<Partial<Record<string, EditorPortSource>>>>>>;
   /** 仅用于显式重载：强制替换该顶层 owner 所拥有的扁平对象。 */
   forceReplaceOwner?: EditorComponentId;
+  /** 兼容重导入时需要重建的精确扁平身份；其他时序元件保留引擎身份。 */
+  forceReplaceFlatIds?: readonly string[];
   /** 由组合层管理的不可解释版本；不参与编辑器文档序列化。 */
   revision?: string;
 }
@@ -694,6 +696,7 @@ function cloneProjectionInput(input: EditorProjectionInput): EditorProjectionInp
     connectionFlatIds: Object.fromEntries(Object.entries(input.connectionFlatIds).map(([id, flatIds]) => [id, flatIds ? [...flatIds] : flatIds])),
     ...(input.portSources ? { portSources: input.portSources } : {}),
     ...(input.forceReplaceOwner !== undefined ? { forceReplaceOwner: input.forceReplaceOwner } : {}),
+    ...(input.forceReplaceFlatIds !== undefined ? { forceReplaceFlatIds: [...input.forceReplaceFlatIds] } : {}),
     ...(input.revision !== undefined ? { revision: input.revision } : {}),
   };
 }
@@ -1131,7 +1134,10 @@ export function createEditorSession(
         if (id !== undefined) oldConnectionIds[flatId] = id;
       }
     }
-    const forced = new Set(target.forceReplaceOwner ? target.componentFlatIds[target.forceReplaceOwner] ?? [] : []);
+    const forced = new Set([
+      ...(target.forceReplaceOwner ? target.componentFlatIds[target.forceReplaceOwner] ?? [] : []),
+      ...(target.forceReplaceFlatIds ?? []),
+    ]);
     const replacedComponents = new Set<string>(forced);
     const sameConnection = (left: EditorFlatCircuit["connections"][number], right: EditorFlatCircuit["connections"][number]) =>
       left.source.componentId === right.source.componentId && left.source.port === right.source.port &&
@@ -1234,7 +1240,9 @@ export function createEditorSession(
     observeDocumentIdentities();
     const nextBindings = projectionBindings(target, nextComponents, nextConnections);
     adoptBindingState(nextBindings);
-    lastProjection = cloneProjectionInput(target);
+    // 强制替换是这一次事务的执行指令，不属于已采用投影；后续普通投影历史不能继承它。
+    const { forceReplaceOwner: _owner, forceReplaceFlatIds: _flatIds, ...adoptedTarget } = target;
+    lastProjection = cloneProjectionInput(adoptedTarget);
     return { error: null, rollbackError: null };
   }
 
@@ -1262,9 +1270,12 @@ export function createEditorSession(
     const result = await replaceProjectionTransaction(input);
     if (result.ok) {
       // 强制 owner 替换时，撤销也必须重新建立该 owner 的身份；旧引擎身份不可复用。
-      const historyBefore = input.forceReplaceOwner === undefined
+      const historyBefore = input.forceReplaceOwner === undefined && input.forceReplaceFlatIds === undefined
         ? before
-        : { ...before, forceReplaceOwner: input.forceReplaceOwner };
+        : { ...before,
+          ...(input.forceReplaceOwner !== undefined ? { forceReplaceOwner: input.forceReplaceOwner } : {}),
+          ...(input.forceReplaceFlatIds !== undefined ? { forceReplaceFlatIds: [...input.forceReplaceFlatIds] } : {}),
+        };
       undoStack.push({ type: "replace-projection", before: historyBefore, after: cloneProjectionInput(input), selectionBefore: selection ? { ...selection } : null });
       redoStack.length = 0;
       return { ok: true, snapshot: publish() };

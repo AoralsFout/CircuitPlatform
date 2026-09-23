@@ -1,7 +1,6 @@
 import {
   parseProjectFile,
   projectPathIdentity,
-  rebaseProjectFileReferences,
   resolveProjectReference,
   serializeProjectFile,
   type ParsedProjectFile,
@@ -89,6 +88,8 @@ export function createWindowDocumentRuntimeFactory(): DocumentRuntimeFactory {
 /** 标签栏只消费的文档摘要，不暴露运行时对象或引擎身份。 */
 export interface DocumentTabSnapshot {
   key: string;
+  /** 内嵌定义共享父文档运行时；普通文件标签省略此字段。 */
+  kind?: "definition";
   path: string | null;
   displayName: string;
   isDirty: boolean;
@@ -96,10 +97,6 @@ export interface DocumentTabSnapshot {
   openError: string | null;
   engineState: WorkspaceSnapshot["engineState"];
   simulationState: WorkspaceSnapshot["simulationState"];
-  /** 父文档是否有仍未显式重载的子 Project occurrence。 */
-  needsReload?: boolean;
-  /** 需要重载的 occurrence 数量；保留数量便于无障碍文案与多 occurrence 展示。 */
-  staleSubcircuitCount?: number;
 }
 
 /** 多文档协调器的只读快照；active 是当前唯一投影到 UI 的运行时。 */
@@ -499,19 +496,13 @@ export function createDocumentCoordinator(options: DocumentCoordinatorOptions) {
     return activeKey === null ? undefined : byKey.get(activeKey);
   }
 
-  function serializeForTarget(record: RuntimeRecord, targetPath: string): { ok: true; content: string } | { ok: false; error: string } {
+  function serializeForTarget(record: RuntimeRecord): { ok: true; content: string } | { ok: false; error: string } {
     if (record.snapshot.editor === null) return { ok: false, error: "编辑器尚未准备好，无法保存。" };
     const file = serializeProjectFile({
       document: record.snapshot.editor.document,
       inputValues: record.snapshot.workspace.inputValues,
     });
-    let prepared = file;
-    if (record.snapshot.project.path !== null && identityOf(record.snapshot.project.path) !== identityOf(targetPath)) {
-      const rebased = rebaseProjectFileReferences(file, record.snapshot.project.path, targetPath);
-      if (!rebased.ok) return { ok: false, error: rebased.error.message };
-      prepared = rebased.value;
-    }
-    const content = JSON.stringify(prepared);
+    const content = JSON.stringify(file);
     const validation = parse(JSON.parse(content));
     return validation.ok
       ? { ok: true, content }
@@ -523,7 +514,7 @@ export function createDocumentCoordinator(options: DocumentCoordinatorOptions) {
       record.runtime.setSaveError("当前运行环境不支持项目文件保存。");
       return false;
     }
-    const serialized = serializeForTarget(record, targetPath);
+    const serialized = serializeForTarget(record);
     if (!serialized.ok) {
       record.runtime.setSaveError(serialized.error);
       return false;

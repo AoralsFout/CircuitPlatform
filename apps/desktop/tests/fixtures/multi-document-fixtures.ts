@@ -13,7 +13,7 @@ const childPorts = [
 /** 返回供真实 Electron/JSON Lines/C++ 场景共用的一位 DFF 子电路。 */
 export function multiDocumentChildProject(): ProjectFileData {
   return {
-    version: 1,
+    version: 2,
     circuit: {
       components: [
         { id: "boundary-d", kind: "input", displayName: "d", position: { x: 0, y: 0 }, ports: inputPorts },
@@ -31,14 +31,16 @@ export function multiDocumentChildProject(): ProjectFileData {
         { id: "not-to-nq", source: { component: "invert-q", port: "out" }, target: { component: "boundary-nq", port: "in" } },
       ],
     },
+    definitions: {},
+    libraryRoots: [],
   };
 }
 
 /** 返回两个 occurrence 共用的父 Project；所有稳定 ID 刻意保持可读且可断言。 */
 export function multiDocumentParentProject(): ProjectFileData {
-  const wrapperData = { reference: ".\\child.circuit.json", cachedPorts: childPorts } as const;
+  const wrapperData = { definitionId: "child", cachedPorts: childPorts } as const;
   return {
-    version: 1,
+    version: 2,
     circuit: {
       components: [
         { id: "data-1", kind: "input", displayName: "Data 1", position: { x: 0, y: 0 }, ports: inputPorts, data: { value: "0" } },
@@ -63,13 +65,15 @@ export function multiDocumentParentProject(): ProjectFileData {
         { id: "u2-nq", source: { component: "u2", port: "nq" }, target: { component: "out-nq-2", port: "in" } },
       ],
     },
+    definitions: { child: { displayName: "child.circuit.json", circuit: multiDocumentChildProject().circuit } },
+    libraryRoots: ["child"],
   };
 }
 
 /** Peer 使用与父文档相同的 Editor ID，验证运行时键而不是 ID 能隔离仿真状态。 */
 export function multiDocumentPeerProject(): ProjectFileData {
   return {
-    version: 1,
+    version: 2,
     circuit: {
       components: [
         { id: "clock", kind: "clock", displayName: "Clock", position: { x: 0, y: 0 } },
@@ -83,10 +87,12 @@ export function multiDocumentPeerProject(): ProjectFileData {
         { id: "probe-wire", source: { component: "flop", port: "q" }, target: { component: "probe", port: "in" } },
       ],
     },
+    definitions: {},
+    libraryRoots: [],
   };
 }
 
-/** 删除一个已连接的输出 Port，供显式 reload 断言兼容连接保留、其它连接变 Dangling。 */
+/** 修改源文件的端口；父工程仍应使用已保存的内嵌定义。 */
 export function incompatibleMultiDocumentChildProject(): ProjectFileData {
   const changed = multiDocumentChildProject();
   return {
@@ -95,5 +101,7 @@ export function incompatibleMultiDocumentChildProject(): ProjectFileData {
       components: changed.circuit.components.filter((component) => component.id !== "boundary-nq"),
       connections: changed.circuit.connections.filter((connection) => connection.id !== "not-to-nq"),
     },
+    definitions: {},
+    libraryRoots: [],
   };
 }

@@ -2,7 +2,7 @@
 
 ## 状态
 
-已接受
+历史决策。保存源 Project 后按路径广播 `needsReload` 的行为由 [ADR 0027](0027-embedded-subcircuit-snapshots.md) 取代；本文记录旧实现的取舍。
 
 ## 背景
 

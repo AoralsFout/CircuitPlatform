@@ -112,14 +112,6 @@ test("hierarchy performance fixture reaches the production flattener at 500/1000
     rootIdentity: fixture.rootIdentity,
     root: fixture.root,
     platform: "posix",
-    reader: {
-      read: async (identity) => {
-        const value = fixture.files.get(identity);
-        return value === undefined
-          ? { ok: false, code: "project-read-failed", message: `性能夹具缺少 Project：${identity}` }
-          : { ok: true, value };
-      },
-    },
   });
   assert.deepEqual(flattened.diagnostics, []);
   assert.equal(flattened.circuit.components.length, 500);

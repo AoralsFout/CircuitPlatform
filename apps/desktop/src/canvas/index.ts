@@ -443,10 +443,6 @@ export interface SubcircuitCanvasState {
   relativePath: string;
   status: "resolved" | "resolving" | "unresolved";
   diagnostic: string | null;
-  /** 父侧是否仍采用磁盘上的旧展平副本。 */
-  needsReload?: boolean;
-  /** 父侧实际采用的子 Project 版本 token。 */
-  adoptedVersion?: string | null;
 }
 
 export interface CanvasWireEndpoint {
@@ -642,6 +638,12 @@ function danglingEndpointsFor(
   const dangling = new Set<EditorEndpointSide>();
   if (sourceKnown && (source === undefined || source.direction !== "output")) dangling.add("source");
   if (targetKnown && (target === undefined || target.direction !== "input")) dangling.add("target");
+  for (const [side, endpoint, actual] of [["source", connection.source, source], ["target", connection.target, target]] as const) {
+    const component = components.get(endpoint.componentId);
+    if (component?.kind !== "subcircuit" || component.data?.subcircuit === undefined) continue;
+    const cached = component.data.subcircuit.cachedPorts.find((port) => port.name === endpoint.port);
+    if (cached === undefined || actual === undefined || cached.direction !== actual.direction || cached.width !== actual.width) dangling.add(side);
+  }
   if (source !== undefined && target !== undefined && source.width !== target.width) {
     dangling.add("source");
     dangling.add("target");
@@ -786,11 +788,9 @@ export function projectCanvasScene(
     const geometry = componentGeometryFor(definition, ports);
     const subcircuit: SubcircuitCanvasState | undefined = subcircuitData
       ? {
-        relativePath: subcircuitData.reference,
+        relativePath: component.displayName,
         status: subcircuitData.status ?? (subcircuitData.diagnostic ? "unresolved" : "resolved"),
         diagnostic: subcircuitData.diagnostic?.message ?? null,
-        needsReload: subcircuitData.needsReload === true,
-        adoptedVersion: subcircuitData.adoptedVersion ?? null,
       }
       : undefined;
     return {

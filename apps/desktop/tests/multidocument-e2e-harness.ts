@@ -10,9 +10,9 @@ type HarnessResult = {
   tabs: number;
   parentStep: number;
   peerStep: number;
+  definitionKey: string;
   childKey: string;
-  staleOccurrences: number;
-  danglingConnectionIds: string[];
+  savedDefinitionComponents: number;
   recoveredParent: boolean;
 };
 
@@ -23,6 +23,7 @@ if (directory === null) throw new Error("缺少真实 E2E fixture 目录");
 const parentPath = `${directory}/parent.circuit.json`;
 const childPath = `${directory}/child.circuit.json`;
 const peerPath = `${directory}/peer.circuit.json`;
+const relocatedPath = `${directory}/relocated/parent.circuit.json`;
 const bridge = (window as unknown as { circuitPlatform: any }).circuitPlatform;
 const workspace = useDocumentWorkspace();
 
@@ -100,46 +101,62 @@ async function run(): Promise<HarnessResult> {
   ensure(internalSignals["u2/ff:q"] === "X", "occurrence 2 内部 q 不正确");
   workspace.setInternalSignalTableVisible(false);
 
-  // 下钻第一次创建 child tab；第二次只复用该 tab 并更新来源，返回时重新选择稳定 source ID。
+  // 下钻只打开父 Project 的只读定义；同一嵌入定义的两个使用处复用标签。
   ensure(await workspace.openSubcircuit("u1"), "下钻 occurrence 1 失败");
-  await waitFor(() => current(workspace.tabs).length === 3, "下钻没有创建 child 标签");
-  const childKey = current(workspace.activeDocumentKey)!;
-  ensure(current(workspace.editorState)!.document.components.some((component) => component.id === "ff"), "child 文档未显示内部 DFF");
+  await waitFor(() => current(workspace.tabs).length === 3, "下钻没有创建定义标签");
+  const definitionKey = current(workspace.activeDocumentKey)!;
+  ensure(current(workspace.activeDefinition)?.circuit.components.some((component) => component.id === "ff"), "内嵌定义未显示内部 DFF");
+  ensure(current(workspace.tabs).find((tab) => tab.key === definitionKey)?.kind === "definition", "下钻标签必须是只读定义");
   await workspace.activateTab(parentKey);
   ensure(await workspace.openSubcircuit("u2"), "下钻 occurrence 2 失败");
-  ensure(current(workspace.activeDocumentKey) === childKey, "同一 child Project 的第二次下钻没有复用标签");
-  ensure(current(workspace.tabs).length === 3, "复用 child 不应新建第四个标签");
-  ensure(await workspace.returnToParent(), "从 child 返回 parent 失败");
+  ensure(current(workspace.activeDocumentKey) === definitionKey, "同一内嵌定义的第二次下钻没有复用标签");
+  ensure(current(workspace.tabs).length === 3, "复用定义不应新建第四个标签");
+  ensure(await workspace.returnToParent(), "从定义返回 parent 失败");
   ensure(current(workspace.activeDocumentKey) === parentKey, "返回来源后未激活 parent");
   ensure(current(workspace.editorState)!.selection?.id === "u2", "返回来源没有选择 occurrence 2");
+  const parentDirtyBeforeSourceSave = current(workspace.tabs).find((tab) => tab.key === parentKey)?.isDirty;
 
-  // child 未保存时 parent 仍保持采用快照；成功保存后 coordinator 才广播 stale。
+  // 源 Project 作为独立可编辑标签打开；修改和保存均不能修改父工程的嵌入快照。
+  await workspace.requestOpenRecent(childPath);
+  await waitFor(() => current(workspace.tabs).length === 4, "源 Project 未能独立打开");
+  const childKey = current(workspace.activeDocumentKey)!;
   await workspace.activateTab(childKey);
   const childComponentsBeforeEdit = current(workspace.editorState)!.document.components.length;
   ensure(await workspace.addComponent("not", { x: 640, y: 200 }), "child 未保存编辑失败");
   ensure(current(workspace.editorState)!.document.components.length === childComponentsBeforeEdit + 1, "child 编辑没有落在 child 文档");
   await workspace.activateTab(parentKey);
   ensure(current(workspace.state).signals["u1:q"] === "1", "child 未保存时 parent 不应重新读取磁盘");
-  ensure(!current(workspace.needsReload), "child 未保存时 parent 不应 stale");
+  const savedDefinitionComponents = current(workspace.activeDefinition)?.circuit.components.length ?? multiDocumentChildProject().circuit.components.length;
   await workspace.activateTab(childKey);
   ensure(await workspace.save(), "child 真实保存失败");
   await workspace.activateTab(parentKey);
-  await waitFor(() => current(workspace.needsReload) && current(workspace.staleSubcircuits).length === 2, "child 保存后两个 parent occurrence 未显示 stale");
-  const staleOccurrences = current(workspace.staleSubcircuits).length;
-
-  // 显式 reload occurrence 1 采用兼容版本并只清掉这一 occurrence 的 stale 状态。
-  ensure(await workspace.reloadSubcircuit("u1"), "兼容 child 显式 reload 失败");
-  ensure(current(workspace.staleSubcircuits).length === 1, "reload occurrence 1 不应清掉 occurrence 2 的 stale");
-  const incompatible = incompatibleMultiDocumentChildProject();
-  await writeFixture(childPath, incompatible);
-  ensure(await workspace.reloadSubcircuit("u1"), "不兼容 child 显式 reload 失败");
-  const documentAfterReload = current(workspace.editorState)!.document;
-  const dangling = documentAfterReload.connections.filter((connection) => (connection.danglingEndpoints?.length ?? 0) > 0);
-  ensure(dangling.some((connection) => connection.id === "u1-nq"), "删除 nq Port 后 u1-nq 应成为 DanglingConnection");
-  ensure(dangling.some((connection) => connection.id === "u1-q" ) === false, "仍兼容的 q Connection 不应变成 dangling");
-  ensure(current(workspace.editorState)!.canUndo, "显式 reload 应产生可撤销历史帧");
-  await workspace.undo();
-  await workspace.redo();
+  ensure(current(workspace.tabs).find((tab) => tab.key === parentKey)?.isDirty === parentDirtyBeforeSourceSave, "源文件保存不应改变父文档脏状态");
+  ensure(!current(workspace.tabs).some((tab) => (tab as { needsReload?: boolean }).needsReload), "源文件保存不应广播重载提示");
+  ensure(current(workspace.editorState)!.document.connections.every((connection) => !connection.danglingEndpoints?.length), "源文件保存不应改变父连接");
+  ensure(current(workspace.state).signals["u1:q"] === "1", "源文件保存不应改变父仿真读数");
+  ensure(await workspace.openSubcircuit("u1"), "源文件保存后无法打开内嵌定义");
+  ensure(current(workspace.activeDefinition)?.circuit.components.length === savedDefinitionComponents, "源文件保存不应改变内嵌定义");
+  await workspace.activateTab(parentKey);
+  await writeFixture(childPath, incompatibleMultiDocumentChildProject());
+  ensure(await workspace.openSubcircuit("u1"), "源文件端口删除后无法打开内嵌定义");
+  ensure(current(workspace.activeDefinition)?.circuit.components.length === savedDefinitionComponents, "源文件端口删除不应改变内嵌定义");
+  await workspace.activateTab(parentKey);
+  ensure(current(workspace.editorState)!.document.connections.every((connection) => !connection.danglingEndpoints?.length), "源文件端口删除不应让父连接悬空");
+  (window as any).__multidocumentDeleteSource = true;
+  await waitFor(() => (window as any).__multidocumentSourceDeleted === true, "Electron 主进程未删除源 Project");
+  ensure(!(await bridge.readProjectFile(childPath)).ok, "源 Project 必须从磁盘删除");
+  ensure(await workspace.openSubcircuit("u1"), "源文件删除后无法查看内嵌定义");
+  ensure(current(workspace.activeDefinition)?.circuit.components.length === savedDefinitionComponents, "源文件删除后内嵌定义发生变化");
+  await workspace.activateTab(parentKey);
+  ensure(await workspace.saveAs(), "父 Project 跨目录另存为失败");
+  ensure(current(workspace.projectPath)?.replaceAll("\\", "/") === relocatedPath.replaceAll("\\", "/"),
+    `另存为后父标签未切换到新路径：${current(workspace.projectPath)}`);
+  const relocatedRead = await bridge.readProjectFile(relocatedPath);
+  ensure(relocatedRead.ok, "另存为目标文件未写入磁盘");
+  const relocated = JSON.parse(relocatedRead.content);
+  ensure(relocated.version === 2 && relocated.definitions.child?.circuit.components.length === savedDefinitionComponents, "另存为未保留完整内嵌定义");
+  ensure(relocated.circuit.components.filter((component: any) => component.kind === "subcircuit").every((component: any) =>
+    component.data?.definitionId === "child" && !("reference" in component.data)), "另存为不应写入源文件引用路径");
 
   // 只杀 parent 的文档引擎；peer 与 child 随后仍能步进，parent 按既有健康检查语义恢复并清空时间线。
   const parentBridge = bridge.forDocument(parentKey);
@@ -160,10 +177,16 @@ async function run(): Promise<HarnessResult> {
   await workspace.closeTab(parentKey, true);
   await workspace.activateTab(childKey);
   ensure(!current((workspace as any).canReturnToParent), "parent 关闭后 child 不应保留来源返回链接");
+  await workspace.requestOpenRecent(relocatedPath);
+  await waitFor(() => current(workspace.editorState)?.document.components.some((component) => component.id === "u1"), "另存为文件未能重新打开");
+  const reopenedKey = current(workspace.activeDocumentKey)!;
+  ensure(await workspace.openSubcircuit("u1"), "重新打开的父 Project 无法浏览内嵌定义");
+  ensure(current(workspace.activeDefinition)?.circuit.components.length === savedDefinitionComponents, "重新打开后定义内容不一致");
+  await workspace.closeTab(reopenedKey, true);
   await workspace.closeTab(childKey, true);
   await workspace.closeTab(peerKey, true);
   ensure(current(workspace.tabs).length === 0, "关闭所有文档后不应残留标签");
-  return { tabs: current(workspace.tabs).length, parentStep, peerStep, childKey, staleOccurrences, danglingConnectionIds: dangling.map((connection) => connection.id), recoveredParent };
+  return { tabs: current(workspace.tabs).length, parentStep, peerStep, definitionKey, childKey, savedDefinitionComponents, recoveredParent };
 }
 
 (window as unknown as { __multidocumentResult: Promise<HarnessResult> }).__multidocumentResult = run();

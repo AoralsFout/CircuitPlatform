@@ -2,7 +2,7 @@
 
 ## 状态
 
-已确认
+历史决策。按路径引用、重新读取源文件和下钻打开源 Project 的部分由 [ADR 0027](0027-embedded-subcircuit-snapshots.md) 取代；Port 接口和进入引擎前展平的规则继续适用。
 
 ## 背景
 

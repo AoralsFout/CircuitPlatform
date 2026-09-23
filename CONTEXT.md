@@ -10,12 +10,12 @@
 _Avoid_: Node（在本项目中容易与 UI 节点或图算法节点混淆）
 _Avoid_: Instance（Subcircuit 放入电路后仍称为 Component，不另造"实例"一词）
 
-**Project**：用户保存和打开的工作单元，包含一份 Circuit、它的编辑器布局和元数据。一个 Project 恰好包含一份 Circuit；只有保存过的 Project 才拥有身份，也才能被其他 Circuit 作为 Subcircuit 引用。身份是文件路径经词法规范化后的绝对路径——统一分隔符、消除相对段、Windows 上比较不分大小写、不解析符号链接——同一文件的不同写法是同一份 Project。
+**Project**：用户保存和打开的工作单元，包含一份顶层 Circuit、它的编辑器布局和元数据，也可以包含导入的子电路定义。已保存 Project 的文档身份是文件路径经词法规范化后的绝对路径——统一分隔符、消除相对段、Windows 上比较不分大小写、不解析符号链接——同一文件的不同写法是同一份 Project。
 
-**Subcircuit**：被另一份 Circuit 当作 Component 使用的 Project。它的 Input 和 Output 元件构成对外的 Port；内部其他 Component 对外不可见。Subcircuit 通过引用被使用，不是拷贝；一份 Project 可以在多份 Circuit 中被多次使用，也可以自身使用其他 Subcircuit，但引用关系不允许成环。Subcircuit 在加载时被展平，引擎不需要感知层次。
+**Subcircuit**：从一份 Project 导入并由父 Project 保存的 Circuit 定义。它的 Input 和 Output 元件构成对外的 Port；内部其他 Component 对外不可见。同一份定义可以作为 Component 放入父 Circuit 多次，各处共享定义并各自持有 SimulationState。导入后的定义不随源 Project 的内容或位置变化；更新定义需要显式重新导入。
 _Avoid_: Module、Block、CompoundComponent
 
-**展平 Flatten**：加载父 Project 时，把每个 Subcircuit 使用的内部 Component 和 Connection 复制为普通 Component，并把外部 Port 上的 Connection 改接到内部 Input 元件的 `out` 或 Output 元件的 `in`。展平发生在进入引擎之前，因此引擎和协议都不出现层次概念。同一份 Project 在父 Circuit 中被放入多份时，每份各自展平出独立的 Component 和 SimulationState。
+**展平 Flatten**：加载父 Project 时，把每个 Subcircuit 使用的内部 Component 和 Connection 复制为普通 Component，并把外部 Port 上的 Connection 改接到内部 Input 元件的 `out` 或 Output 元件的 `in`。展平发生在进入引擎之前，因此引擎和协议都不出现层次概念。同一份 Subcircuit 在父 Circuit 中被放入多份时，每份各自展平出独立的 Component 和 SimulationState。
 _Avoid_: 内联、实例化
 
 **Port**：Component 用来接收或输出数字信号的连接点，具有输入或输出方向和一个位宽。端口清单由引擎声明并在创建与改宽时回传，是位宽的唯一权威来源。
