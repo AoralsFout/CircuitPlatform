@@ -642,6 +642,12 @@ function danglingEndpointsFor(
   const dangling = new Set<EditorEndpointSide>();
   if (sourceKnown && (source === undefined || source.direction !== "output")) dangling.add("source");
   if (targetKnown && (target === undefined || target.direction !== "input")) dangling.add("target");
+  for (const [side, endpoint, actual] of [["source", connection.source, source], ["target", connection.target, target]] as const) {
+    const component = components.get(endpoint.componentId);
+    if (component?.kind !== "subcircuit" || component.data?.subcircuit === undefined) continue;
+    const cached = component.data.subcircuit.cachedPorts.find((port) => port.name === endpoint.port);
+    if (cached === undefined || actual === undefined || cached.direction !== actual.direction || cached.width !== actual.width) dangling.add(side);
+  }
   if (source !== undefined && target !== undefined && source.width !== target.width) {
     dangling.add("source");
     dangling.add("target");

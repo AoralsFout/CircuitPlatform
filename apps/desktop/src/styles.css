@@ -649,3 +649,9 @@ button:disabled { cursor: not-allowed; }
   *, *::before, *::after { scroll-behavior: auto !important; animation: none !important; transition: none !important; }
   .wire-signal-flow { display: none; }
 }
+.reimport-impact-list {
+  max-height: 15rem;
+  overflow: auto;
+  padding-left: 1.4rem;
+  line-height: 1.5;
+}

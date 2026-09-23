@@ -22,6 +22,8 @@ class EmbeddedEngine {
   readonly activeComponents = new Map<number, ComponentKindName>();
   readonly activeConnections = new Set<number>();
   failNextAdd = false;
+  addedConnections = 0;
+  removedConnections = 0;
   failNextWrite = false;
   diskFiles = false;
 
@@ -40,11 +42,13 @@ class EmbeddedEngine {
     return { type: "component_removed", requestId: "fake", componentId };
   }
   async addConnection(): Promise<EngineResponse> {
+    this.addedConnections += 1;
     const connectionId = this.nextConnectionId++;
     this.activeConnections.add(connectionId);
     return { type: "connection_added", requestId: "fake", connectionId };
   }
   async removeConnection(connectionId: number): Promise<EngineResponse> {
+    this.removedConnections += 1;
     this.activeConnections.delete(connectionId);
     return { type: "connection_removed", requestId: "fake", connectionId };
   }
@@ -665,6 +669,141 @@ test("deleting an unused imported definition commits immediately and is one undo
     assert.equal(binding.libraryTree.value.length, 0);
     await binding.undo();
     assert.equal(binding.libraryTree.value[0]?.definitionId, id);
+  } finally {
+    await binding.dispose();
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
+});
+
+test("top-level Port changes preview affected wires; cancel is inert and confirm saves a dangling wire", async () => {
+  for (const change of ["rename", "delete", "direction", "width"] as const) {
+    const engine = new EmbeddedEngine();
+    const sourcePath = `E:\\circuits\\${change}-old.circuit.json`;
+    const replacementPath = `G:\\moved\\${change}-new.circuit.json`;
+    engine.files.set(sourcePath, sourceFile());
+    const source = JSON.parse(sourceFile()) as ProjectFileData;
+    const components = source.circuit.components.flatMap((component) => {
+      if (component.id !== "in") return [component];
+      if (change === "delete") return [];
+      if (change === "rename") return [{ ...component, displayName: "Renamed" }];
+      if (change === "direction") return [{ ...component, kind: "output" as const, ports: [{ name: "in", direction: "input" as const, width: 1 }] }];
+      return [{ ...component, ports: [{ name: "out", direction: "output" as const, width: 2 }] }];
+    });
+    const replacement: ProjectFileData = {
+      ...source,
+      circuit: {
+        components,
+        connections: change === "delete" || change === "direction"
+          ? source.circuit.connections.filter((connection) => connection.id !== "w1")
+          : source.circuit.connections,
+      },
+    };
+    engine.files.set(replacementPath, JSON.stringify(replacement));
+    const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+    Object.defineProperty(globalThis, "window", { configurable: true, value: { circuitPlatform: engine } });
+    const binding = useWorkspace();
+    try {
+      await binding.bootstrap();
+      await binding.requestNew();
+      engine.openChoices.push({ ok: true, path: sourcePath });
+      assert.equal(await binding.addSubcircuitFromDialog(), true, change);
+      const definitionId = binding.libraryTree.value[0]!.definitionId;
+      const use = binding.editorState.value!.document.components[0]!;
+      assert.equal(await binding.addComponent("input", { x: 0, y: 0 }), true);
+      const driver = binding.editorState.value!.document.components.find((component) => component.kind === "input")!;
+      const wired = await binding.createConnection(
+        { componentId: driver.id, port: "out", direction: "output", point: { x: 0, y: 0 } },
+        { componentId: use.id, port: "A", direction: "input", point: { x: 0, y: 0 } },
+      );
+      assert.equal(wired.ok, true, wired.error);
+      const wireId = binding.editorState.value!.document.connections[0]!.id;
+      const before = JSON.stringify(binding.editorState.value?.document);
+      const removedBefore = engine.removedConnections;
+      engine.openChoices.push({ ok: true, path: replacementPath });
+      assert.equal(await binding.reimportEmbeddedDefinition(definitionId), false, change);
+      assert.deepEqual(binding.pendingReimport.value?.impacts.map((impact) => [impact.connectionId, impact.componentId, impact.portName]), [[wireId, use.id, "A"]]);
+      assert.equal(JSON.stringify(binding.editorState.value?.document), before);
+      assert.equal(engine.removedConnections, removedBefore);
+      binding.cancelReimport();
+      assert.equal(binding.pendingReimport.value, null);
+      assert.equal(JSON.stringify(binding.editorState.value?.document), before);
+      engine.openChoices.push({ ok: true, path: replacementPath });
+      assert.equal(await binding.reimportEmbeddedDefinition(definitionId), false);
+      if (change === "rename") {
+        engine.failNextAdd = true;
+        assert.equal(await binding.confirmReimport(), false, "引擎拒绝确认时回滚");
+        assert.equal(JSON.stringify(binding.editorState.value?.document), before);
+        assert.equal(binding.pendingReimport.value, null);
+        engine.openChoices.push({ ok: true, path: replacementPath });
+        assert.equal(await binding.reimportEmbeddedDefinition(definitionId), false);
+      }
+      assert.equal(await binding.confirmReimport(), true, `${change}: ${binding.openError.value ?? ""}`);
+      assert.equal(binding.pendingReimport.value, null);
+      assert.equal(binding.editorState.value?.document.connections[0]?.id, wireId);
+      assert.ok(binding.editorState.value?.document.connections[0]?.danglingEndpoints.includes("target"), change);
+      assert.ok(engine.removedConnections > removedBefore, change);
+      engine.saveChoices.push({ ok: true, path: `D:\\archive\\${change}-parent.circuit.json` });
+      assert.equal(await binding.saveAs(), true, change);
+      const saved = JSON.parse(engine.files.get(`D:\\archive\\${change}-parent.circuit.json`)!) as ProjectFileData;
+      assert.equal(saved.circuit.connections[0]?.id, wireId);
+      const reopened = useWorkspace();
+      try {
+        await reopened.bootstrap();
+        assert.equal(await reopened.openProjectFromPath(`D:\\archive\\${change}-parent.circuit.json`), true, change);
+        assert.equal(reopened.editorState.value?.document.connections[0]?.id, wireId);
+        assert.ok(reopened.editorState.value?.document.connections[0]?.danglingEndpoints.includes("target"), change);
+        assert.match(reopened.openError.value ?? "", /部分连接或定义需要检查/);
+      } finally {
+        await reopened.dispose();
+      }
+      await binding.undo();
+      assert.equal(binding.editorState.value?.document.connections[0]?.danglingEndpoints.length, 0);
+    } finally {
+      await binding.dispose();
+      if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+      else Reflect.deleteProperty(globalThis, "window");
+    }
+  }
+});
+
+test("nested Port change is rejected before preview and leaves the readonly ancestor unchanged", async () => {
+  const engine = new EmbeddedEngine();
+  const parentPath = "E:\\circuits\\parent.circuit.json";
+  const sourcePath = "G:\\moved\\new-child.circuit.json";
+  const oldChild = JSON.parse(sourceFile()) as ProjectFileData;
+  const childPorts: PortSpec[] = [{ name: "A", direction: "input", width: 1 }, { name: "Y", direction: "output", width: 1 }];
+  const wrapper: ProjectFileData["circuit"] = {
+    components: [
+      { id: "driver", kind: "input", displayName: "driver", position: { x: 0, y: 0 }, ports: [{ name: "out", direction: "output", width: 1 }] },
+      { id: "inner", kind: "subcircuit", displayName: "Child", position: { x: 120, y: 0 }, data: { definitionId: "B", cachedPorts: childPorts } },
+    ],
+    connections: [{ id: "readonly-wire", source: { component: "driver", port: "out" }, target: { component: "inner", port: "A" } }],
+  };
+  const parent: ProjectFileData = {
+    version: 2,
+    circuit: { components: [{ id: "outer", kind: "subcircuit", displayName: "A", position: { x: 0, y: 0 }, data: { definitionId: "A", cachedPorts: [{ name: "driver", direction: "input", width: 1 }] } }], connections: [] },
+    definitions: { A: { displayName: "Readonly A", circuit: wrapper }, B: { displayName: "B", circuit: oldChild.circuit } },
+    libraryRoots: ["A"],
+  };
+  const replacement: ProjectFileData = { ...oldChild, circuit: { ...oldChild.circuit, components: oldChild.circuit.components.map((component) => component.id === "in" ? { ...component, displayName: "Renamed" } : component) } };
+  engine.files.set(parentPath, JSON.stringify(parent));
+  engine.files.set(sourcePath, JSON.stringify(replacement));
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", { configurable: true, value: { circuitPlatform: engine } });
+  const binding = useWorkspace();
+  try {
+    await binding.bootstrap();
+    assert.equal(await binding.openProjectFromPath(parentPath), true);
+    const before = JSON.stringify(binding.libraryTree.value);
+    const removedBefore = engine.removedConnections;
+    engine.openChoices.push({ ok: true, path: sourcePath });
+    assert.equal(await binding.reimportEmbeddedDefinition("B"), false);
+    assert.equal(binding.pendingReimport.value, null);
+    assert.match(binding.openError.value ?? "", /Readonly A.*readonly-wire/);
+    assert.equal(JSON.stringify(binding.libraryTree.value), before);
+    assert.equal(engine.removedConnections, removedBefore);
+    assert.equal(binding.editorState.value?.canUndo, false);
   } finally {
     await binding.dispose();
     if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);

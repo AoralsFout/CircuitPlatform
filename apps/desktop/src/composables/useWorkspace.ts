@@ -47,7 +47,7 @@ import {
   type FlattenProjectResult,
   type HierarchyProjectReader,
 } from "../project-file/hierarchy.ts";
-import { affectedOccurrencePaths, exportDefinitionProject, importProjectSnapshot, planDeleteDefinition, portsForDefinition, reimportProjectSnapshot, type DefinitionUse, type DeleteDefinitionPlan } from "../project-file/definitions.ts";
+import { affectedOccurrencePaths, exportDefinitionProject, importProjectSnapshot, planDeleteDefinition, portsForDefinition, reimportProjectSnapshot, type DefinitionUse, type DeleteDefinitionPlan, type ReimportPortImpact } from "../project-file/definitions.ts";
 import { buildLibraryTree, definitionDisplayNames, labelDefinitionUses, type LibraryNode } from "../project-file/library.ts";
 import {
   forgetRecentProject,
@@ -167,6 +167,13 @@ interface HierarchyRefreshRoot {
 /** 置脏确认挂起的文件操作种类；`open` 可能携带最近项目入口挂起的路径。 */
 type PendingFileActionKind = "open" | "new" | "load-example";
 
+/** 顶层悬空连线的确认视图；Port 与 Connection 均使用父工程稳定身份。 */
+export interface PendingReimportPreview {
+  definitionId: string;
+  displayName: string;
+  impacts: readonly ReimportPortImpact[];
+}
+
 export interface WorkspaceBinding {
   /** 释放此文档的恢复调度、编辑器订阅和按文档引擎进程。 */
   dispose(): Promise<void>;
@@ -233,7 +240,7 @@ export interface WorkspaceBinding {
   placeImportedSubcircuit(definitionId: string, center?: Point): Promise<boolean>;
   /** 修改单个定义的名称，并同步所有使用处的非画布显示名称。 */
   renameImportedSubcircuit(definitionId: string, name: string): Promise<boolean>;
-  /** 重新选择已保存的 v2 文件，兼容替换指定定义及其下层闭包；失败不建立历史帧。 */
+  /** 重新选择已保存的 v2 文件替换定义闭包；顶层断线先预告，失败不建立历史帧。 */
   reimportEmbeddedDefinition(definitionId: string): Promise<boolean>;
   /** 把已存于父 Project 的定义闭包写成独立 v2 Project；不提交编辑事务。 */
   exportImportedSubcircuit(definitionId: string): Promise<boolean>;
@@ -246,6 +253,12 @@ export interface WorkspaceBinding {
   /** 取消待确认的定义删除。 */
   cancelDeleteImportedSubcircuit(): void;
   pendingDefinitionDeletion: DeepReadonly<Ref<PendingDefinitionDeletion | null>>;
+  /** 顶层将断线时的待确认预告；确认前定义图、引擎和历史均不变。 */
+  pendingReimport: DeepReadonly<Ref<PendingReimportPreview | null>>;
+  /** 确认当前断线预告并以一帧结构历史提交；期间文档若变化则要求重选文件。 */
+  confirmReimport(): Promise<boolean>;
+  /** 放弃当前预告，不修改父工程。 */
+  cancelReimport(): void;
   /** 直接导入的定义及递归依赖；每次状态更新均从父工程快照推导。 */
   libraryTree: ComputedRef<readonly LibraryNode[]>;
   /** 按父文档内的稳定 ID 读取定义副本；缺失时返回 null，不访问源文件或引擎。 */
@@ -559,6 +572,13 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
   const recentProjects = shallowRef<RecentProject[]>(readRecentProjects(preferenceStorage()));
   /** 待确认的文件动作；置脏文档的打开/新建/加载示例必须先经过确认。 */
   const pendingFileAction = shallowRef<PendingFileActionKind | null>(null);
+  const pendingReimport = shallowRef<PendingReimportPreview | null>(null);
+  let pendingReimportCommit: {
+    base: string;
+    hierarchy: FlattenProjectResult;
+    cache: Map<string, ProjectFileData>;
+    forceReplaceFlatIds: readonly string[];
+  } | null = null;
   // 待确认「打开」的来源路径：来自最近项目入口时非空（确认后不再弹文件对话框，
   // 直接打开该路径）；来自对话框打开时为 null。与 pendingFileAction 同生共死。
   let pendingOpenPath: string | null = null;
@@ -1614,6 +1634,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
 
   /** 从文件重新导入选中定义；只在完整候选展平和引擎事务成功后采用定义图。 */
   async function reimportEmbeddedDefinition(definitionId: string): Promise<boolean> {
+    cancelReimport();
     if (editor === null || !embeddedDefinitions[definitionId]) {
       openError.value = "所选子电路定义已不存在。";
       return false;
@@ -1653,8 +1674,32 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     const previousFlat = adoptedHierarchy?.circuit.components.map((component) => component.id) ?? [];
     const nextFlat = hierarchy.circuit.components.map((component) => component.id);
     const forceReplaceFlatIds = [...new Set([...previousFlat, ...nextFlat].filter((id) => paths.some((path) => id.startsWith(`${path}/`))))];
-    const committed = await replaceHierarchyProjection(hierarchy, cache, undefined, forceReplaceFlatIds);
-    openError.value = committed ? null : (editor.snapshot().error?.message ?? "重新导入失败，父工程保持原状。");
+    const prepared = { base: serializeCurrentProjectFile()!, hierarchy, cache, forceReplaceFlatIds };
+    if (candidate.topLevelImpacts.length > 0) {
+      pendingReimportCommit = prepared;
+      pendingReimport.value = {
+        definitionId,
+        displayName: embeddedDefinitions[definitionId]!.displayName,
+        impacts: candidate.topLevelImpacts,
+      };
+      openError.value = null;
+      return false;
+    }
+    return commitReimport(prepared);
+  }
+
+  /** 预告确认与无断线更新共用同一提交路径，失败时只展示原因。 */
+  async function commitReimport(prepared: NonNullable<typeof pendingReimportCommit>): Promise<boolean> {
+    if (serializeCurrentProjectFile() !== prepared.base) {
+      openError.value = "父工程在确认期间已变化，请重新选择文件导入。";
+      return false;
+    }
+    const committed = await replaceHierarchyProjection(prepared.hierarchy, prepared.cache, undefined, prepared.forceReplaceFlatIds);
+    openError.value = committed
+      ? (prepared.hierarchy.diagnostics.length > 0
+        ? `重新导入成功，部分连接或定义需要检查：${prepared.hierarchy.diagnostics.map((item) => item.message).join("；")}`
+        : null)
+      : (editor?.snapshot().error?.message ?? "重新导入失败，父工程保持原状。");
     return committed;
   }
 
@@ -1752,6 +1797,19 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
 
   function cancelDeleteImportedSubcircuit(): void {
     pendingDefinitionDeletion.value = null;
+  }
+
+  /** 仅清除待确认候选，不改变已采用快照或编辑器历史。 */
+  function cancelReimport(): void {
+    pendingReimport.value = null;
+    pendingReimportCommit = null;
+  }
+
+  /** 确认预告并提交；重复确认不会重复建帧。 */
+  async function confirmReimport(): Promise<boolean> {
+    const prepared = pendingReimportCommit;
+    cancelReimport();
+    return prepared === null ? false : commitReimport(prepared);
   }
 
   /** 显式采用磁盘上的 Subcircuit 新快照；失败结果也以完整未解析状态原子采用。 */
@@ -2314,6 +2372,9 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     confirmDeleteImportedSubcircuit,
     cancelDeleteImportedSubcircuit,
     pendingDefinitionDeletion: readonly(pendingDefinitionDeletion),
+    pendingReimport: readonly(pendingReimport),
+    confirmReimport,
+    cancelReimport,
     libraryTree,
     getEmbeddedDefinition,
     reloadSubcircuit,

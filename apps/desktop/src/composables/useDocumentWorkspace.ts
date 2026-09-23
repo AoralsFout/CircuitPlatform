@@ -47,7 +47,7 @@ interface DefinitionTab {
   sourceComponentId?: EditorComponentId;
 }
 
-const mutableWorkspaceRefs = new Set(["state", "editorState", "projectPath", "isDirty", "saveError", "openError", "pendingFileAction", "pendingDefinitionDeletion", "recentProjects", "staleSubcircuits", "needsReload", "projectVersion"]);
+const mutableWorkspaceRefs = new Set(["state", "editorState", "projectPath", "isDirty", "saveError", "openError", "pendingFileAction", "pendingDefinitionDeletion", "pendingReimport", "recentProjects", "staleSubcircuits", "needsReload", "projectVersion"]);
 const mutableEditorRefs = new Set(["showDetails", "showSidebar", "activeRailPage", "bottomTab", "zoom"]);
 
 /**

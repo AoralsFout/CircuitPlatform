@@ -12,6 +12,7 @@ import SaveConflictDialog from "./components/SaveConflictDialog.vue";
 import ToolRail from "./components/ToolRail.vue";
 import TopBar from "./components/TopBar.vue";
 import UnsavedChangesDialog from "./components/UnsavedChangesDialog.vue";
+import ReimportImpactDialog from "./components/ReimportImpactDialog.vue";
 import WorkspaceSidebar from "./components/WorkspaceSidebar.vue";
 import { useDocumentWorkspace } from "./composables/useDocumentWorkspace";
 import { useThemePreference } from "./composables/useThemePreference";
@@ -86,6 +87,9 @@ const {
   reimportEmbeddedDefinition,
   exportImportedSubcircuit,
   exportFeedback,
+  pendingReimport,
+  confirmReimport,
+  cancelReimport,
   libraryTree,
   getEmbeddedDefinition,
   requestDeleteImportedSubcircuit,
@@ -218,7 +222,8 @@ function onEditorKeydown(event: KeyboardEvent): void {
   if (activeDefinition.value && !["new-document", "open-document", "cancel"].includes(shortcut)) return;
   if (shortcut === "cancel") {
     // Esc 只取消当前最上层状态：文件操作确认 → 清空确认框 → 恢复提示 → 草稿 → 拖动预览 → 选择。
-    if (pendingFileAction.value) cancelPendingFileAction();
+    if (pendingReimport.value) cancelReimport();
+    else if (pendingFileAction.value) cancelPendingFileAction();
     else if (pendingDefinitionDeletion.value) cancelDeleteImportedSubcircuit();
     else if (pendingSaveConflict.value) cancelSaveConflict();
     else if (editorState.value?.confirmation) void cancelCurrentOperation();
@@ -230,7 +235,7 @@ function onEditorKeydown(event: KeyboardEvent): void {
     else if (editorState.value?.selection) void cancelCurrentOperation();
     return;
   }
-  if (editorState.value?.confirmation || pendingFileAction.value || pendingDefinitionDeletion.value) return;
+  if (editorState.value?.confirmation || pendingFileAction.value || pendingDefinitionDeletion.value || pendingReimport.value) return;
   switch (shortcut) {
     case "undo": void undo(); break;
     case "redo": void redo(); break;
@@ -465,6 +470,13 @@ onBeforeUnmount(() => {
       :action="pendingFileAction"
       @confirm="confirmPendingFileAction"
       @cancel="cancelPendingFileAction"
+    />
+
+    <ReimportImpactDialog
+      v-if="pendingReimport"
+      :preview="pendingReimport"
+      @confirm="confirmReimport"
+      @cancel="cancelReimport"
     />
 
     <SaveConflictDialog

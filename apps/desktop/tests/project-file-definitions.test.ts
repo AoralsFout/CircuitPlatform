@@ -105,16 +105,64 @@ test("reimport preserves the selected identity and name, replaces descendants, a
   assert.deepEqual(affectedOccurrencePaths(parent, "old-child"), ["u1/inner", "u2/inner"]);
 });
 
-test("reimport rejects incompatible ports without changing the parent", () => {
-  const parent = file(circuit(sub("u", "selected")), {
+test("reimport previews only newly dangling top-level connections for rename, delete, direction, and width changes", () => {
+  const parent = file({
+    components: [input("driver", "driver"), sub("u", "selected")],
+    connections: [{ id: "wire", source: { component: "driver", port: "out" }, target: { component: "u", port: "x" } }],
+  }, {
     selected: { displayName: "Selected", circuit: circuit(input("old", "x")) },
   }, ["selected"]);
-  const source = file(circuit(input("new", "renamed")));
   const original = JSON.stringify(parent);
-  const result = reimportProjectSnapshot(parent, source, "selected", allocate);
-  assert.equal(result.ok, false);
-  if (!result.ok) assert.equal(result.errors[0]?.code, "interface-incompatible");
+  const cases = [
+    { name: "rename", source: file(circuit(input("new", "renamed"))), next: null },
+    { name: "delete", source: file(circuit()), next: null },
+    { name: "direction", source: file(circuit({ id: "new", kind: "output", displayName: "x", position: { x: 0, y: 0 }, ports: [{ name: "in", direction: "input", width: 1 }] })), next: "output" },
+    { name: "width", source: file(circuit({ ...input("new", "x"), ports: [{ name: "out", direction: "output", width: 2 }] })), next: 2 },
+  ] as const;
+  for (const scenario of cases) {
+    const result = reimportProjectSnapshot(parent, scenario.source, "selected", allocate);
+    assert.equal(result.ok, true, scenario.name);
+    if (!result.ok) continue;
+    assert.equal(result.topLevelImpacts.length, 1, scenario.name);
+    assert.deepEqual([result.topLevelImpacts[0]?.connectionId, result.topLevelImpacts[0]?.componentId, result.topLevelImpacts[0]?.portName], ["wire", "u", "x"]);
+    assert.equal(result.topLevelImpacts[0]?.newPort === null ? null : (scenario.name === "direction" ? result.topLevelImpacts[0]?.newPort?.direction : result.topLevelImpacts[0]?.newPort?.width), scenario.next);
+    assert.equal(result.file.circuit.connections.length, 1, "候选保留悬空连线记录");
+  }
+  const alreadyDangling = structuredClone(parent);
+  const use = alreadyDangling.circuit.components.find((component) => component.id === "u")!;
+  if (use.data && "cachedPorts" in use.data) use.data.cachedPorts = [{ name: "x", direction: "input", width: 2 }];
+  const repeated = reimportProjectSnapshot(alreadyDangling, cases[0]!.source, "selected", allocate);
+  assert.equal(repeated.ok, true);
+  if (repeated.ok) assert.equal(repeated.topLevelImpacts.length, 0, "已有悬空端点不重复预告");
+
+  const unwired = file(circuit(sub("u", "selected")), parent.definitions, ["selected"]);
+  const changedWithoutWire = reimportProjectSnapshot(unwired, cases[3]!.source, "selected", allocate);
+  assert.equal(changedWithoutWire.ok, true);
+  if (changedWithoutWire.ok) {
+    const updated = changedWithoutWire.file.circuit.components[0]?.data;
+    assert.ok(updated && "cachedPorts" in updated);
+    assert.equal(updated.cachedPorts[0]?.width, 2, "无连线的使用处采用新 Port 规格");
+  }
   assert.equal(JSON.stringify(parent), original);
+});
+
+test("nested reimport rejects a new dangling connection in its readonly ancestor", () => {
+  const ancestor: ProjectFileCircuit = {
+    components: [input("driver", "driver"), sub("inner", "B")],
+    connections: [{ id: "internal-wire", source: { component: "driver", port: "out" }, target: { component: "inner", port: "x" } }],
+  };
+  const parent = file(circuit(sub("use-a", "A")), {
+    A: { displayName: "Readonly A", circuit: ancestor },
+    B: { displayName: "B", circuit: circuit(input("old", "x")) },
+  }, ["A"]);
+  const before = JSON.stringify(parent);
+  const result = reimportProjectSnapshot(parent, file(circuit(input("new", "renamed"))), "B", allocate);
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.errors[0]?.code, "readonly-ancestor-dangling");
+    assert.match(result.errors[0]?.message ?? "", /Readonly A.*internal-wire.*x/);
+  }
+  assert.equal(JSON.stringify(parent), before);
 });
 
 test("reimporting a nested definition leaves its readonly ancestor identity intact", () => {

@@ -100,6 +100,7 @@ interface MutableOutput {
   portSources: Record<string, Record<string, { inputTargets?: FlatEndpoint[]; outputSources?: FlatEndpoint[] }>>;
   internalComponents: Record<string, InternalComponentDescriptor[]>;
   visibleSubcircuits: Record<string, SubcircuitComponentData>;
+  visiblePorts: Record<string, readonly PortSpec[]>;
   diagnostics: HierarchyDiagnostic[];
 }
 
@@ -113,6 +114,7 @@ function createMutableOutput(): MutableOutput {
     portSources: {},
     internalComponents: {},
     visibleSubcircuits: {},
+    visiblePorts: {},
     diagnostics: [],
   };
 }
@@ -136,6 +138,7 @@ function mergeOutput(target: MutableOutput, source: MutableOutput): void {
     }
   }
   Object.assign(target.visibleSubcircuits, source.visibleSubcircuits);
+  Object.assign(target.visiblePorts, source.visiblePorts);
   target.diagnostics.push(...source.diagnostics);
 }
 
@@ -156,6 +159,7 @@ export async function flattenProjectHierarchy(input: FlattenProjectInput): Promi
     portSources: {},
     internalComponents: {},
     visibleSubcircuits: {},
+    visiblePorts: {},
     diagnostics: [],
   };
   const embeddedReader: HierarchyProjectReader = {
@@ -188,7 +192,7 @@ function documentForProject(project: ProjectFileData, output: MutableOutput): Ed
     const component = editorComponentFor(entry);
     const resolved = output.visibleSubcircuits[entry.id];
     if (resolved !== undefined) {
-      return { ...component, ports: clonePorts(resolved.cachedPorts), data: { subcircuit: resolved } };
+      return { ...component, ports: clonePorts(output.visiblePorts[entry.id] ?? resolved.cachedPorts), data: { subcircuit: resolved } };
     }
     if (entry.kind === "subcircuit") {
       const data = subcircuitDataOf(entry);
@@ -302,7 +306,7 @@ async function flattenOccurrence(
       const subData: SubcircuitComponentData = {
         ...(data ?? { reference: "", cachedPorts: [] }),
         definitionId: childKey,
-        cachedPorts: childInterface.ports,
+        cachedPorts: data?.cachedPorts ?? childInterface.ports,
         ...(data?.portOrder !== undefined ? { portOrder: [...data.portOrder] } : {}),
         status: "resolved",
         targetIdentity: childKey,
@@ -337,7 +341,10 @@ async function flattenOccurrence(
         }
       }
       // 将采用的解析状态写回顶层可见文档（仅顶层 Component 需要展示）。
-      if (occurrencePath.length === 0) updateVisibleSubcircuit(output, component.id, subData);
+      if (occurrencePath.length === 0) {
+        updateVisibleSubcircuit(output, component.id, subData);
+        output.visiblePorts[component.id] = childInterface.ports;
+      }
       continue;
     }
 
