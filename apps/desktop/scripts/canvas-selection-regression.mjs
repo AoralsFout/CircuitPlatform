@@ -127,9 +127,26 @@ async function main() {
       wireHit.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
     })()`);
     await waitForDOM(window, "document.querySelector('.signal-wire-hit--focused') && document.querySelector('.signal-wire-outline')", "Wire 未完成选中和聚焦");
-    const clearPoint = await window.webContents.executeJavaScript(`(() => {
-      const bounds = document.querySelector('.circuit-canvas').getBoundingClientRect();
-      return { x: Math.round(bounds.left + 12), y: Math.round(bounds.top + 12) };
+    const clearPoint = await window.webContents.executeJavaScript(`(async () => {
+      const canvas = document.querySelector('.circuit-canvas');
+      const bounds = canvas.getBoundingClientRect();
+      const { hitTestCanvas } = await import('/src/canvas/hit-testing.ts');
+      const { screenToWorld } = await import('/src/canvas/viewport.ts');
+      const props = canvas.__vueParentComponent.props;
+      const candidates = [
+        { x: 12, y: 12 },
+        { x: bounds.width - 12, y: 12 },
+        { x: 12, y: bounds.height - 12 },
+        { x: bounds.width - 12, y: bounds.height - 12 },
+        { x: bounds.width / 2, y: bounds.height - 12 },
+      ];
+      const point = candidates.find((candidate) => hitTestCanvas(
+        props.scene,
+        screenToWorld(candidate, props.viewport),
+        { zoom: props.viewport.zoom },
+      ).kind === 'background');
+      if (!point) throw new Error('当前视口没有可用的画布背景点击点');
+      return { x: Math.round(bounds.left + point.x), y: Math.round(bounds.top + point.y) };
     })()`);
     const selectedBeforeClear = await window.webContents.executeJavaScript(`(() => {
       const wireHit = document.querySelector('.signal-wire-hit');
@@ -142,14 +159,17 @@ async function main() {
     })()`);
     await window.webContents.executeJavaScript(`(() => {
       const canvas = document.querySelector('.circuit-canvas');
-      canvas.dispatchEvent(new PointerEvent('pointerdown', {
+      const event = new PointerEvent('pointerdown', {
         bubbles: true,
         cancelable: true,
         button: 0,
         pointerId: 1,
+        pointerType: 'mouse',
+        isPrimary: true,
         clientX: ${clearPoint.x},
         clientY: ${clearPoint.y},
-      }));
+      });
+      canvas.dispatchEvent(event);
     })()`);
     await waitForDOM(window, "!document.querySelector('.signal-wire-hit--focused') && !document.querySelector('.signal-wire-outline')", "空白点击未清除 Wire 状态");
     const result = await window.webContents.executeJavaScript(`(() => {
