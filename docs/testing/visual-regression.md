@@ -37,15 +37,17 @@
 | `long-name` | 长路径/长项目名截断但仍可通过 ARIA 名称识别 | 通过（2/2） | 通过（2/2） |
 | `unnamed-tabs` | 多个未命名文档的稳定序号与去重 | 通过（2/2） | 通过（2/2） |
 | `unsaved-tab` | dirty 标记、关闭确认、取消后焦点回到原标签 | 通过（2/2） | 通过（2/2） |
-| `snapshot-isolated` | 源文件不可用时仍显示父 Project 的内嵌定义，且无旧重载入口 | DOM 探针通过；截图待重采 | DOM 探针通过；截图待重采 |
+| `snapshot-isolated` | 源文件不可用时仍显示父 Project 的内嵌定义，且无旧重载入口 | DOM 探针通过；截图已重采（2/2） | DOM 探针通过；截图已重采（2/2） |
 | `unresolved-drill` | 未解析实例的下钻入口禁用并展示诊断 | 通过（2/2） | 通过（2/2） |
 | `engine-unavailable` | 单文档不可用，不把其他标签染成 unavailable | 通过（2/2） | 通过（2/2） |
 | `internal-signals` | occurrence-local 行、值、只读标记和可恢复读取错误 | 通过（2/2） | 通过（2/2） |
 | `source-return` | 返回父文档后来源选中、居中和焦点状态 | 通过（2/2） | 通过（2/2） |
 
 2026-09-21 的 40 张截图记录了 Phase 5.6 历史状态，其中 `needs-reload` 已被内嵌快照语义取代。
-2026-09-23 已单独验证 `hierarchy-resolved`、`hierarchy-unresolved`、`unresolved-drill` 和
-`snapshot-isolated` 的 DOM 事实；新状态的完整截图矩阵尚待重采。当前命令为：
+2026-09-30 已重跑全部 21 个 DOM 状态断言，并重新采集 32 个状态 × 2 个主题 × 2 个视口，
+共 128 张截图，包含 `hierarchy-resolved`、`hierarchy-unresolved`、`unresolved-drill` 和
+`snapshot-isolated`。抽查内嵌快照、长名称及内部信号；720px 窄窗的工具栏仍有文字换行，
+作为已有布局限制保留，未把截图采集成功当作整体布局无缺陷。详见[收口验收记录](spec-67-closure.md)。当前局部复查命令为：
 
 ```powershell
 pnpm --filter @circuit-platform/desktop visual:test -- --state=multi-tabs,multi-tabs-narrow,long-name,unnamed-tabs,unsaved-tab,snapshot-isolated,unresolved-drill,engine-unavailable,internal-signals,source-return

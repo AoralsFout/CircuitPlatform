@@ -28,9 +28,24 @@ app.commandLine.appendSwitch("force-device-scale-factor", "1");
 app.whenReady().then(async () => {
   // 显示窗口避免 Windows 对隐藏页面节流 RAF；窗口仍不抢焦点，兼容无 GPU 环境。
   const window = new BrowserWindow({ show: true, width: 1920, height: 1080, webPreferences: { sandbox: true, backgroundThrottling: false } });
+  const pageErrors = [];
+  window.webContents.on("console-message", (details) => {
+    if (details.level === "error") pageErrors.push(details.message);
+  });
   try {
     await window.loadURL(args.url);
-    await window.webContents.executeJavaScript("new Promise(resolve => { const check = () => window.__benchmarkReady ? resolve(true) : setTimeout(check, 20); check(); })");
+    // 夹具初始化异常时不会设置就绪标记；由主进程限时并保留页面错误，避免验收永久挂起。
+    let readyTimeout;
+    try {
+      await Promise.race([
+        window.webContents.executeJavaScript("new Promise(resolve => { const check = () => window.__benchmarkReady ? resolve(true) : setTimeout(check, 20); check(); })"),
+        new Promise((_, reject) => {
+          readyTimeout = setTimeout(() => reject(new Error(`性能基准页面未在 30 秒内就绪。${pageErrors.length ? `\n${pageErrors.join("\n")}` : ""}`)), 30_000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(readyTimeout);
+    }
     const result = await window.webContents.executeJavaScript(`(async () => {
       const config = ${JSON.stringify(config)};
       const isInternalSignals = ${JSON.stringify(isInternalSignals)};

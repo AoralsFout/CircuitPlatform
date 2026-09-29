@@ -1,6 +1,6 @@
 # 画布性能基准
 
-性能基准独立于 `pnpm verify`，用于检查真实 Vue `CircuitCanvas` 在目标规模下的交互帧耗时。脚本启动 Vite 与 Electron，挂载真实组件，先读取三层 Project 夹具并调用生产 `flattenProjectHierarchy`，再把得到的 500 个 Component / 1,000 条 Connection flat Circuit 投影到画布，并通过 DOM PointerEvent 连续驱动交互。
+性能基准独立于 `pnpm verify`，用于检查真实 Vue `CircuitCanvas` 在目标规模下的交互帧耗时。脚本启动 Vite 与 Electron，挂载真实组件，先用包含三层内嵌定义的 v2 Project 夹具调用生产 `flattenProjectHierarchy`，再把得到的 500 个 Component / 1,000 条 Connection flat Circuit 投影到画布，并通过 DOM PointerEvent 连续驱动交互。
 
 ## 测量口径
 
@@ -36,7 +36,11 @@ pnpm --filter @circuit-platform/desktop performance:benchmark --mode=route
 
 ## 层次夹具
 
-`src/project-file/performance-fixture.ts` 生成根 → wrapper → core 三层 Project。core 内有 498 个普通 Component 和 998 条内部 Connection，根层的两条跨层边界连接经生产递归展平后得到精确的 500 / 1,000 规模。`benchmark.html` 先用生产 `HierarchyProjectReader` 做零诊断展平，再通过 `useDocumentWorkspace` 为每个文档创建独立 runtime/controller；交互文档打开同一份生产展平结果，内部信号场景保留层次 Project。`tests/performance.test.ts` 会断言运行时 adapter 数量、文档键、真实 `getSignal` 计数和 scheduler/refresh/frame 计数来源。
+`src/project-file/performance-fixture.ts` 生成根 → wrapper → core 三层内嵌定义。core 的非接口部分有 498 个普通 Component 和 998 条内部 Connection，接口经生产递归展平拼接后得到精确的 500 / 1,000 规模。`benchmark.html` 先用生产 `flattenProjectHierarchy` 对父 Project 自带的定义表做零诊断展平，不再读取源文件；再通过 `useDocumentWorkspace` 为每个文档创建独立 runtime/controller。交互文档把同一份展平结果包装为包含空 `definitions` 和 `libraryRoots` 的严格 v2 Project，经生产打开路径解析；内部信号场景保留原始内嵌定义。`tests/performance.test.ts` 会断言运行时 adapter 数量、文档键、真实 `getSignal` 计数和 scheduler/refresh/frame 计数来源。
+
+Spec #67 合并后曾遗漏 `benchmark.html` 的 v1 包装，导致交互性能入口被严格 v2 校验拒绝；修复与本次复测结果见[收口记录](spec-67-closure.md)。下方 2026-09-21 的矩阵保留为历史证据。
+
+收口复测还补齐了 `place` 模式的初始预览位置，避免把未进入放置模式的空转误作采样。真实预览曾因逐帧更新整个编辑器快照而超出预算：除重建层次投影外，还使画布投影按完整快照重新计算。当前与元件拖动一样，普通放置指针只更新视图层的临时预览；实际落子才提交结构事务。连续放置保留当前位置，失败态仍同步会话坐标以供重试，取消后清理预览。预算与交互发生断言保持不变。
 
 ## Phase 5.6 文档数与内部信号矩阵
 
