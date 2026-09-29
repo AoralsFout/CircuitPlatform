@@ -61,22 +61,25 @@ function fakeRuntime(key: string, displayName = key, dispatchResult: CommandResu
 test("coordinator opens ordered documents, activates duplicates, and isolates failed opens", async () => {
   const reads: string[] = [];
   const runtimes: DocumentRuntime[] = [];
+  const projectDirectory = process.platform === "win32" ? "C:/Projects" : "/projects";
   const coordinator = createDocumentCoordinator({
     reader: { async readProjectFile(path) { reads.push(path); return path.includes("bad") ? { ok: false, reason: "文件不存在" } : { ok: true, content: emptyProject }; } },
     runtimeFactory: ({ documentKey }) => { const runtime = fakeRuntime(documentKey); runtimes.push(runtime); return runtime; },
   });
 
-  const first = await coordinator.openProject("C:\\Projects\\A.circuit.json");
-  const second = await coordinator.openProject("C:\\Projects\\B.circuit.json");
+  const first = await coordinator.openProject(`${projectDirectory}/A.circuit.json`);
+  const second = await coordinator.openProject(`${projectDirectory}/B.circuit.json`);
   assert.equal(first.ok && first.duplicate, false);
   assert.equal(second.ok && second.duplicate, false);
   assert.deepEqual(coordinator.snapshot().tabs.map((tab) => tab.displayName), ["A.circuit.json", "B.circuit.json"]);
-  const duplicate = await coordinator.openProject("c:/Projects/./A.circuit.json");
+  const duplicate = await coordinator.openProject(process.platform === "win32"
+    ? "c:\\Projects\\.\\A.circuit.json"
+    : `${projectDirectory}/./A.circuit.json`);
   assert.equal(duplicate.ok && duplicate.duplicate, true);
   assert.equal(coordinator.snapshot().tabs.length, 2);
   assert.equal(reads.length, 2);
   assert.equal(coordinator.snapshot().activeKey, first.ok ? first.key : null);
-  const failed = await coordinator.openProject("C:\\Projects\\bad.circuit.json");
+  const failed = await coordinator.openProject(`${projectDirectory}/bad.circuit.json`);
   assert.equal(failed.ok, false);
   assert.equal(coordinator.snapshot().tabs.length, 2);
   assert.equal(coordinator.snapshot().activeKey, first.ok ? first.key : null);

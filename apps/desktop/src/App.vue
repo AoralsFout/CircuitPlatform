@@ -17,6 +17,7 @@ import WorkspaceSidebar from "./components/WorkspaceSidebar.vue";
 import { useDocumentWorkspace } from "./composables/useDocumentWorkspace";
 import { useThemePreference } from "./composables/useThemePreference";
 import { isEditableKeyboardTarget, resolveEditorShortcut } from "./editor/keyboard";
+import { screenToWorld } from "./canvas/viewport";
 
 const documentWorkspace = useDocumentWorkspace();
 const {
@@ -193,10 +194,15 @@ async function placeComponent(center: { x: number; y: number }, altKey: boolean)
   if (succeeded && kind) rememberComponentKind(kind);
 }
 
-/** 布线草稿存在时冻结元件放置，避免两种结构意图同时进行。 */
+/** 从侧栏开始普通或连续放置，以可见画布中心初始化预览；布线草稿期间不改变当前操作。 */
 async function beginPlacementFromSidebar(kind: Parameters<typeof beginPlacement>[0], continuous = false): Promise<void> {
   if (interaction.value.connectionDraft) return;
   await beginPlacement(kind, continuous);
+  const currentViewport = viewport.value;
+  await updatePlacement(screenToWorld({
+    x: currentViewport.visibleRect.width / 2,
+    y: currentViewport.visibleRect.height / 2,
+  }, currentViewport));
 }
 
 /** 布线草稿期间保持结构意图单一，不允许键盘或工具栏启动复制事务。 */

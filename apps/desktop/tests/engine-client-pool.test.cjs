@@ -121,3 +121,38 @@ test("a health probe without a document does not create a business client", asyn
     pool.closeAll();
   }
 });
+
+test("a timeout in one document leaves the other document and its local circuit alive", async () => {
+  const diagnostics = [];
+  const pool = new EngineClientPool(process.execPath, {
+    spawnArgs: ["-e", FAKE_ENGINE_SCRIPT],
+    onDiagnostic: (event, fields) => diagnostics.push({ event, fields }),
+  });
+  try {
+    await pool.checkHealth("left-private-project");
+    assert.equal((await pool.request("right", { type: "add_component" })).componentId, 1);
+    pool.clientFor("left-private-project").requestTimeoutMs = 40;
+    await assert.rejects(pool.request("left-private-project", { type: "hang" }), /引擎进程已退出.*请求超时/);
+    assert.equal((await pool.request("right", { type: "add_component" })).componentId, 2);
+    assert.equal(pool.clientFor("right").epoch, 1);
+    assert.equal(pool.clientFor("left-private-project").epoch, 1);
+    assert.ok(diagnostics.some(({ event }) => event === "engine_timeout"));
+    assert.ok(!JSON.stringify(diagnostics).includes("left-private-project"));
+    pool.clientFor("left-private-project").requestTimeoutMs = 5000;
+    assert.equal((await pool.checkHealth("left-private-project")).processEpoch, 2);
+  } finally {
+    pool.closeAll();
+  }
+});
+
+test("missing engine health gives packaged users recovery guidance without development commands", async () => {
+  const pool = new EngineClientPool("Z:/definitely/missing/circuit-engine.exe");
+  try {
+    const health = await pool.checkHealth("document");
+    assert.equal(health.status, "unavailable");
+    assert.match(health.message, /重新安装/);
+    assert.doesNotMatch(health.message, /pnpm|build:engine/);
+  } finally {
+    pool.closeAll();
+  }
+});

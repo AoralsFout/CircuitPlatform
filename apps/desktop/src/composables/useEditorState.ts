@@ -76,6 +76,7 @@ export type { WaveformRow };
  * @param workspaceState 只读的工作区行为快照。
  * @param editorState 不包含 engine ID 的稳定编辑器投影。
  * @param selectEditor 由工作区组合层执行的选择命令。
+ * @param updatePlacement 失败态移动时同步会话重试位置；普通指针预览只在本模块内更新。
  * @returns 编辑器状态、派生展示数据和局部交互操作。
  */
 export function useEditorState(
@@ -117,6 +118,28 @@ export function useEditorState(
   const defaultWireColor = ref<WireColorId>(readDefaultWireColor(recentStorage));
   const draggingComponentId = ref<EditorComponentId | null>(null);
   const dragPreview = ref<{ componentId: EditorComponentId; position: Point } | null>(null);
+  const placementPreview = ref<{ center: Point; altKey: boolean } | null>(null);
+  // 指针位置不属于 Circuit；只在放置意图、提交或错误状态真正变化时接纳会话坐标，
+  // 避免普通快照克隆把本地预览拉回初始位置。连续放置完成后保留鼠标位置供下一次跟随。
+  watch([
+    () => editorState.value?.pendingPlacement,
+    () => editorState.value?.error?.code,
+    () => editorState.value?.error?.message,
+  ] as const, ([pending, errorCode, errorMessage], [previous, previousErrorCode, previousErrorMessage]) => {
+    if (!pending) {
+      placementPreview.value = null;
+      return;
+    }
+    const changedIntent = !previous || pending.kind !== previous.kind || pending.continuous !== previous.continuous;
+    if (pending.center && (changedIntent
+      || pending.center.x !== previous?.center?.x || pending.center.y !== previous?.center?.y
+      || pending.altKey !== previous?.altKey
+      || errorCode !== previousErrorCode || errorMessage !== previousErrorMessage)) {
+      placementPreview.value = { center: { ...pending.center }, altKey: pending.altKey };
+    } else if (!pending.center && (changedIntent || !pending.continuous)) {
+      placementPreview.value = null;
+    }
+  }, { immediate: true, flush: "sync" });
   const dragController = createNodeDragController({
     onPreview(preview) {
       dragPreview.value = { componentId: preview.nodeId, position: { ...preview.position } };
@@ -196,6 +219,8 @@ export function useEditorState(
       return { focusedId: focusedId.value, draggingComponentId: null, dragPreview: null, connectionDraft: null, emptyState: { title: "还没有电路", message: "从左侧选择一个元件，开始搭建电路。" } };
     }
     const pending = editorState.value.pendingPlacement;
+    const placementCenter = placementPreview.value?.center ?? pending?.center;
+    const placementAltKey = placementPreview.value?.altKey ?? pending?.altKey;
     const definition = pending ? registry.get(pending.kind) : undefined;
     // 放置预览的盒子与放下去之后的节点必须是同一份尺寸：端口数量由数据决定的元件高度按端口数
     // 增长，用展示定义里那个固定尺寸画出来的预览会比真节点矮一大截，点下去就像跳了一下。
@@ -208,8 +233,8 @@ export function useEditorState(
       connectionDraft: connectionDraft.value.origin ? connectionDraftRoute(connectionDraft.value) : null,
       connectionDraftError: connectionDraft.value.error?.message ?? null,
       routeEditPreview: routeEditPreview.value,
-      pendingPlacement: pending && pending.center && pendingSize
-        ? { kind: pending.kind, position: positionFromPlacementCenter(pending.center, pendingSize, pending.altKey), size: pendingSize, error: editorState.value.error?.message ?? null }
+      pendingPlacement: pending && placementCenter && pendingSize
+        ? { kind: pending.kind, position: positionFromPlacementCenter(placementCenter, pendingSize, placementAltKey), size: pendingSize, error: editorState.value.error?.message ?? null }
         : null,
     };
   });
@@ -428,8 +453,12 @@ export function useEditorState(
     void selectEditor({ kind: "connection", id: connectionId });
   }
 
+  /** 更新本地放置预览；常态不重发电路快照，失败态同步会话坐标以保留重试位置。 */
   function placementMoved(center: Point, altKey = false): void {
-    void updatePlacement?.(center, altKey);
+    if (!editorState.value?.pendingPlacement || editorState.value.operation !== "idle") return;
+    if (!Number.isFinite(center.x) || !Number.isFinite(center.y)) return;
+    placementPreview.value = { center: { ...center }, altKey };
+    if (editorState.value.error) void updatePlacement?.(center, altKey);
   }
 
   /** 记录已成功添加的类型；失败的引擎命令不会经过此入口。 */

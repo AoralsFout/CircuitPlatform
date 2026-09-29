@@ -2,6 +2,7 @@ node_modules/
 dist/
 build/
 engine/build/
+release/
 *.log
 *.tsbuildinfo
 .env
@@ -16,6 +17,7 @@ engine/build/
 Thumbs.db
 Desktop.ini
 apps/desktop/artifacts/visual-regression/
+artifacts/regression/
 
 # Circuits files
 circuits/

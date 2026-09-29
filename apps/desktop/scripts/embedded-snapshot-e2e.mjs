@@ -58,7 +58,7 @@ async function main() {
     libraryRoots: [],
   };
   writeFileSync(childPath, `${JSON.stringify(child)}\n`, "utf8");
-  const vite = await createServer({ root: desktopRoot, server: { host: "127.0.0.1", port: 49154, strictPort: true, hmr: false } });
+  const vite = await createServer({ root: desktopRoot, server: { host: "127.0.0.1", port: 0, hmr: false } });
   let window;
   const originalOpenDialog = dialog.showOpenDialog;
   const originalSaveDialog = dialog.showSaveDialog;
@@ -67,8 +67,10 @@ async function main() {
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [childPath] });
     dialog.showSaveDialog = async () => ({ canceled: false, filePath: parentPath });
     await vite.listen();
+    const address = vite.httpServer?.address();
+    if (!address || typeof address === "string") throw new Error("无法获取 Vite 测试端口");
     process.env.CIRCUIT_ENGINE_PATH = enginePath;
-    process.env.CIRCUIT_PLATFORM_E2E_URL = "http://127.0.0.1:49154/tests/embedded-snapshot-e2e-harness.html";
+    process.env.CIRCUIT_PLATFORM_E2E_URL = `http://127.0.0.1:${address.port}/tests/embedded-snapshot-e2e-harness.html`;
     await import("../electron/main.cjs");
     await app.whenReady();
     window = await waitForWindow();
@@ -90,11 +92,10 @@ async function main() {
     if (window && !window.isDestroyed()) window.close();
     await vite.close();
     await rm(directory, { recursive: true, force: true });
-    if (app.isReady()) app.quit();
   }
 }
 
-main().catch((error) => {
+main().then(() => app.quit()).catch((error) => {
   console.error(error);
-  process.exitCode = 1;
+  app.exit(1);
 });

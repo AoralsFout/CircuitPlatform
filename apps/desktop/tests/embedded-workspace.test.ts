@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ComponentKindName, EngineResponse, PortSpec } from "@circuit-platform/protocol";
 import { useWorkspace } from "../src/composables/useWorkspace.ts";
+import { useEditorState } from "../src/composables/useEditorState.ts";
 import { useDocumentWorkspace } from "../src/composables/useDocumentWorkspace.ts";
 import { serializeProjectFile, type ProjectFileData } from "../src/project-file/index.ts";
 import { portsForAddComponent } from "./fake-ports.ts";
@@ -99,6 +100,104 @@ function sourceFile(): string {
     },
   }));
 }
+
+test("placement previews preserve the loaded circuit and simulation until committed", async () => {
+  const engine = new EmbeddedEngine();
+  const sourcePath = "E:\\circuits\\placement.circuit.json";
+  engine.files.set(sourcePath, sourceFile());
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", { configurable: true, value: { circuitPlatform: engine } });
+  const binding = useWorkspace();
+  try {
+    await binding.bootstrap();
+    assert.equal(await binding.openProjectFromPath(sourcePath), true);
+    const document = binding.editorState.value!.document;
+    const simulation = binding.state.value;
+    const nextComponentId = engine.nextComponentId;
+    await binding.beginPlacement("and");
+    for (const center of [{ x: 80, y: 60 }, { x: 160, y: 120 }, { x: 240, y: 180 }]) {
+      await binding.updatePlacement(center);
+      assert.deepEqual(binding.editorState.value?.pendingPlacement?.center, center);
+      assert.strictEqual(binding.state.value, simulation, "预览不能重新发布未改变的仿真快照");
+    }
+    assert.deepEqual(binding.editorState.value?.document, document);
+    assert.equal(binding.editorState.value?.canUndo, false);
+    assert.equal(binding.isDirty.value, false);
+    assert.equal(engine.nextComponentId, nextComponentId);
+
+    assert.equal(await binding.placeComponent({ x: 240, y: 180 }), true);
+    assert.equal(binding.editorState.value?.document.components.length, document.components.length + 1);
+    assert.equal(binding.editorState.value?.canUndo, true);
+    assert.equal(binding.isDirty.value, true);
+    assert.equal(engine.nextComponentId, nextComponentId + 1);
+  } finally {
+    await binding.dispose();
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
+});
+
+test("pointer placement previews stay local and preserve continuous placement, retry, Alt, and cancellation", async () => {
+  const engine = new EmbeddedEngine();
+  const sourcePath = "E:\\circuits\\placement-preview.circuit.json";
+  engine.files.set(sourcePath, sourceFile());
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", { configurable: true, value: { circuitPlatform: engine } });
+  const binding = useWorkspace();
+  let pendingUpdate = Promise.resolve();
+  let updateCalls = 0;
+  const editor = useEditorState(binding.state, binding.editorState, binding.select, binding.moveComponent, (center, altKey) => {
+    updateCalls += 1;
+    pendingUpdate = binding.updatePlacement(center, altKey);
+    return pendingUpdate;
+  });
+  try {
+    await binding.bootstrap();
+    assert.equal(await binding.openProjectFromPath(sourcePath), true);
+    await binding.beginPlacement("and", true);
+    await binding.updatePlacement({ x: 0, y: 0 });
+    const snapshot = binding.editorState.value;
+    const scene = editor.canvasScene.value;
+    const center = { x: 121, y: 83 };
+    editor.placementMoved(center, true);
+    assert.strictEqual(binding.editorState.value, snapshot, "鼠标预览不能重发整个编辑器快照");
+    assert.strictEqual(editor.canvasScene.value, scene);
+    assert.equal(updateCalls, 0);
+    const ghost = editor.interaction.value.pendingPlacement!;
+    assert.deepEqual(ghost.position, { x: center.x - ghost.size.width / 2, y: center.y - ghost.size.height / 2 });
+
+    await binding.select(null);
+    assert.deepEqual(editor.interaction.value.pendingPlacement?.position, ghost.position, "无关快照不能把预览拉回初始坐标");
+    assert.equal(await binding.placeComponent(center, true), true);
+    assert.equal(binding.editorState.value?.pendingPlacement?.center, null);
+    assert.deepEqual(editor.interaction.value.pendingPlacement?.position, ghost.position, "连续放置保留鼠标位置");
+
+    const nextCenter = { x: 203, y: 105 };
+    editor.placementMoved(nextCenter);
+    const snapped = editor.interaction.value.pendingPlacement!;
+    assert.equal((snapped.position.x + snapped.size.width / 2) % 16, 0);
+    assert.equal((snapped.position.y + snapped.size.height / 2) % 16, 0);
+    engine.failNextAdd = true;
+    assert.equal(await binding.placeComponent(nextCenter), false);
+    const retryCenter = { x: 211, y: 117 };
+    editor.placementMoved(retryCenter, true);
+    await pendingUpdate;
+    assert.equal(updateCalls, 1, "失败后的移动仍同步重试位置");
+    assert.deepEqual(binding.editorState.value?.pendingPlacement?.center, retryCenter);
+    assert.equal(await binding.retryPlacement(), true);
+    const retried = binding.editorState.value!.document.components.at(-1)!;
+    assert.deepEqual(retried.position, { x: retryCenter.x - snapped.size.width / 2, y: retryCenter.y - snapped.size.height / 2 });
+
+    await binding.cancelCurrentOperation();
+    assert.equal(editor.interaction.value.pendingPlacement, null);
+    await binding.beginPlacement("not");
+    assert.equal(editor.interaction.value.pendingPlacement, null, "新放置不能复用已经取消的鼠标位置");
+  } finally {
+    await binding.dispose();
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
+});
 
 function sourceWithUnresolvedDefinition(): string {
   const source = JSON.parse(sourceFile()) as ProjectFileData;

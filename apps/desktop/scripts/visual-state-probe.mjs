@@ -376,17 +376,17 @@ const expectations = {
 };
 
 async function main() {
-  // 与视觉截图（4175）和性能基准（4176–4181）都错开，两者同时跑也不会抢端口。
-  const port = 4191;
   // 这三项必须在 app ready 之前设置，否则会被忽略或直接报错。
   app.disableHardwareAcceleration();
   app.commandLine.appendSwitch("disable-gpu");
   app.commandLine.appendSwitch("no-sandbox");
   // 探针需要在一个稳定页面上连续执行状态；共享工作区的编辑不能触发 HMR 把页面重置到半成品。
-  const vite = await createServer({ root: desktopRoot, server: { host: "127.0.0.1", port, strictPort: true, hmr: false } });
+  const vite = await createServer({ root: desktopRoot, server: { host: "127.0.0.1", port: 0, hmr: false } });
   try {
     await vite.listen();
-    const baseUrl = `http://127.0.0.1:${port}`;
+    const address = vite.httpServer?.address();
+    if (!address || typeof address === "string") throw new Error("无法获取 Vite 测试端口");
+    const baseUrl = `http://127.0.0.1:${address.port}`;
     await waitForServer(`${baseUrl}/visual-regression.html`);
     await app.whenReady();
     const window = new BrowserWindow({

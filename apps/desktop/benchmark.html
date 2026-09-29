@@ -10,6 +10,7 @@
   import CircuitCanvas from "/src/components/CircuitCanvas.vue";
   import { useDocumentWorkspace } from "/src/composables/useDocumentWorkspace.ts";
   import { BUILT_IN_PORTS } from "/tests/fake-ports.ts";
+  import { PROJECT_FILE_VERSION } from "/src/project-file/index.ts";
   import { flattenProjectHierarchy } from "/src/project-file/hierarchy.ts";
   import { createHierarchyPerformanceFixture } from "/src/project-file/performance-fixture.ts";
 
@@ -24,13 +25,6 @@
     rootIdentity: fixture.rootIdentity,
     root: fixture.root,
     platform: "posix",
-    reader: { read: async (identity) => {
-      const name = identity.slice(identity.lastIndexOf("/") + 1);
-      const value = name === "budget-root.circuit.json" ? (mode === "internal-signals" ? fixture.root : flatFixture) : fixture.files.get(`/benchmark/${name}`);
-      return value === undefined
-        ? { ok: false, code: "project-read-failed", message: `性能夹具缺少 Project：${identity}` }
-        : { ok: true, value };
-    } },
   });
   const flattenedComponents = hierarchy.circuit.components.length;
   const flattenedWires = hierarchy.circuit.connections.length;
@@ -42,7 +36,7 @@
   // 这样生产 EditorSession/Canvas 也确实拥有 500/1,000 个可命中的实体。内部信号模式保留
   // 原始层次 Project，以验证 occurrence-local 读取和 revision 丢弃。
   const flatFixture = {
-    version: 1,
+    version: PROJECT_FILE_VERSION,
     circuit: {
       components: hierarchy.circuit.components.map((component, index) => ({
         id: component.id,
@@ -57,6 +51,8 @@
         target: { component: connection.target.componentId, port: connection.target.port },
       })),
     },
+    definitions: {},
+    libraryRoots: [],
   };
 
   const adapters = new Map();
@@ -106,13 +102,13 @@
     adapters.set(documentKey, adapter);
     return adapter;
   }
-  // 文件 IO 仍由生产 openProjectFromPath / flattenProjectHierarchy 完成；每个别名只保证路径身份独立。
+  // 生产打开路径只读取父 Project，展平只消费内嵌定义；每个别名保证路径身份独立。
   window.circuitPlatform = {
     ...adapterFor("legacy"),
     forDocument: (documentKey) => adapterFor(documentKey),
     readProjectFile: async (path) => {
       const name = path.slice(path.lastIndexOf("/") + 1);
-      const value = name === "budget-root.circuit.json" ? (mode === "internal-signals" ? fixture.root : flatFixture) : fixture.files.get(`/benchmark/${name}`);
+      const value = name === "budget-root.circuit.json" ? (mode === "internal-signals" ? fixture.root : flatFixture) : undefined;
       return value === undefined ? { ok: false, reason: "性能夹具缺少 Project", code: "PROJECT_FILE_NOT_FOUND" } : { ok: true, content: JSON.stringify(value) };
     },
     writeProjectFile: async () => ({ ok: true }),
@@ -213,7 +209,11 @@
   }).mount("#app");
   if (mode === "internal-signals") await workspace.select({ kind: "component", id: "wrapper" });
   if (mode === "route") await workspace.editor.selectConnection("source-to-wrapper");
-  if (mode === "place") await workspace.beginPlacement("and");
+  if (mode === "place") {
+    await workspace.beginPlacement("and");
+    // 此模式测量已有 ghost 的指针跟随；先给出初始位置，后续坐标变化仍必须来自真实画布事件。
+    await workspace.updatePlacement({ x: 0, y: 0 });
+  }
   await nextTick();
   window.__benchmarkReady = true;
 </script></body></html>

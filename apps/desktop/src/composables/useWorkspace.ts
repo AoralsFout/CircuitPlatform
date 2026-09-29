@@ -1218,6 +1218,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
 
   /**
    * 分发一条编辑器命令并按响应刷新编辑器与仿真快照。
+   * 成功的放置预览仅改变临时位置，不刷新仿真、层次结构或持久化脏标记。
    * 结构事务因引擎不可用（传输层故障）而失败时，随即发起恢复流程：编辑器自己已经冻结，
    * 由这里把不可用转成健康检查 → 自动重建的链条。
    * @returns 命令结果；没有编辑器会话时为 null。
@@ -1229,6 +1230,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}): WorkspaceBindin
     const result = await pending;
     if (disposed) return null;
     editorState.value = result.snapshot;
+    if (result.ok && (command.type === "begin-placement" || command.type === "update-placement")) return result;
     await refreshSimulationAfterBindingsChange();
     if (disposed) return null;
     if (result.ok && (command.type === "undo" || command.type === "redo")) {

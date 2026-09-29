@@ -2,9 +2,9 @@
 
 namespace circuit {
 
-// 当前仅提供引擎身份信息；实际电路仿真能力将在后续阶段加入。
+// 发布版本取自 CMake 项目，避免安装器版本升级后健康检查仍返回旧版本。
 EngineStatus Engine::status() const noexcept {
-    return {"CircuitPlatform C++ Engine", "0.1.0"};
+    return {"CircuitPlatform C++ Engine", CIRCUIT_ENGINE_VERSION};
 }
 
 }  // namespace circuit

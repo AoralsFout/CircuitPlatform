@@ -42,10 +42,7 @@ async function waitForWindow(timeoutMs = 15_000) {
 }
 
 async function main() {
-  if (!existsSync(enginePath)) {
-    console.log(`SKIP multidocument E2E: C++ engine not found at ${enginePath}`);
-    return;
-  }
+  if (!existsSync(enginePath)) throw new Error(`缺少真实 C++ 引擎：${enginePath}`);
 
   const fixtureDirectory = await mkdtemp(join(tmpdir(), "circuitplatform-multidocument-e2e-"));
   const relocatedDirectory = join(fixtureDirectory, "relocated");
@@ -100,5 +97,5 @@ async function main() {
 
 main().catch((error) => {
   console.error(error);
-  process.exitCode = 1;
+  app.exit(1);
 });
