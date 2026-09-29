@@ -115,6 +115,11 @@ async function main() {
     await window.loadURL(`${baseUrl}/visual-regression.html?state=default&theme=dark&motion=reduced`);
     // 首条 Wire 出现早于夹具完成示例加载和视口适配；手势必须从最终布局开始。
     await waitForDOM(window, "window.__visualReady && document.querySelector('.signal-wire-hit')", "画布选择夹具未就绪", 20_000);
+    // Windows runner 对隐藏窗口不会稳定派发真实鼠标焦点；选择清除验收必须走可见窗口的生产输入路径。
+    window.show();
+    window.focus();
+    window.webContents.focus();
+    await window.webContents.executeJavaScript("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
     await window.webContents.executeJavaScript(`(() => {
       const wireHit = document.querySelector('.signal-wire-hit');
       wireHit.focus();
@@ -122,46 +127,20 @@ async function main() {
       wireHit.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
     })()`);
     await waitForDOM(window, "document.querySelector('.signal-wire-hit--focused') && document.querySelector('.signal-wire-outline')", "Wire 未完成选中和聚焦");
-    const selectedBeforeClear = await window.webContents.executeJavaScript(`(async () => {
+    const clearPoint = await window.webContents.executeJavaScript(`(() => {
+      const bounds = document.querySelector('.circuit-canvas').getBoundingClientRect();
+      return { x: Math.round(bounds.left + 12), y: Math.round(bounds.top + 12) };
+    })()`);
+    const selectedBeforeClear = await window.webContents.executeJavaScript(`(() => {
       const wireHit = document.querySelector('.signal-wire-hit');
-      const canvas = document.querySelector('.circuit-canvas');
       const selectedBeforeClear = {
         hasFocusedClass: wireHit.classList.contains('signal-wire-hit--focused'),
         hasSelectedWire: Boolean(document.querySelector('.signal-wire-outline')),
         activeElement: document.activeElement?.className?.baseVal ?? document.activeElement?.className ?? document.activeElement?.tagName,
       };
-      const bounds = canvas.getBoundingClientRect();
-      const { hitTestCanvas } = await import('/src/canvas/hit-testing.ts');
-      const { screenToWorld } = await import('/src/canvas/viewport.ts');
-      const props = canvas.__vueParentComponent.props;
-      const world = screenToWorld({ x: 12, y: 12 }, props.viewport);
-      selectedBeforeClear.pointerDiagnostic = {
-        ready: window.__visualReady,
-        bounds: bounds.toJSON(),
-        viewport: props.viewport,
-        world,
-        domainHit: hitTestCanvas(props.scene, world, { zoom: props.viewport.zoom }),
-        domHit: document.elementFromPoint(bounds.left + 12, bounds.top + 12)?.outerHTML,
-        pendingPlacement: props.interaction.pendingPlacement,
-        connectionDraft: props.interaction.connectionDraft,
-        visibility: document.visibilityState,
-      };
-      canvas.dispatchEvent(new PointerEvent('pointerdown', {
-        bubbles: true,
-        cancelable: true,
-        button: 0,
-        pointerId: 1,
-        clientX: bounds.left + 12,
-        clientY: bounds.top + 12,
-      }));
-      return JSON.parse(JSON.stringify(selectedBeforeClear));
+      return selectedBeforeClear;
     })()`);
-    console.log('[DEBUG-canvas-ci]', JSON.stringify({
-      ...selectedBeforeClear.pointerDiagnostic,
-      windowVisible: window.isVisible(),
-      windowBounds: window.getBounds(),
-      contentBounds: window.getContentBounds(),
-    }));
+    clickAt(window, clearPoint);
     await waitForDOM(window, "!document.querySelector('.signal-wire-hit--focused') && !document.querySelector('.signal-wire-outline')", "空白点击未清除 Wire 状态");
     const result = await window.webContents.executeJavaScript(`(() => {
       const wireHit = document.querySelector('.signal-wire-hit');
