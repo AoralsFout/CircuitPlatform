@@ -38,7 +38,9 @@ async function runParent() {
     for (const key of Object.keys(env)) {
       if (["electron_run_as_node", "node_options", "node_path", "circuit_platform_e2e", "circuit_platform_e2e_url"].includes(key.toLowerCase())) delete env[key];
     }
-    child = spawn(require("electron"), [scriptPath, `--user-data-dir=${profile}`], {
+    // Linux CI 在加载本探针前检查 SUID 沙箱，测试参数必须从原生命令行传入。
+    const args = [scriptPath, `--user-data-dir=${profile}`, ...(process.platform === "linux" ? ["--no-sandbox"] : [])];
+    child = spawn(require("electron"), args, {
       cwd: temporaryDirectory,
       env,
       windowsHide: true,

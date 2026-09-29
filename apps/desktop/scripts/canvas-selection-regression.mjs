@@ -11,6 +11,7 @@ async function waitForDOM(window, expression, message, timeoutMs = 5_000) {
   await window.webContents.executeJavaScript(`new Promise((resolve, reject) => {
     const started = Date.now();
     const poll = () => {
+      if (window.__visualError) return reject(new Error('视觉夹具准备失败: ' + window.__visualError));
       if (${expression}) return resolve();
       if (Date.now() - started > ${timeoutMs}) return reject(new Error(${JSON.stringify(message)} + ': ' + JSON.stringify({
         activeElement: document.activeElement?.outerHTML,
@@ -112,15 +113,18 @@ async function main() {
     await app.whenReady();
     const window = new BrowserWindow({ show: false, width: 1440, height: 900, webPreferences: { sandbox: true, backgroundThrottling: false } });
     await window.loadURL(`${baseUrl}/visual-regression.html?state=default&theme=dark&motion=reduced`);
-    await window.webContents.executeJavaScript("new Promise((resolve, reject) => { const started = Date.now(); const check = () => document.querySelector('.signal-wire-hit') ? resolve(true) : Date.now() - started > 20000 ? reject(new Error('真实 Vue 画布挂载超时')) : setTimeout(check, 50); check(); })");
-    const result = await window.webContents.executeJavaScript(`(async () => {
+    // 首条 Wire 出现早于夹具完成示例加载和视口适配；手势必须从最终布局开始。
+    await waitForDOM(window, "window.__visualReady && document.querySelector('.signal-wire-hit')", "画布选择夹具未就绪", 20_000);
+    await window.webContents.executeJavaScript(`(() => {
       const wireHit = document.querySelector('.signal-wire-hit');
-      const canvas = document.querySelector('.circuit-canvas');
-      if (!wireHit || !canvas) throw new Error('未找到 Wire 或画布');
       wireHit.focus();
       wireHit.dispatchEvent(new FocusEvent('focus'));
       wireHit.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-      await new Promise((resolve) => setTimeout(resolve, 80));
+    })()`);
+    await waitForDOM(window, "document.querySelector('.signal-wire-hit--focused') && document.querySelector('.signal-wire-outline')", "Wire 未完成选中和聚焦");
+    const selectedBeforeClear = await window.webContents.executeJavaScript(`(() => {
+      const wireHit = document.querySelector('.signal-wire-hit');
+      const canvas = document.querySelector('.circuit-canvas');
       const selectedBeforeClear = {
         hasFocusedClass: wireHit.classList.contains('signal-wire-hit--focused'),
         hasSelectedWire: Boolean(document.querySelector('.signal-wire-outline')),
@@ -135,14 +139,18 @@ async function main() {
         clientX: bounds.left + 12,
         clientY: bounds.top + 12,
       }));
-      await new Promise((resolve) => setTimeout(resolve, 80));
+      return selectedBeforeClear;
+    })()`);
+    await waitForDOM(window, "!document.querySelector('.signal-wire-hit--focused') && !document.querySelector('.signal-wire-outline')", "空白点击未清除 Wire 状态");
+    const result = await window.webContents.executeJavaScript(`(() => {
+      const wireHit = document.querySelector('.signal-wire-hit');
       return {
-        selectedBeforeClear,
         hasHitClass: wireHit.classList.contains('signal-wire-hit'),
         hasFocusedClassAfterClear: wireHit.classList.contains('signal-wire-hit--focused'),
         hasSelectedWireAfterClear: Boolean(document.querySelector('.signal-wire-outline')),
       };
     })()`);
+    result.selectedBeforeClear = selectedBeforeClear;
     if (!result.selectedBeforeClear.hasFocusedClass || !result.selectedBeforeClear.hasSelectedWire || !result.hasHitClass || result.hasFocusedClassAfterClear || result.hasSelectedWireAfterClear) {
       throw new Error(`空白点击未清除 Wire 状态：${JSON.stringify(result)}`);
     }

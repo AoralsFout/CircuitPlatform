@@ -35,7 +35,7 @@ CI 在 `pull_request` 和分支 `push` 上运行，矩阵为 `windows-2022` 与 
 
 - Node 固定在 24 主版本，pnpm 读取根 `package.json` 的 `packageManager` 精确版本；依赖安装使用 frozen lockfile。
 - Windows 使用 MSYS2 UCRT64 的 GCC、CMake 与 MinGW Makefiles，与本地工具链一致。
-- Linux 安装 CMake、G++、Make、Electron 系统库与 Xvfb；回归通过 `xvfb-run --auto-servernum --server-args="-screen 0 1440x900x24" pnpm regression` 运行。
+- Linux 安装 CMake、G++、Make、Electron 系统库与 Xvfb；回归通过 `xvfb-run --auto-servernum --server-args="-screen 0 1440x900x24" pnpm regression` 运行。测试启动器会从命令行向 Linux Electron 子进程传入 `--no-sandbox`，因为 runner 中 npm 下载的 `chrome-sandbox` 未配置 root/4755，原生启动检查早于测试 JavaScript 执行；该参数仅用于回归，不改变正式应用的安全配置。
 - 官方 Actions 固定提交 SHA。默认 token 只有 `contents: read`，checkout 不保留凭据；新提交取消同一 ref 的旧 CI，矩阵单边失败不会中断另一边。
 
 本地 Windows 通过不代表 Linux runner 已通过；首次合并前应以两项实际 GitHub Actions 检查结果为准。工作流语法可用 `actionlint .github/workflows/ci.yml .github/workflows/release.yml` 检查。

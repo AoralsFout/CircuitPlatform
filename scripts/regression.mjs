@@ -40,9 +40,12 @@ async function main() {
       const env = { ...process.env, CIRCUIT_ENGINE_PATH: enginePath, CIRCUIT_REGRESSION_USER_DATA: userData };
       delete env.ELECTRON_RUN_AS_NODE;
       const script = join(desktopRoot, "scripts", `${name}.mjs`);
+      // Linux CI 的沙箱检查早于 JavaScript 入口，只在测试进程启动参数中提前声明。
+      const electronArgs = [join(root, "scripts/regression-child.mjs"), script, `--user-data-dir=${userData}`,
+        ...(process.platform === "linux" ? ["--no-sandbox"] : [])];
       const result = await runRegressionProcess({
         command: runtime === "node" ? process.execPath : electronPath,
-        args: runtime === "node" ? [script] : [join(root, "scripts/regression-child.mjs"), script, `--user-data-dir=${userData}`],
+        args: runtime === "node" ? [script] : electronArgs,
         cwd: desktopRoot,
         env,
         successMarker,
