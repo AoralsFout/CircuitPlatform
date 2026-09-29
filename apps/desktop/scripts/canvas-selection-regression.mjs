@@ -140,7 +140,17 @@ async function main() {
       };
       return selectedBeforeClear;
     })()`);
-    clickAt(window, clearPoint);
+    await window.webContents.executeJavaScript(`(() => {
+      const canvas = document.querySelector('.circuit-canvas');
+      canvas.dispatchEvent(new PointerEvent('pointerdown', {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+        pointerId: 1,
+        clientX: ${clearPoint.x},
+        clientY: ${clearPoint.y},
+      }));
+    })()`);
     await waitForDOM(window, "!document.querySelector('.signal-wire-hit--focused') && !document.querySelector('.signal-wire-outline')", "空白点击未清除 Wire 状态");
     const result = await window.webContents.executeJavaScript(`(() => {
       const wireHit = document.querySelector('.signal-wire-hit');
