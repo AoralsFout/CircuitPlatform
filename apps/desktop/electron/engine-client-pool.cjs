@@ -13,12 +13,15 @@ const DEFAULT_DOCUMENT_KEY = "default";
 class EngineClientPool {
   /**
    * @param {string} enginePath 引擎可执行文件路径。
-   * @param {{ spawnArgs?: readonly string[], createClient?: (enginePath: string, spawnArgs: readonly string[], documentKey: string) => EngineClient }} [options]
+   * @param {{ spawnArgs?: readonly string[], clientOptions?: object, onDiagnostic?: (event: string, fields: Record<string, unknown>) => void, createClient?: (enginePath: string, spawnArgs: readonly string[], documentKey: string) => EngineClient }} [options] 诊断不携带文档键或工程内容。
    */
   constructor(enginePath, options = {}) {
     this.enginePath = enginePath;
     this.spawnArgs = options.spawnArgs ?? [];
-    this.createClient = options.createClient ?? ((path, args) => new EngineClient(path, args));
+    this.createClient = options.createClient ?? ((path, args) => new EngineClient(path, args, {
+      ...options.clientOptions,
+      onDiagnostic: options.onDiagnostic ?? options.clientOptions?.onDiagnostic,
+    }));
     /** @type {Map<string, EngineClient>} */
     this.clients = new Map();
     this.closed = false;
@@ -139,7 +142,7 @@ async function healthResponse(client) {
     return {
       status: error?.code === "ENOENT" ? "unavailable" : "error",
       message: error?.code === "ENOENT"
-        ? "尚未找到 C++ 引擎，请先执行 pnpm build:engine"
+        ? "未找到 C++ 引擎。请重新安装 CircuitPlatform；若仍无法启动，请联系维护者并提供诊断日志。"
         : error instanceof Error ? error.message : "无法连接到 C++ 引擎",
     };
   }

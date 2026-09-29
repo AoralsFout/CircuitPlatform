@@ -4,15 +4,49 @@ const path = require("node:path");
 const { EngineClientPool, DEFAULT_DOCUMENT_KEY, requireDocumentKey } = require("./engine-client-pool.cjs");
 const { requirePositiveId, requireNonEmptyString, requireSaveDialogOptions } = require("./request-validation.cjs");
 const { writeTextFileAtomically, readTextFile } = require("./project-file-io.cjs");
+const { resolveEnginePath } = require("./runtime-paths.cjs");
+const { createDiagnosticLogger } = require("./diagnostic-logger.cjs");
 
-const engineFileName = process.platform === "win32" ? "circuit-engine.exe" : "circuit-engine";
+// 回归和便携运行可隔离偏好目录；默认仍由 Electron 管理用户数据位置。
+const userDataDirectory = app.commandLine.getSwitchValue("user-data-dir");
+if (userDataDirectory) app.setPath("userData", path.resolve(userDataDirectory));
+const logDirectory = path.join(app.getPath("userData"), "logs");
+// Electron 自身可能在创建 logs 目录时抛错；诊断不可写应交给 logger 降级，不能阻断启动。
+try { app.setAppLogsPath(logDirectory); } catch {}
+const diagnostics = createDiagnosticLogger({ directory: logDirectory });
+diagnostics.log("app_start", { version: app.getVersion(), platform: process.platform, packaged: app.isPackaged });
+const engineClients = new EngineClientPool(resolveEnginePath({
+  isPackaged: app.isPackaged,
+  resourcesPath: process.resourcesPath,
+  desktopRoot: path.resolve(__dirname, ".."),
+}), { onDiagnostic: diagnostics.log });
+let fatalErrorReported = false;
 
-function getEnginePath() {
-  // 允许测试或打包环境通过环境变量替换引擎位置。
-  return process.env.CIRCUIT_ENGINE_PATH || path.resolve(__dirname, "../../../engine/build", engineFileName);
+// 退出最多等待日志一秒；异常文件系统不能让应用永远停在退出过程。
+function flushDiagnosticsThen(finish) {
+  let finished = false;
+  const complete = () => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(timeout);
+    finish();
+  };
+  const timeout = setTimeout(complete, 1000);
+  void diagnostics.flush().then(complete, complete);
 }
 
-const engineClients = new EngineClientPool(getEnginePath());
+// 未捕获异常后主进程可能已经破坏状态，先关闭引擎再退出，避免继续写工程文件。
+function reportFatalError(error, operation) {
+  if (fatalErrorReported) return;
+  fatalErrorReported = true;
+  diagnostics.log("app_error", { level: "error", operation, code: error?.code });
+  engineClients.closeAll();
+  dialog.showErrorBox("CircuitPlatform 无法继续运行", `应用遇到异常，请重新启动。未保存的更改可能丢失。\n诊断日志：${diagnostics.filePath}`);
+  flushDiagnosticsThen(() => app.exit(1));
+}
+
+process.on("uncaughtException", (error) => reportFatalError(error, "uncaught_exception"));
+process.on("unhandledRejection", (error) => reportFatalError(error, "unhandled_rejection"));
 
 // 健康检查复用正式长连接，确保检查成功后下一次业务请求不会重新启动进程。
 // 它同时是进程死亡后的唯一恢复入口：restart() 清除死亡记录后，下一次请求才会重新拉起进程；
@@ -37,6 +71,8 @@ function createWindow() {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
+      additionalArguments: !app.isPackaged && process.env.CIRCUIT_PLATFORM_E2E === "1"
+        ? ["--circuit-platform-e2e"] : [],
     },
   });
 
@@ -45,6 +81,13 @@ function createWindow() {
   // 后者即使 autoHideMenuBar 也挡不住。移除菜单是唯一可靠的做法；DevTools 用 before-input-event 补回。
   // 菜单一旦移除，默认加速键（含 F5 重新加载）就不再存在，运行控制键因此直达渲染进程，这里不需要再拦。
   Menu.setApplicationMenu(null);
+  window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  window.webContents.on("will-navigate", (event) => event.preventDefault());
+  window.webContents.on("render-process-gone", (_event, details) => {
+    diagnostics.log("renderer_gone", { level: "error", reason: details.reason, exitCode: details.exitCode });
+    reportFatalError(null, "window_create");
+  });
+  window.webContents.on("preload-error", (_event, _preloadPath, error) => reportFatalError(error, "window_create"));
   window.webContents.on("before-input-event", (event, input) => {
     if (input.type === "keyDown" && input.control && input.shift && input.key.toLowerCase() === "i") {
       window.webContents.toggleDevTools();
@@ -52,14 +95,16 @@ function createWindow() {
     }
   });
 
-  if (process.env.CIRCUIT_PLATFORM_E2E_URL) {
+  let loading;
+  if (!app.isPackaged && process.env.CIRCUIT_PLATFORM_E2E_URL) {
     // 专用真实 E2E 页面仍使用本文件注册的 IPC handler 与 preload，只替换渲染入口。
-    window.loadURL(process.env.CIRCUIT_PLATFORM_E2E_URL);
+    loading = window.loadURL(process.env.CIRCUIT_PLATFORM_E2E_URL);
   } else if (app.isPackaged || process.env.CIRCUIT_PLATFORM_PRODUCTION === "1") {
-    window.loadFile(path.resolve(__dirname, "../dist/index.html"));
+    loading = window.loadFile(path.resolve(__dirname, "../dist/index.html"));
   } else {
-    window.loadURL("http://127.0.0.1:5173");
+    loading = window.loadURL("http://127.0.0.1:5173");
   }
+  void loading.catch((error) => reportFatalError(error, "window_create"));
 }
 
 app.whenReady().then(() => {
@@ -102,7 +147,7 @@ app.whenReady().then(() => {
     engineClients.closeDocument(documentKey);
     return { ok: true };
   });
-  if (process.env.CIRCUIT_PLATFORM_E2E === "1") {
+  if (!app.isPackaged && process.env.CIRCUIT_PLATFORM_E2E === "1") {
     ipcMain.handle("engine:e2e-kill", (_event, documentKey) => {
       const client = engineClients.clientFor(requireDocumentKey(documentKey));
       const processHandle = client.engine;
@@ -128,6 +173,7 @@ app.whenReady().then(() => {
       writeTextFileAtomically(fs, filePath, content);
       return { ok: true };
     } catch (error) {
+      diagnostics.log("app_error", { level: "warn", operation: "save_project", code: error?.code });
       return { ok: false, reason: error instanceof Error ? error.message : "写入项目文件失败。" };
     }
   });
@@ -146,6 +192,7 @@ app.whenReady().then(() => {
       requireNonEmptyString(filePath, "filePath");
       return { ok: true, content: readTextFile(fs, filePath) };
     } catch (error) {
+      diagnostics.log("app_error", { level: "warn", operation: "open_project", code: error?.code });
       // 错误对象上的 code（读文件失败带的 PROJECT_FILE_NOT_FOUND 等）随结果带回，让渲染层
       // 按机器可读类别分支而不必解析展示文案；没有 code 的失败保持原形状。
       const code = typeof (error && error.code) === "string" ? error.code : undefined;
@@ -157,17 +204,28 @@ app.whenReady().then(() => {
     }
   });
   createWindow();
+  diagnostics.log("app_ready");
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
-});
+}).catch((error) => reportFatalError(error, "startup"));
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
 
-app.on("before-quit", () => engineClients.closeAll());
+let logsFlushed = false;
+app.on("before-quit", (event) => {
+  engineClients.closeAll();
+  if (logsFlushed) return;
+  event.preventDefault();
+  diagnostics.log("app_quit");
+  flushDiagnosticsThen(() => {
+    logsFlushed = true;
+    app.quit();
+  });
+});
 
 module.exports = {
   DEFAULT_DOCUMENT_KEY,

@@ -2,14 +2,16 @@
 
 ## 必需工具
 
-- Node.js 和 pnpm
-- CMake
-- MinGW g++
+- Node.js 24 和 pnpm 11.19.0（版本由根 `package.json` 指定）
+- CMake 3.20 以上
+- Windows：MinGW UCRT64 g++；Linux：支持 C++20 的 g++
+
+最终用户使用 Windows 安装器即可，无需开发工具。安装、发布和诊断见[发布文档](releasing.md)。
 
 ## 安装前端依赖
 
 ```powershell
-pnpm install
+pnpm install --frozen-lockfile
 ```
 
 ## 编译 C++ 引擎
@@ -35,7 +37,7 @@ pnpm dev
 pnpm verify
 ```
 
-如果 CMake 选择了不同的生成器，需要相应调整 `build:engine` 脚本或手动执行 CMake 命令。
+`build:engine` 使用 Release 配置，Windows 新构建默认选择 MinGW Makefiles，Linux 使用 CMake 默认生成器；已有构建树沿用缓存生成器。需要另一工具链时在新的构建树上设置 `CMAKE_GENERATOR`。所有引擎可执行文件统一输出到 `engine/build/`，Release 下仍启用测试断言。
 
 `verify` 的步骤是 `typecheck → test → build → build:engine → test:engine`，覆盖协议与桌面端类型检查、Node 自动化测试、生产构建、C++ 构建和 CTest，以及真实引擎时序 E2E。它不运行下面的独立 Electron E2E、子电路探针、视觉和性能命令。
 
@@ -47,7 +49,15 @@ pnpm --filter @circuit-platform/desktop test:temporal-e2e
 
 ### Electron 与子电路验收
 
-以下五条命令使用真实 Electron 窗口、正式 IPC 和 C++ 引擎，运行前先执行 `pnpm build:engine`。多文档 E2E 缺少引擎时会输出 `SKIP`，其余四条会报错；收口验收必须确认场景实际通过，不能把跳过当作通过：
+Phase 6 提供统一的验收入口，强制检查真实引擎、成功标记与退出码，并收集各场景日志：
+
+```powershell
+pnpm regression
+```
+
+CI 采用同一入口，Linux 使用 Xvfb。运行器隔离用户配置，端口由系统分配；结果在 `artifacts/regression/`。CI 的触发与门槛见[持续集成说明](testing/continuous-integration.md)。
+
+以下五条命令使用真实 Electron 窗口、正式 IPC 和 C++ 引擎，运行前先执行 `pnpm build:engine`。缺少引擎时直接失败；收口验收必须确认场景实际通过，不能把跳过当作通过：
 
 ```powershell
 pnpm --filter @circuit-platform/desktop test:multidocument-e2e

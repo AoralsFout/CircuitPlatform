@@ -62,7 +62,7 @@ async function main() {
   const compatible = structuredClone(source);
   compatible.circuit.components[0].displayName = "A";
   writeFileSync(compatiblePath, JSON.stringify(compatible), "utf8");
-  const vite = await createServer({ root: desktopRoot, server: { host: "127.0.0.1", port: 50476, strictPort: false, hmr: false } });
+  const vite = await createServer({ root: desktopRoot, server: { host: "127.0.0.1", port: 0, hmr: false } });
   const choices = [parentPath, sourcePath, sourcePath, compatiblePath];
   const originalDialog = dialog.showOpenDialog;
   let window;

@@ -100,14 +100,15 @@ function waitForServer(url, timeoutMs = 15_000) {
 
 async function main() {
   app.disableHardwareAcceleration();
-  const port = 49152;
-  const vite = await createServer({ root: desktopRoot, server: { host: "127.0.0.1", port, strictPort: true, hmr: false } });
+  app.commandLine.appendSwitch("disable-gpu");
+  app.commandLine.appendSwitch("no-sandbox");
+  const vite = await createServer({ root: desktopRoot, server: { host: "127.0.0.1", port: 0, hmr: false } });
   try {
     await vite.listen();
-    const baseUrl = `http://127.0.0.1:${port}`;
+    const address = vite.httpServer?.address();
+    if (!address || typeof address === "string") throw new Error("无法获取 Vite 测试端口");
+    const baseUrl = `http://127.0.0.1:${address.port}`;
     await waitForServer(`${baseUrl}/visual-regression.html`);
-    app.commandLine.appendSwitch("disable-gpu");
-    app.commandLine.appendSwitch("no-sandbox");
     await app.whenReady();
     const window = new BrowserWindow({ show: false, width: 1440, height: 900, webPreferences: { sandbox: true, backgroundThrottling: false } });
     await window.loadURL(`${baseUrl}/visual-regression.html?state=default&theme=dark&motion=reduced`);

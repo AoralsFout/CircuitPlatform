@@ -7,6 +7,6 @@ int main() {
     const auto status = engine.status();
 
     assert(status.name == "CircuitPlatform C++ Engine");
-    assert(status.version == "0.1.0");
+    assert(status.version == CIRCUIT_ENGINE_VERSION);
     return 0;
 }

@@ -1,0 +1,112 @@
+name: Windows release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Verify, package and smoke test Windows x64
+    runs-on: windows-2022
+    timeout-minutes: 40
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - name: Require the tag to match the application version
+        run: node scripts/check-release-tag.mjs
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          package_json_file: package.json
+          run_install: false
+      - name: Install UCRT64 C++ toolchain
+        id: msys2
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-make
+      - name: Add UCRT64 tools to PATH
+        shell: pwsh
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+        run: Add-Content -LiteralPath $env:GITHUB_PATH -Value (Join-Path $env:MSYS2_LOCATION 'ucrt64/bin')
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm verify
+      - run: pnpm regression
+      - name: Build NSIS installer
+        run: pnpm package:win
+      - name: Check packaged resources and engine dependencies
+        run: pnpm package:check
+      - name: Smoke test the packaged Electron application
+        run: node scripts/packaged-smoke.mjs release/win-unpacked
+      - name: Install, smoke test and uninstall the NSIS artifact
+        run: pnpm package:install-smoke
+      - name: Generate installer SHA-256 checksum
+        run: node scripts/release-assets.mjs
+      - name: Preserve validated installer and checksum
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-x64-release
+          path: |
+            release/CircuitPlatform-*-windows-x64-setup.exe
+            release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+      - name: Preserve regression diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-regression
+          path: |
+            artifacts/regression/
+            release/smoke/
+            release/installer-smoke/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  draft-release:
+    name: Create a release draft for human review
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: windows-x64-release
+          path: release
+      - name: Verify downloaded installer checksum
+        working-directory: release
+        run: sha256sum --check SHA256SUMS.txt
+      - name: Create an unpublished GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          cat > release-notes.md <<'NOTES'
+          Windows x64 NSIS 安装器与 SHA-256 校验值。
+
+          已通过类型检查、自动化测试、C++ 引擎测试、8 项 Electron 回归、打包应用烟测与 NSIS 安装/启动/卸载烟测。
+
+          当前构建未配置代码签名，安装时 Windows 可能显示未知发布者提示。此 Release 保持草稿，须维护者完成安装、启动、卸载与签名状态检查后手动发布。运行日志位置及验证方法见仓库发布文档。
+          NOTES
+          gh release create "$RELEASE_TAG" release/*.exe release/SHA256SUMS.txt --repo "$GH_REPO" --verify-tag --draft --title "CircuitPlatform $RELEASE_TAG" --notes-file release-notes.md

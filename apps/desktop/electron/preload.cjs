@@ -30,7 +30,7 @@ function createDocumentEngineBridge(documentKey) {
     closeDocument: () => ipcRenderer.invoke("engine:close-document", key),
   };
   // 只在专用真实 E2E 进程暴露按文档故障注入；生产渲染器没有这个能力。
-  if (process.env.CIRCUIT_PLATFORM_E2E === "1") {
+  if (process.argv.includes("--circuit-platform-e2e")) {
     bridge.killForTest = () => ipcRenderer.invoke("engine:e2e-kill", key);
   }
   return bridge;

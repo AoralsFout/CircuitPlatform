@@ -1,6 +1,10 @@
 packages:
   - apps/*
   - packages/*
+overrides:
+  # electron-builder 26.15 使用 3.1 引入的缓存枚举，但声明仍允许不兼容的 3.0。
+  app-builder-lib@26.15.3>@electron/get: 3.1.0
 allowBuilds:
   electron: true
+  electron-winstaller: false
   esbuild: true
