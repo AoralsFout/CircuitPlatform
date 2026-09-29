@@ -320,14 +320,17 @@ test("engine-rejected submissions do not mark the document dirty", async () => {
 test("a successful save after edits records the project in recent storage once per identity", async () => {
   const engine = new SaveFlowEngine();
   const storage = memoryStorage();
+  const [originalPath, duplicatePath] = process.platform === "win32"
+    ? ["e:\\circuits\\Demo.circuit.json", "E:/CIRCUITS/demo.circuit.json"]
+    : ["/circuits/Demo.circuit.json", "/circuits/./Demo.circuit.json"];
   const { binding, restore } = await bootstrappedBinding(engine, storage);
   try {
-    engine.dialogResults.push({ ok: true, path: "e:\\circuits\\Demo.circuit.json" });
+    engine.dialogResults.push({ ok: true, path: originalPath });
     await binding.save();
 
     await binding.moveComponent("and-gate", { x: 480, y: 260 });
     // 同一份文件的不同写法是同一条最近项目记录。
-    engine.dialogResults.push({ ok: true, path: "E:/CIRCUITS/demo.circuit.json" });
+    engine.dialogResults.push({ ok: true, path: duplicatePath });
     await binding.saveAs();
 
     const raw = storage.data.get(RECENT_PROJECTS_STORAGE_KEY);
