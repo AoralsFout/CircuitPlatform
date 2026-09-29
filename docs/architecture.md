@@ -36,7 +36,7 @@ C++ 数字电路仿真引擎
 
 画布位置不影响仿真结果；同一份 Circuit 可以被多个 Simulation 使用。
 
-Subcircuit 是 Project 与编辑器层的概念，在进入引擎之前就已经被展平为普通 Component（[ADR 0014](decisions/0014-subcircuit-by-reference-flattened-simulation.md)），因此不改变上面的三类状态划分。
+Subcircuit 是 Project 与编辑器层的概念。父 Project 按 [ADR 0027](decisions/0027-embedded-subcircuit-snapshots.md) 保存导入定义；每个使用处在进入引擎前仍按 [ADR 0014](decisions/0014-subcircuit-by-reference-flattened-simulation.md) 展平为普通 Component，因此不改变上面的三类状态划分。
 
 ## 第一版连接规则
 
@@ -111,11 +111,11 @@ Electron 主进程通过 JSON Lines 长连接调用引擎。当前协议提供 `
 
 ### 项目文件与推送路径
 
-项目文件（[ADR 0021](decisions/0021-project-file-v1-path-identity-and-replace.md)）是 UTF-8 JSON，扩展名 `.circuit.json`，根对象 `{version, circuit}`。序列化、校验与路径规范化是渲染层的纯模块；Electron 主进程只负责打开 / 保存对话框与文件 IO，保存先写临时文件、成功后原子替换。文件里的元件身份就是编辑器文档的稳定 Editor ID，端口清单只为数据驱动元件写入且性质是缓存——`component_added` 回传的清单仍是权威。Subcircuit 另外保存相对父 Project 的引用、当前已采用的有序 Port 缓存和可选显式顺序；同一目标文件的每个 occurrence 各自持有已采用快照。Input 元件的当前激励值随文件保存，重新打开后经既有 `set_input` 提交；时序状态不进文件。
+项目文件（[ADR 0021](decisions/0021-project-file-v1-path-identity-and-replace.md)、[ADR 0027](decisions/0027-embedded-subcircuit-snapshots.md)）是 UTF-8 JSON，扩展名 `.circuit.json`。版本 `2` 的根对象保存顶层 `circuit`、以稳定 ID 索引的 `definitions` 和直接导入的 `libraryRoots`；打开和导入均明确拒绝旧版文件。Subcircuit Component 保存定义 ID、Port 缓存与可选顺序，文件中没有源 Project 路径。序列化与校验由纯 TypeScript 模块处理；Electron 主进程只负责文件选择和 IO，保存先写临时文件、成功后原子替换。Input 的当前激励值随 Circuit 保存，重新打开后经 `set_input` 提交；时序状态、波形和撤销历史不进文件。
 
-打开项目先递归读取并展平所有可解析的 Subcircuit，再走「先推新、成功后才移除旧」的整体替换：先按扁平 Circuit 整份推送（引擎身份单调递增，两份电路短暂共存不冲突），全部成功后移除旧电路元件并整体替换绑定；推送失败补偿新建结构、恢复旧绑定，旧文档在引擎里的结构不受影响。失败引用保留缓存 Port 和中文诊断，但该子树及穿过它的 Connection 不进入引擎，其他分支仍可运行。
+打开项目从自身的定义表递归展平可解析的 Subcircuit，不读取原导入文件，再走「先推新、成功后才移除旧」的整体替换：先按扁平 Circuit 整份推送，全部成功后移除旧电路并替换绑定；推送失败补偿新建结构、恢复旧绑定。缺失定义保留使用处的缓存 Port、Connection 和诊断；该子树及穿过它的 Connection 不进入引擎，其他分支仍可运行。每个放置位置拥有独立扁平身份和时序状态。
 
-普通保存只序列化当前已采用快照，不读取子文件。显式「重新加载子电路」才读取选中 occurrence 及其递归依赖，并以一个可撤销的局部投影事务替换其扁平子树；端口改名、删除、方向或位宽不兼容时保留原 Connection 并标记悬空。引擎进程恢复则从内存中的完整已采用扁平快照重建，不借机读取磁盘，因此磁盘变化不会绕过手动重载。重载、删除或撤销重建的目标子树会获得新引擎身份，其中 DFlipFlop 从 `X` 开始；未受影响 occurrence 的身份和时序状态保持。
+普通保存、另存为与引擎进程恢复只消费父 Project 的内嵌定义和内存投影，不重定位或读取源文件。显式「重新导入」由用户重新选择已保存的 v2 文件，先构造完整候选定义图并计算 Port 影响，确认后再以一帧可撤销结构事务提交。名称、方向和位宽相同的 Port 保留 Connection；可编辑顶层的其他 Connection 可在预告后悬空，只读上层若新增内部悬空连接则拒绝更新。受影响的时序子树从初始状态开始，其他使用处保留状态；结构撤销不回拨仿真时间。
 
 推送时延预算：500 元件 / 1,000 连线的完整推送（含加载后首次求值）均值 ≤ 6 秒（规格 #34 原定价 3 秒，落地后按其「复核口径」预案重定，依据见[性能基准](testing/performance-benchmark.md)），在端到端回归中断言。波形历史按 tick 逐拍记录（上限 1,000 点、丢弃最旧），属于会话状态，不进项目文件。
 
@@ -138,18 +138,17 @@ Engine ID。健康检查、重启、待处理请求清理和关闭回收均按�
   facade 只把当前活动 Controller 投影给既有 App/面板。切换会暂停旧 Controller，重新
   激活不会偷偷恢复运行；关闭或卸载先停止调度器、取消订阅，再释放该文档的引擎客户端。
 
-下钻来源是运行时关系 `childKey → { parentKey, sourceComponentId }`，不是文件字段。打开
-子文档先走路径去重；同一子文档从另一个 occurrence 下钻时复用标签并更新这一跳来源。
-返回只激活仍存在的父文档、选择并居中稳定的来源 Editor ID；若父或来源已不存在，清掉
-记录而不重新打开文件。关闭一个父文档会清理它作为父的全部 child links，关闭子文档只清理
-它自己的记录，不级联关闭其他标签。
+普通可编辑 Project 标签继续按规范化路径去重。内嵌定义的只读标签则由父文档键与定义 ID
+定位，同一定义的多处使用复用标签；它从父 Project 的定义表展示 Circuit 与布局，不打开
+原源文件，也不创建独立 `Workspace`、引擎进程或 SimulationState。定义重新导入时标签按
+稳定身份刷新，删除或整树替换后失去的定义显示缺失状态，撤销可恢复。返回父电路的来源
+记录只用于选择与居中原使用处，不参与项目文件序列化。
 
-保存后的 stale 归属也按 occurrence 隔离。子文档只有在原子写盘成功、路径和内容版本更新
-完成后才广播保存事件；父文档按规范化目标路径与自己的 occurrence key 比较采用版本，只有
-实际落后者进入 `needsReload`。广播不读取文件、不触碰引擎、不创建父历史帧；显式重载才
-读取该 occurrence 的依赖，并以一个可撤销的局部 projection 事务替换它。成功后只清掉这
-个 occurrence/version 的 stale 标记，其他 occurrence（包括同一父文档中的另一个使用处）
-继续保持 stale。
+保存另一个可编辑 Project 不会广播基于源路径的 stale 状态。父文档的内嵌快照保持不变，
+只在用户重新选文件并确认重新导入后更新；因此父文档没有 `needsReload` 提示，也不依赖
+原文件仍存在。普通文件标签的保存和路径身份规则不受内嵌标签影响。生产 facade 与无头
+`createDocumentCoordinator` 均直接保存 v2 内容；跨目录另存为只更改当前 Project 的路径身份，
+不计算子电路相对路径，也没有跨磁盘引用重定位错误。
 
 内部信号是只读的 occurrence-local projection。展平器为每个 occurrence 生成稳定的
 `ownerId`、`flatId` 和端口来源，工作区把已有 tick 快照投影成 `flatId:port`；不把临时

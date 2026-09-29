@@ -2,21 +2,7 @@ import type { ComponentKindName, PortSpec } from "@circuit-platform/protocol";
 import type { SubcircuitComponentData, SubcircuitDiagnostic } from "../editor/component.ts";
 import type { EditorComponent, EditorConnection, EditorDocument, InternalComponentDescriptor, Point } from "../editor/index.ts";
 import type { ProjectFileComponent, ProjectFileData } from "./index.ts";
-import { projectPathIdentity, resolveProjectReference, type PathPlatform } from "./paths.ts";
-
-/** 供层次解析模块使用的最小子 Project 读取器；实现可以接文件、内存图或测试夹具。 */
-export interface HierarchyProjectReader {
-  /**
-   * 读取某个使用处采用的子 Project。
-   * @param identity 已按目标平台规范化的 Project 身份。
-   * @param occurrencePath 从根文档到该使用处的稳定 Editor Component ID 路径；同一文件的不同路径必须可返回不同快照。
-   * @returns 已校验的 v1 项目数据，或包含稳定机器类别和中文原因的读取失败；抛出异常也会由展平器转换为失败诊断。
-   */
-  read(identity: string, occurrencePath?: readonly string[]): Promise<
-    | { ok: true; value: ProjectFileData }
-    | { ok: false; code: string; message: string }
-  >;
-}
+import { projectPathIdentity, type PathPlatform } from "./paths.ts";
 
 /** 展平后可直接交给 Workspace 的纯协议 Circuit 投影。 */
 export interface FlattenedCircuit {
@@ -51,7 +37,6 @@ export interface HierarchyDiagnostic extends SubcircuitDiagnostic {
 export interface FlattenProjectInput {
   rootIdentity: string;
   root: ProjectFileData;
-  reader: HierarchyProjectReader;
   platform?: PathPlatform;
 }
 
@@ -99,6 +84,7 @@ interface MutableOutput {
   portSources: Record<string, Record<string, { inputTargets?: FlatEndpoint[]; outputSources?: FlatEndpoint[] }>>;
   internalComponents: Record<string, InternalComponentDescriptor[]>;
   visibleSubcircuits: Record<string, SubcircuitComponentData>;
+  visiblePorts: Record<string, readonly PortSpec[]>;
   diagnostics: HierarchyDiagnostic[];
 }
 
@@ -112,6 +98,7 @@ function createMutableOutput(): MutableOutput {
     portSources: {},
     internalComponents: {},
     visibleSubcircuits: {},
+    visiblePorts: {},
     diagnostics: [],
   };
 }
@@ -135,12 +122,13 @@ function mergeOutput(target: MutableOutput, source: MutableOutput): void {
     }
   }
   Object.assign(target.visibleSubcircuits, source.visibleSubcircuits);
+  Object.assign(target.visiblePorts, source.visiblePorts);
   target.diagnostics.push(...source.diagnostics);
 }
 
 /**
- * 递归解析并展平一份 Project。
- * @param input 顶层 Project 身份、已校验文件数据和可注入的子 Project 读取器。
+ * 递归解析并展平一份 Project，所有子定义来自同一内存快照。
+ * @param input 顶层 Project 身份和已校验文件数据。
  * @returns 顶层 Editor 文档、只含引擎类型的扁平 Circuit、来源映射与诊断；不分配引擎 ID。
  */
 export async function flattenProjectHierarchy(input: FlattenProjectInput): Promise<FlattenProjectResult> {
@@ -155,9 +143,10 @@ export async function flattenProjectHierarchy(input: FlattenProjectInput): Promi
     portSources: {},
     internalComponents: {},
     visibleSubcircuits: {},
+    visiblePorts: {},
     diagnostics: [],
   };
-  await flattenOccurrence(input.root, rootIdentity, [], [], false, [], output, input.reader, platform);
+  await flattenOccurrence(input.root, rootIdentity, [], [], false, [], output);
   const rootDocument = documentForProject(input.root, output);
 
   return {
@@ -179,7 +168,7 @@ function documentForProject(project: ProjectFileData, output: MutableOutput): Ed
     const component = editorComponentFor(entry);
     const resolved = output.visibleSubcircuits[entry.id];
     if (resolved !== undefined) {
-      return { ...component, ports: clonePorts(resolved.cachedPorts), data: { subcircuit: resolved } };
+      return { ...component, ports: clonePorts(output.visiblePorts[entry.id] ?? resolved.cachedPorts), data: { subcircuit: resolved } };
     }
     if (entry.kind === "subcircuit") {
       const data = subcircuitDataOf(entry);
@@ -226,11 +215,9 @@ async function flattenOccurrence(
   omitBoundary: boolean,
   ownerIds: readonly string[],
   output: MutableOutput,
-  reader: HierarchyProjectReader,
-  platform: PathPlatform | undefined,
 ): Promise<OccurrenceProjection> {
   const interfaceResult = omitBoundary
-    ? await interfaceFor(project, identity, undefined, stack, output, reader, platform)
+    ? await interfaceFor(project, identity, undefined, stack, output)
     : null;
   const projection: OccurrenceProjection = { inputs: new Map(), outputs: new Map(), inputAliases: new Map(), components: [], connections: [] };
   const componentById = new Map(project.circuit.components.map((component) => [component.id, component]));
@@ -238,19 +225,19 @@ async function flattenOccurrence(
   const endpointTarget = new Map<string, FlatEndpoint[]>();
   const boundaryOutputNames = new Map<string, string>();
   const boundaryInputNames = new Map<string, string>();
+  const validSubcircuitPorts = new Map<string, readonly PortSpec[]>();
 
   for (const component of project.circuit.components) {
     if (component.kind === "subcircuit") {
       const data = subcircuitDataOf(component);
-      const childIdentity = data === undefined ? null : resolveProjectReference(data.reference, identity, platform);
-      const childKey = childIdentity === null ? null : projectPathIdentity(childIdentity, platform);
+      const childKey = data?.definitionId ?? null;
       if (data === undefined || childKey === null) {
         const diagnostic = diagnosticFor("subcircuit-data-invalid", "Subcircuit 缺少有效引用数据。", identity, component.id, [...stack, identity]);
         output.diagnostics.push(diagnostic);
         updateVisibleSubcircuit(output, component.id, unresolvedData(data, diagnostic));
         continue;
       }
-      const childResult = await readChild(reader, childKey, [...occurrencePath, component.id]);
+      const childResult = readChild(project, childKey);
       if (!childResult.ok) {
         const diagnostic = diagnosticFor(childResult.code, childResult.message, childKey, component.id, [...stack, identity, childKey]);
         output.diagnostics.push(diagnostic);
@@ -265,7 +252,7 @@ async function flattenOccurrence(
         continue;
       }
       const childOutput = createMutableOutput();
-      const childInterface = await interfaceFor(childResult.value, childKey, data?.portOrder, [...stack, identity], childOutput, reader, platform);
+      const childInterface = await interfaceFor(childResult.value, childKey, data?.portOrder, [...stack, identity], childOutput);
       if (childInterface === null) {
         const diagnostic = outputDiagnosticForComponent(childOutput, component.id) ?? diagnosticFor("interface-invalid", "Subcircuit 接口无效。", childKey, component.id, [...stack, identity, childKey]);
         output.diagnostics.push(...childOutput.diagnostics);
@@ -280,19 +267,18 @@ async function flattenOccurrence(
         true,
         [...ownerIds, component.id],
         childOutput,
-        reader,
-        platform,
       );
-      if (childOutput.diagnostics.length > 0) {
+      if (childOutput.diagnostics.some((diagnostic) => diagnostic.code !== "definition-missing" && diagnostic.code !== "dangling-connection")) {
         output.diagnostics.push(...childOutput.diagnostics);
         updateVisibleSubcircuit(output, component.id, unresolvedData(data, childOutput.diagnostics[0]!));
         continue;
       }
       mergeOutput(output, childOutput);
+      validSubcircuitPorts.set(component.id, childInterface.ports);
       const subData: SubcircuitComponentData = {
         ...(data ?? { reference: "", cachedPorts: [] }),
-        reference: data?.reference ?? "",
-        cachedPorts: childInterface.ports,
+        definitionId: childKey,
+        cachedPorts: data?.cachedPorts ?? childInterface.ports,
         ...(data?.portOrder !== undefined ? { portOrder: [...data.portOrder] } : {}),
         status: "resolved",
         targetIdentity: childKey,
@@ -327,7 +313,10 @@ async function flattenOccurrence(
         }
       }
       // 将采用的解析状态写回顶层可见文档（仅顶层 Component 需要展示）。
-      if (occurrencePath.length === 0) updateVisibleSubcircuit(output, component.id, subData);
+      if (occurrencePath.length === 0) {
+        updateVisibleSubcircuit(output, component.id, subData);
+        output.visiblePorts[component.id] = childInterface.ports;
+      }
       continue;
     }
 
@@ -372,6 +361,7 @@ async function flattenOccurrence(
 
   // 先收集所有嵌套边界输入的来源别名，使连接遍历顺序不会影响多层直通的结果。
   for (const connection of project.circuit.connections) {
+    if (hasInvalidSubcircuitEndpoint(connection, componentById, validSubcircuitPorts)) continue;
     const sources = resolveConnectionSources(connection.source.component, connection.source.port, endpointSource, endpointTarget);
     const targets = resolveConnectionTargets(connection.target.component, connection.target.port, endpointSource, endpointTarget, boundaryOutputNames, boundaryInputNames);
     for (const source of sources) {
@@ -383,6 +373,10 @@ async function flattenOccurrence(
   }
 
   for (const connection of project.circuit.connections) {
+    if (hasInvalidSubcircuitEndpoint(connection, componentById, validSubcircuitPorts)) {
+      output.diagnostics.push(diagnosticFor("dangling-connection", `连接「${connection.id}」的子电路端口缺失或不兼容，已跳过仿真。`, identity, undefined, [...stack, identity]));
+      continue;
+    }
     // 内置元件的 Port 清单不进 Project 文件（由引擎回传，ADR 0020），但它们的连接端点
     // 仍然是合法且可展平的。按连接中实际出现的 Port 补出普通元件端点，不能因为文件里
     // 没有缓存清单就把穿过 AND/NOT 等内置元件的连接静默丢掉。
@@ -463,6 +457,24 @@ async function flattenOccurrence(
   return projection;
 }
 
+/** 子电路端点必须匹配当前定义的名称、方向和位宽；缺失子树的连接也保持在文档中。 */
+function hasInvalidSubcircuitEndpoint(
+  connection: ProjectFileData["circuit"]["connections"][number],
+  components: ReadonlyMap<string, ProjectFileComponent>,
+  validPorts: ReadonlyMap<string, readonly PortSpec[]>,
+): boolean {
+  for (const [endpoint, direction] of [[connection.source, "output"], [connection.target, "input"]] as const) {
+    const component = components.get(endpoint.component);
+    if (component?.kind !== "subcircuit") continue;
+    const actual = validPorts.get(component.id)?.find((port) => port.name === endpoint.port && port.direction === direction);
+    const cached = component.data !== undefined && "cachedPorts" in component.data
+      ? component.data.cachedPorts.find((port) => port.name === endpoint.port && port.direction === direction)
+      : undefined;
+    if (actual === undefined || cached === undefined || actual.width !== cached.width) return true;
+  }
+  return false;
+}
+
 /** 把可读来源收敛为稳定且无重复的扁平端点，供纯边界直通 Port 显示信号。 */
 function uniqueFlatEndpoints(sources: readonly SourceExpression[]): FlatEndpoint[] {
   const seen = new Set<string>();
@@ -519,8 +531,6 @@ async function interfaceFor(
   explicitOrder: readonly string[] | undefined,
   stack: readonly string[],
   output: MutableOutput,
-  _reader: HierarchyProjectReader,
-  _platform: PathPlatform | undefined,
 ): Promise<ProjectInterface | null> {
   // Clock 只能存在于顶层运行文档；将含 Clock 的文件作为子电路会让层次接口
   // 失去纯组合语义，因此在边界处整体拒绝，而顶层调用不会进入本函数。
@@ -580,18 +590,18 @@ function orderPorts(ports: readonly PortSpec[], order: readonly string[], identi
   return order.map((name) => ports.find((port) => port.name === name)!);
 }
 
-async function readChild(reader: HierarchyProjectReader, identity: string, occurrencePath: readonly string[] = []) {
-  try {
-    return await reader.read(identity, occurrencePath);
-  } catch (error) {
-    return { ok: false as const, code: "project-read-failed", message: error instanceof Error ? error.message : "读取子 Project 失败。" };
-  }
+function readChild(project: ProjectFileData, identity: string) {
+  const definition = Object.hasOwn(project.definitions, identity) ? project.definitions[identity] : undefined;
+  return definition === undefined
+    ? { ok: false as const, code: "definition-missing", message: `父 Project 中缺少子电路定义「${identity}」。` }
+    : { ok: true as const, value: { ...project, circuit: definition.circuit } };
 }
 
 function subcircuitDataOf(entry: ProjectFileComponent): SubcircuitComponentData | undefined {
-  if (entry.kind !== "subcircuit" || entry.data === undefined || !("reference" in entry.data)) return undefined;
+  if (entry.kind !== "subcircuit" || entry.data === undefined || !("definitionId" in entry.data)) return undefined;
   return {
-    reference: entry.data.reference,
+    definitionId: entry.data.definitionId,
+    reference: "",
     cachedPorts: entry.data.cachedPorts.map(clonePort),
     ...(entry.data.portOrder !== undefined ? { portOrder: [...entry.data.portOrder] } : {}),
   };
@@ -604,6 +614,7 @@ function updateVisibleSubcircuit(output: MutableOutput, componentId: string, dat
 function unresolvedData(data: SubcircuitComponentData | undefined, diagnostic: HierarchyDiagnostic): SubcircuitComponentData {
   return {
     reference: data?.reference ?? "",
+    ...(data?.definitionId !== undefined ? { definitionId: data.definitionId } : {}),
     cachedPorts: data?.cachedPorts ?? [],
     ...(data?.portOrder !== undefined ? { portOrder: [...data.portOrder] } : {}),
     status: "unresolved",

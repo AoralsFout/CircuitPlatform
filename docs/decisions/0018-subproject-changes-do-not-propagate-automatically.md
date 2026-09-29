@@ -2,7 +2,7 @@
 
 ## 状态
 
-已确认
+历史决策。基于源 Project 路径的变化提示与重新加载语义由 [ADR 0027](0027-embedded-subcircuit-snapshots.md) 取代；导入快照只通过用户明确选文件重新导入而改变。
 
 ## 背景
 

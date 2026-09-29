@@ -40,7 +40,6 @@ const emit = defineEmits<{
   toggleDetails: [];
   setPortWidth: [componentId: string, portName: string, width: number];
   setBitRanges: [componentId: string, ranges: readonly BitRange[]];
-  reloadSubcircuit: [componentId: string];
   openSubcircuit: [componentId: string];
 }>();
 
@@ -81,10 +80,6 @@ function subcircuitStatusLabel(status: "resolved" | "resolving" | "unresolved"):
   return "未解析";
 }
 
-function subcircuitStaleLabel(needsReload: boolean | undefined): string {
-  return needsReload ? "需重新加载：磁盘版本已变化，当前仍使用旧展平副本" : "已采用当前磁盘版本";
-}
-
 // 记录按信号键索引，行的键直接用来取值；某个信号在记录这一点时还不存在就是未知。
 // 多位信号以逐位文本原样显示（`1010`、`X1X0`），因此每一位都读得出来。
 function waveformValue(point: WaveformPoint, key: string): Signal {
@@ -121,7 +116,7 @@ const waveformRange = computed(() => {
         <div class="inspector-copy"><p>{{ inspector.behavior }}</p><span>类型：{{ inspector.type }}</span></div>
         <p v-if="inspector.hint" class="inspector-hint">{{ inspector.hint }}</p>
         <div v-if="inspector.subcircuit" class="inspector-subcircuit" aria-label="子电路状态">
-          <div class="inspector-details"><span>引用：{{ inspector.subcircuit.relativePath }}</span><span role="status">状态：{{ subcircuitStatusLabel(inspector.subcircuit.status) }}</span><span role="status">{{ subcircuitStaleLabel(inspector.subcircuit.needsReload) }}</span></div>
+          <div class="inspector-details"><span>定义：{{ inspector.subcircuit.relativePath }}</span><span role="status">状态：{{ subcircuitStatusLabel(inspector.subcircuit.status) }}</span></div>
           <p v-if="inspector.subcircuit.diagnostic" :id="`subcircuit-diagnostic-${inspector.id}`" class="inspector-hint" role="alert">{{ inspector.subcircuit.diagnostic }}</p>
           <button
             type="button"
@@ -130,7 +125,6 @@ const waveformRange = computed(() => {
             :aria-label="`打开子电路 ${inspector.subcircuit.relativePath}`"
             @click="emit('openSubcircuit', inspector.id)"
           >打开子电路</button>
-          <button type="button" :disabled="inspector.subcircuit.status === 'resolving'" :aria-describedby="inspector.subcircuit.diagnostic ? `subcircuit-diagnostic-${inspector.id}` : undefined" :aria-label="`重新加载子电路 ${inspector.subcircuit.relativePath}`" @click="emit('reloadSubcircuit', inspector.id)">重新加载子电路</button>
         </div>
         <div class="inspector-value"><span>当前信号</span><strong :class="signalStateClass(inspector.signal)">{{ inspector.signal }}</strong></div>
         <div v-if="inspector.attributes.length > 0" class="inspector-attributes" aria-label="可编辑属性">

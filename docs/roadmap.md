@@ -362,6 +362,8 @@ issue #20 接上了 `tick` 的第 ④ 步：
 
 ### Phase 5.5：层次化电路
 
+> 历史交付记录：本节的按路径引用、打开时读取子文件和按使用处重新加载规则由 [Spec #67](https://github.com/AoralsFout/CircuitPlatform/issues/67) 与 [ADR 0027](decisions/0027-embedded-subcircuit-snapshots.md) 取代；Port 接口和展平仿真规则继续适用。
+
 阶段目标是把一个已保存的 Project 作为 Subcircuit 放入另一份 Circuit 中复用，术语见 `CONTEXT.md`，设计取舍见 [ADR 0014](decisions/0014-subcircuit-by-reference-flattened-simulation.md)。依赖 Phase 4（子 Project 内允许 DFlipFlop）、Phase 4.5（多位 Port）和 Phase 5（项目文件）。Phase 4.5 之后端口清单包含位宽，展平时按位宽对齐。
 
 实现见 [ADR 0022](decisions/0022-hierarchy-flattening-projection.md)：递归读取通过纯 TypeScript reader seam 注入，失败子树采用局部投影原子合并，扁平身份使用 occurrence path 保证多实例稳定；编辑器以单历史帧局部替换投影，真实引擎回归覆盖多实例 DFlipFlop 状态隔离。
@@ -396,6 +398,8 @@ issue #20 接上了 `tick` 的第 ④ 步：
 第一版明确不做：下钻编辑子 Project、查看某个 Subcircuit 内部实时信号、四边端口布置、自动扫描库目录。
 
 ### Phase 5.6：多文档与下钻
+
+> 历史交付记录：本节的源 Project 下钻与保存后 stale 提示由 [Spec #67](https://github.com/AoralsFout/CircuitPlatform/issues/67) 取代；普通 Project 标签按路径去重与使用处内部实时信号检查器继续适用。
 
 阶段目标是让多份 Project 同时处于打开状态，并沿着 Subcircuit 的引用关系在它们之间导航；在此基础上以只读方式查看某个 Subcircuit 实例内部的实时信号。方案细节见[多文档与下钻设计](design/multi-document-and-drill-down.md)，同步语义见 [ADR 0018](decisions/0018-subproject-changes-do-not-propagate-automatically.md)。
 

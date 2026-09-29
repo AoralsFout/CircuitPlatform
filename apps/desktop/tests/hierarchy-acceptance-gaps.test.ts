@@ -129,40 +129,12 @@ const ports = {
 };
 
 function emptyProject(): ProjectFileData {
-  return { version: 1, circuit: { components: [], connections: [] } };
+  return { version: 2, circuit: { components: [], connections: [] }, definitions: {}, libraryRoots: [] };
 }
 
-function unresolvedParent(): ProjectFileData {
+function childProjectFile(): ProjectFileData {
   return {
-    version: 1,
-    circuit: {
-      components: [
-        { id: "unit", kind: "subcircuit", displayName: "missing.circuit.json", position: { x: 100, y: 100 }, data: {
-          reference: ".\\missing.circuit.json",
-          cachedPorts: [{ name: "a", direction: "input", width: 1 }, { name: "y", direction: "output", width: 1 }],
-        } },
-      ],
-      connections: [],
-    },
-  };
-}
-
-function resolvedParent(): ProjectFileData {
-  return {
-    version: 1,
-    circuit: {
-      components: [{ id: "unit", kind: "subcircuit", displayName: "child.circuit.json", position: { x: 100, y: 100 }, data: {
-        reference: ".\\child.circuit.json",
-        cachedPorts: [{ name: "a", direction: "input", width: 1 }, { name: "y", direction: "output", width: 1 }],
-      } }],
-      connections: [],
-    },
-  };
-}
-
-function resolvedChild(): ProjectFileData {
-  return {
-    version: 1,
+    ...emptyProject(),
     circuit: {
       components: [
         { id: "in", kind: "input", displayName: "a", position: { x: 0, y: 0 }, ports: ports.input },
@@ -179,44 +151,88 @@ function resolvedChild(): ProjectFileData {
   };
 }
 
-test("canceling Subcircuit selection keeps the document, history, dirty flag and recent projects unchanged", async () => {
+function embeddedParent(): ProjectFileData {
+  return {
+    version: 2,
+    circuit: {
+      components: [{ id: "unit", kind: "subcircuit", displayName: "child.circuit.json", position: { x: 100, y: 100 }, data: {
+        definitionId: "child",
+        cachedPorts: [{ name: "a", direction: "input", width: 1 }, { name: "y", direction: "output", width: 1 }],
+      } }],
+      connections: [],
+    },
+    definitions: { child: { displayName: "child.circuit.json", circuit: childProjectFile().circuit } },
+    libraryRoots: ["child"],
+  };
+}
+
+function missingDefinitionParent(): ProjectFileData {
+  return {
+    version: 2,
+    circuit: {
+      components: [
+        { id: "source", kind: "input", displayName: "Source", position: { x: 0, y: 0 }, ports: ports.input },
+        { id: "gate", kind: "not", displayName: "NOT", position: { x: 40, y: 0 } },
+        { id: "sink", kind: "output", displayName: "Sink", position: { x: 80, y: 0 }, ports: ports.output },
+        { id: "missing", kind: "subcircuit", displayName: "missing.circuit.json", position: { x: 40, y: 100 }, data: {
+          definitionId: "missing-definition",
+          cachedPorts: [{ name: "a", direction: "input", width: 1 }, { name: "y", direction: "output", width: 1 }],
+        } },
+      ],
+      connections: [
+        { id: "in", source: { component: "source", port: "out" }, target: { component: "gate", port: "in" } },
+        { id: "out", source: { component: "gate", port: "out" }, target: { component: "sink", port: "in" } },
+      ],
+    },
+    definitions: {},
+    libraryRoots: [],
+  };
+}
+
+test("canceling import in an unsaved parent leaves document, history, dirty state and engine unchanged", async () => {
   const engine = new AcceptanceEngine();
   const restore = installWindow(engine);
   try {
-    const parentPath = "E:\\circuits\\parent.circuit.json";
-    engine.files.set(parentPath, JSON.stringify(emptyProject()));
     const binding = useWorkspace();
     await binding.bootstrap();
-    assert.equal(await binding.openProjectFromPath(parentPath), true);
-    const beforeDocument = JSON.stringify(binding.editorState.value?.document);
-    const beforeRecent = JSON.stringify(binding.recentProjects.value);
+    await binding.requestLoadExample();
+    const beforeDocument = binding.editorState.value?.document;
+    const beforeDirty = binding.isDirty.value;
     const beforeCalls = [...engine.calls];
+    const beforeRecent = [...binding.recentProjects.value];
 
     assert.equal(await binding.addSubcircuitFromDialog({ x: 20, y: 20 }), false);
-    assert.equal(JSON.stringify(binding.editorState.value?.document), beforeDocument);
+    assert.deepEqual(binding.editorState.value?.document, beforeDocument);
     assert.equal(binding.editorState.value?.canUndo, false);
-    assert.equal(binding.isDirty.value, false);
-    assert.equal(JSON.stringify(binding.recentProjects.value), beforeRecent);
+    assert.equal(binding.isDirty.value, beforeDirty);
+    assert.equal(binding.projectPath.value, null);
+    assert.deepEqual(binding.recentProjects.value, beforeRecent);
     assert.deepEqual(engine.calls, beforeCalls);
+    assert.equal(engine.pickOpenCalls, 1);
+    assert.equal(engine.files.size, 0);
   } finally {
     restore();
   }
 });
 
-test("adding the parent Project itself is rejected as a stable reference-cycle diagnostic", async () => {
+test("missing and old-version sources reject import without a partial definition or undo frame", async () => {
   const engine = new AcceptanceEngine();
   const restore = installWindow(engine);
   try {
-    const parentPath = "E:\\circuits\\parent.circuit.json";
-    engine.files.set(parentPath, JSON.stringify(emptyProject()));
-    engine.openResults.push({ ok: true, path: parentPath });
     const binding = useWorkspace();
     await binding.bootstrap();
-    assert.equal(await binding.openProjectFromPath(parentPath), true);
+    await binding.requestNew();
+    const absentPath = "E:\\circuits\\absent.circuit.json";
+    const oldPath = "E:\\circuits\\old.circuit.json";
+    engine.files.set(oldPath, JSON.stringify({ version: 1, circuit: { components: [], connections: [] } }));
     const beforeCalls = [...engine.calls];
 
-    assert.equal(await binding.addSubcircuitFromDialog({ x: 20, y: 20 }), false);
-    assert.match(binding.openError.value ?? "", /直接自引用/);
+    engine.openResults.push({ ok: true, path: absentPath });
+    assert.equal(await binding.addSubcircuitFromDialog(), false);
+    assert.match(binding.openError.value ?? "", /不存在/);
+    engine.openResults.push({ ok: true, path: oldPath });
+    assert.equal(await binding.addSubcircuitFromDialog(), false);
+    assert.match(binding.openError.value ?? "", /版本|支持/);
     assert.equal(binding.editorState.value?.document.components.length, 0);
     assert.equal(binding.editorState.value?.canUndo, false);
     assert.equal(binding.isDirty.value, false);
@@ -226,125 +242,61 @@ test("adding the parent Project itself is rejected as a stable reference-cycle d
   }
 });
 
-test("an unsaved parent stops at a canceled save before opening the Subcircuit chooser", async () => {
+test("import into an unsaved parent is one undoable edit and saving never rereads the source", async () => {
   const engine = new AcceptanceEngine();
   const restore = installWindow(engine);
   try {
-    const binding = useWorkspace();
-    await binding.bootstrap();
-    await binding.requestLoadExample();
-    const beforeDocument = JSON.stringify(binding.editorState.value?.document);
-    const beforeRecent = JSON.stringify(binding.recentProjects.value);
-    assert.equal(binding.isDirty.value, true);
-
-    assert.equal(await binding.addSubcircuitFromDialog({ x: 20, y: 20 }), false);
-    assert.equal(JSON.stringify(binding.editorState.value?.document), beforeDocument);
-    assert.equal(binding.projectPath.value, null);
-    assert.equal(binding.isDirty.value, true);
-    assert.equal(binding.editorState.value?.canUndo, false);
-    assert.equal(JSON.stringify(binding.recentProjects.value), beforeRecent);
-    assert.equal(engine.pickOpenCalls, 0, "保存取消后不能继续打开子文件选择器");
-  } finally {
-    restore();
-  }
-});
-
-test("an unsaved parent stops at a failed save before opening the Subcircuit chooser", async () => {
-  const engine = new AcceptanceEngine();
-  const restore = installWindow(engine);
-  try {
-    const binding = useWorkspace();
-    await binding.bootstrap();
-    await binding.requestLoadExample();
-    const beforeDocument = JSON.stringify(binding.editorState.value?.document);
-    const beforeRecent = JSON.stringify(binding.recentProjects.value);
-    engine.writeFailure = true;
-
-    assert.equal(await binding.addSubcircuitFromDialog({ x: 20, y: 20 }), false);
-    assert.equal(JSON.stringify(binding.editorState.value?.document), beforeDocument);
-    assert.equal(binding.projectPath.value, null);
-    assert.equal(binding.isDirty.value, true);
-    assert.equal(binding.editorState.value?.canUndo, false);
-    assert.equal(JSON.stringify(binding.recentProjects.value), beforeRecent);
-    assert.equal(engine.pickOpenCalls, 0, "保存失败后不能继续打开子文件选择器");
-  } finally {
-    restore();
-  }
-});
-
-test("saving a hierarchy writes the adopted root without rereading its child and reopens with the same interface", async () => {
-  const engine = new AcceptanceEngine();
-  const restore = installWindow(engine);
-  try {
+    const sourcePath = "E:\\circuits\\source.circuit.json";
     const parentPath = "E:\\circuits\\parent.circuit.json";
-    const childPath = "E:\\circuits\\child.circuit.json";
-    const parent = {
-      version: 1,
-      circuit: {
-        components: [{ id: "unit", kind: "subcircuit" as const, displayName: "child.circuit.json", position: { x: 10, y: 10 }, data: {
-          reference: ".\\child.circuit.json",
-          cachedPorts: [{ name: "a", direction: "input" as const, width: 1 }, { name: "y", direction: "output" as const, width: 1 }],
-        } }],
-        connections: [],
-      },
-    } satisfies ProjectFileData;
-    engine.files.set(parentPath, JSON.stringify(parent));
-    engine.files.set(childPath.toLowerCase(), JSON.stringify({ version: 1, circuit: {
-      components: [
-        { id: "in", kind: "input" as const, displayName: "a", position: { x: 0, y: 0 }, ports: ports.input },
-        { id: "gate", kind: "not" as const, displayName: "NOT", position: { x: 50, y: 0 } },
-        { id: "out", kind: "output" as const, displayName: "y", position: { x: 100, y: 0 }, ports: ports.output },
-      ],
-      connections: [
-        { id: "in", source: { component: "in", port: "out" }, target: { component: "gate", port: "in" } },
-        { id: "out", source: { component: "gate", port: "out" }, target: { component: "out", port: "in" } },
-      ],
-    }}));
+    engine.files.set(sourcePath, JSON.stringify(childProjectFile()));
+    engine.openResults.push({ ok: true, path: sourcePath });
     const binding = useWorkspace();
     await binding.bootstrap();
-    assert.equal(await binding.openProjectFromPath(parentPath), true);
-    const readsAfterOpen = [...engine.readPaths];
-    assert.equal(await binding.save(), true);
-    assert.deepEqual(engine.readPaths, readsAfterOpen);
+    await binding.requestNew();
+    assert.equal(await binding.addSubcircuitFromDialog({ x: 120, y: 100 }), true, binding.openError.value ?? "");
+    const placed = binding.editorState.value?.document.components[0];
+    assert.equal(placed?.kind, "subcircuit");
+    assert.equal(placed?.data?.subcircuit?.status, "resolved");
+    assert.equal(binding.editorState.value?.canUndo, true);
+    assert.equal(binding.projectPath.value, null);
+    await binding.undo();
+    assert.equal(binding.editorState.value?.document.components.length, 0);
+    await binding.redo();
+    assert.equal(binding.editorState.value?.document.components.length, 1);
 
-    const secondBinding = useWorkspace();
-    await secondBinding.bootstrap();
-    assert.equal(await secondBinding.openProjectFromPath(parentPath), true);
-    const unit = secondBinding.editorState.value?.document.components.find((component) => component.id === "unit");
-    assert.equal(unit?.data?.subcircuit?.status, "resolved");
-    assert.deepEqual(unit?.ports?.map((port) => [port.name, port.direction, port.width]), [["a", "input", 1], ["y", "output", 1]]);
+    engine.files.set(sourcePath, JSON.stringify(emptyProject()));
+    const readsBeforeSave = [...engine.readPaths];
+    engine.saveResults.push({ ok: true, path: parentPath });
+    assert.equal(await binding.saveAs(), true, binding.saveError.value ?? "");
+    assert.deepEqual(engine.readPaths, readsBeforeSave);
+    const saved = JSON.parse(engine.files.get(parentPath)!) as ProjectFileData;
+    assert.equal(saved.version, 2);
+    assert.equal(Object.keys(saved.definitions).length, 1);
+    assert.equal(saved.libraryRoots.length, 1);
+    assert.equal(saved.definitions[saved.libraryRoots[0]!]!.circuit.components.some((component) => component.kind === "not"), true);
+    assert.equal(JSON.stringify(saved).includes(sourcePath), false);
+    assert.equal(JSON.stringify(saved).includes("reference"), false);
+
+    engine.files.delete(sourcePath);
+    const reopened = useWorkspace();
+    await reopened.bootstrap();
+    assert.equal(await reopened.openProjectFromPath(parentPath), true, reopened.openError.value ?? "");
+    assert.equal(reopened.editorState.value?.document.components[0]?.data?.subcircuit?.status, "resolved");
+    assert.deepEqual(engine.readPaths.slice(readsBeforeSave.length), [parentPath]);
   } finally {
     restore();
   }
 });
 
-test("an unresolved branch stays visible while ordinary sibling branches are still flattened and evaluated", async () => {
+test("a missing embedded definition stays visible while an independent branch still reaches the engine", async () => {
   const engine = new AcceptanceEngine();
   const restore = installWindow(engine);
   try {
     const parentPath = "E:\\circuits\\partial.circuit.json";
-    const project: ProjectFileData = {
-      version: 1,
-      circuit: {
-        components: [
-          { id: "source", kind: "input", displayName: "Source", position: { x: 0, y: 0 }, ports: ports.input },
-          { id: "gate", kind: "not", displayName: "NOT", position: { x: 40, y: 0 } },
-          { id: "sink", kind: "output", displayName: "Sink", position: { x: 80, y: 0 }, ports: ports.output },
-          { id: "missing", kind: "subcircuit", displayName: "missing.circuit.json", position: { x: 40, y: 100 }, data: {
-            reference: ".\\missing.circuit.json",
-            cachedPorts: [{ name: "a", direction: "input", width: 1 }, { name: "y", direction: "output", width: 1 }],
-          } },
-        ],
-        connections: [
-          { id: "in", source: { component: "source", port: "out" }, target: { component: "gate", port: "in" } },
-          { id: "out", source: { component: "gate", port: "out" }, target: { component: "sink", port: "in" } },
-        ],
-      },
-    };
-    engine.files.set(parentPath, JSON.stringify(project));
+    engine.files.set(parentPath, JSON.stringify(missingDefinitionParent()));
     const binding = useWorkspace();
     await binding.bootstrap();
-    assert.equal(await binding.openProjectFromPath(parentPath), true);
+    assert.equal(await binding.openProjectFromPath(parentPath), true, binding.openError.value ?? "");
     const document = binding.editorState.value?.document;
     assert.equal(document?.components.find((component) => component.id === "missing")?.data?.subcircuit?.status, "unresolved");
     assert.deepEqual(document?.components.map((component) => component.id), ["source", "gate", "sink", "missing"]);
@@ -355,106 +307,50 @@ test("an unresolved branch stays visible while ordinary sibling branches are sti
   }
 });
 
-test("an unresolved Subcircuit can be duplicated, deleted, undone and redone without an engine subtree", async () => {
+test("duplicating an embedded Subcircuit uses the saved definition and failed projection rolls back", async () => {
   const engine = new AcceptanceEngine();
   const restore = installWindow(engine);
   try {
     const parentPath = "E:\\circuits\\parent.circuit.json";
-    engine.files.set(parentPath, JSON.stringify(unresolvedParent()));
+    engine.files.set(parentPath, JSON.stringify(embeddedParent()));
     const binding = useWorkspace();
     await binding.bootstrap();
-    assert.equal(await binding.openProjectFromPath(parentPath), true);
-    assert.equal(binding.editorState.value?.document.components[0]?.data?.subcircuit?.status, "unresolved");
-    const beforeCalls = [...engine.calls];
-
-    assert.equal(await binding.duplicateComponent("unit"), true);
-    const components = binding.editorState.value?.document.components ?? [];
-    assert.equal(components.length, 2);
-    assert.notEqual(components[0]?.id, components[1]?.id);
-    assert.deepEqual(components.map((component) => component.data?.subcircuit?.status), ["unresolved", "unresolved"]);
-    assert.deepEqual(engine.calls.filter((call) => !call.startsWith("settle")), beforeCalls.filter((call) => !call.startsWith("settle")));
-
-    await binding.undo();
-    assert.equal(binding.editorState.value?.document.components.length, 1);
-    await binding.redo();
-    assert.equal(binding.editorState.value?.document.components.length, 2);
-    const duplicateId = binding.editorState.value?.document.components[1]?.id;
-    assert.ok(duplicateId);
-    await binding.deleteComponent(duplicateId);
-    assert.equal(binding.editorState.value?.document.components.length, 1);
-    await binding.undo();
-    assert.equal(binding.editorState.value?.document.components.length, 2);
-    assert.deepEqual(engine.calls.filter((call) => !call.startsWith("settle")), beforeCalls.filter((call) => !call.startsWith("settle")));
-  } finally {
-    restore();
-  }
-});
-
-test("a resolved Subcircuit keeps authoritative flat ports for its read-only internal signal table", async () => {
-  const engine = new AcceptanceEngine();
-  const restore = installWindow(engine);
-  try {
-    const parentPath = "E:\\circuits\\parent.circuit.json";
-    const childPath = "E:\\circuits\\child.circuit.json";
-    engine.files.set(parentPath, JSON.stringify(resolvedParent()));
-    engine.files.set(childPath.toLowerCase(), JSON.stringify(resolvedChild()));
-    const binding = useWorkspace();
-    await binding.bootstrap();
-
-    assert.equal(await binding.openProjectFromPath(parentPath), true);
-    const internal = binding.state.value.internalComponents ?? [];
-    assert.equal(internal.length, 2);
-    assert.deepEqual(internal.map((descriptor) => descriptor.flatId), ["unit/gate", "unit/gate2"]);
-    assert.deepEqual(internal.map((descriptor) => descriptor.ports.map((port) => port.name)), [
-      ["in", "out"],
-      ["in", "out"],
-    ]);
-  } finally {
-    restore();
-  }
-});
-
-test("a failed resolved Subcircuit projection is compensated without publishing a history frame", async () => {
-  const engine = new AcceptanceEngine();
-  const restore = installWindow(engine);
-  try {
-    const parentPath = "E:\\circuits\\parent.circuit.json";
-    const childPath = "E:\\circuits\\child.circuit.json";
-    engine.files.set(parentPath, JSON.stringify(resolvedParent()));
-    engine.files.set(childPath.toLowerCase(), JSON.stringify(resolvedChild()));
-    const binding = useWorkspace();
-    await binding.bootstrap();
-    assert.equal(await binding.openProjectFromPath(parentPath), true);
-    const beforeDocument = JSON.stringify(binding.editorState.value?.document);
+    assert.equal(await binding.openProjectFromPath(parentPath), true, binding.openError.value ?? "");
+    const original = binding.editorState.value?.document.components[0];
     const beforeCalls = engine.calls.length;
-    // duplicate 展平子树按 input → gate → output 创建；第二次创建失败时第一项必须被移除补偿。
+
     engine.failOnAddCall = engine.addCallCount + 2;
-    const duplicateResult = await binding.duplicateComponent("unit");
-    assert.equal(duplicateResult, false);
-    assert.equal(JSON.stringify(binding.editorState.value?.document), beforeDocument);
-    assert.equal(binding.editorState.value?.operation, "idle");
+    assert.equal(await binding.duplicateComponent("unit"), false);
+    assert.deepEqual(binding.editorState.value?.document.components, [original]);
     assert.equal(binding.editorState.value?.canUndo, false);
     assert.equal(engine.calls.slice(beforeCalls).some((call) => call.startsWith("remove:")), true);
+
+    engine.failOnAddCall = null;
+    assert.equal(await binding.duplicateComponent("unit"), true);
+    const units = binding.editorState.value?.document.components ?? [];
+    assert.equal(units.length, 2);
+    assert.equal(units[1]?.data?.subcircuit?.definitionId, units[0]?.data?.subcircuit?.definitionId);
+    assert.equal(units[1]?.data?.subcircuit?.status, "resolved");
+    await binding.undo();
+    assert.equal(binding.editorState.value?.document.components.length, 1);
   } finally {
     restore();
   }
 });
 
-test("a projection compensation failure enters recovery-required instead of claiming Subcircuit success", async () => {
+test("a compensation failure reports recovery-required without publishing a duplicate", async () => {
   const engine = new AcceptanceEngine();
   const restore = installWindow(engine);
   try {
     const parentPath = "E:\\circuits\\parent.circuit.json";
-    const childPath = "E:\\circuits\\child.circuit.json";
-    engine.files.set(parentPath, JSON.stringify(resolvedParent()));
-    engine.files.set(childPath.toLowerCase(), JSON.stringify(resolvedChild()));
+    engine.files.set(parentPath, JSON.stringify(embeddedParent()));
     const binding = useWorkspace();
     await binding.bootstrap();
     assert.equal(await binding.openProjectFromPath(parentPath), true);
     engine.failOnAddCall = engine.addCallCount + 2;
     engine.failRemove = true;
-    const duplicateResult = await binding.duplicateComponent("unit");
-    assert.equal(duplicateResult, false);
+
+    assert.equal(await binding.duplicateComponent("unit"), false);
     assert.equal(binding.editorState.value?.operation, "recovery-required");
     assert.equal(binding.editorState.value?.document.components.filter((component) => component.kind === "subcircuit").length, 1);
   } finally {

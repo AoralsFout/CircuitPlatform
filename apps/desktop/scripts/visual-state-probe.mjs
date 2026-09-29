@@ -107,10 +107,8 @@ const COLLECT = `(async () => {
       : {
           status: text(hierarchyStatus),
           diagnostic: text(hierarchyDiagnostic),
-          reloadLabel: hierarchyReload?.getAttribute("aria-label") ?? null,
-          reloadDisabled: hierarchyReload?.hasAttribute("disabled") ?? false,
+          hasLegacyReload: hierarchyReload !== null,
           diagnosticId: hierarchyDiagnostic?.id ?? null,
-          reloadDescription: hierarchyReload?.getAttribute("aria-describedby") ?? null,
           },
     tabs,
     internalSignals: {
@@ -232,15 +230,12 @@ const expectations = {
   "hierarchy-resolved": (facts, failures) => {
     check(failures, facts.hierarchy?.status === "状态：已解析", `已解析子电路状态不符：${facts.hierarchy?.status}`);
     check(failures, facts.hierarchy?.diagnostic === null, "已解析子电路不应显示诊断告警");
-    check(failures, facts.hierarchy?.reloadLabel === "重新加载子电路 ./child.circuit.json", `重载按钮可访问名称不符：${facts.hierarchy?.reloadLabel}`);
-    check(failures, facts.hierarchy?.reloadDisabled === false, "已解析子电路的重载按钮不应被禁用");
+    check(failures, facts.hierarchy?.hasLegacyReload === false, "内嵌定义不应显示旧路径重载按钮");
   },
   "hierarchy-unresolved": (facts, failures) => {
     check(failures, facts.hierarchy?.status === "状态：未解析", `未解析子电路状态不符：${facts.hierarchy?.status}`);
-    check(failures, typeof facts.hierarchy?.diagnostic === "string" && facts.hierarchy.diagnostic.includes("找不到"), `未解析子电路诊断不符：${facts.hierarchy?.diagnostic}`);
-    check(failures, facts.hierarchy?.reloadLabel === "重新加载子电路 ./child.circuit.json", `重载按钮可访问名称不符：${facts.hierarchy?.reloadLabel}`);
-    check(failures, facts.hierarchy?.reloadDisabled === false, "未解析子电路仍应允许键盘重载");
-    check(failures, facts.hierarchy?.diagnosticId === facts.hierarchy?.reloadDescription, "重载命令未通过 aria-describedby 关联诊断");
+    check(failures, typeof facts.hierarchy?.diagnostic === "string" && facts.hierarchy.diagnostic.includes("缺少"), `未解析子电路诊断不符：${facts.hierarchy?.diagnostic}`);
+    check(failures, facts.hierarchy?.hasLegacyReload === false, "缺失定义也不应显示旧路径重载按钮");
   },
   "multi-tabs": (facts, failures) => {
     check(failures, facts.tabs.length === 2, `多文档状态应有 2 个标签，实际有 ${facts.tabs.length}`);
@@ -262,15 +257,15 @@ const expectations = {
   "unsaved-tab": (facts, failures) => {
     check(failures, facts.tabs.some((tab) => (tab.ariaLabel ?? "").includes("有未保存改动")), "未保存标签缺少脏状态可访问文案");
   },
-  "needs-reload": (facts, failures) => {
-    check(failures, facts.tabs.some((tab) => (tab.ariaLabel ?? "").includes("需重新加载子电路")), "父标签没有显示需重新加载标记");
-    check(failures, facts.hierarchy?.status === "状态：已解析", "需重新加载状态应保留已解析子电路");
-    check(failures, facts.hierarchy?.diagnostic === null, "需重新加载状态不应伪装成解析失败");
+  "snapshot-isolated": (facts, failures) => {
+    check(failures, facts.tabs.every((tab) => !(tab.ariaLabel ?? "").includes("需重新加载子电路")), "内嵌快照不应出现旧 stale 标签");
+    check(failures, facts.hierarchy?.status === "状态：已解析", "源文件缺失不应影响已内嵌的定义");
+    check(failures, facts.hierarchy?.hasLegacyReload === false, "内嵌快照不应显示旧路径重载按钮");
   },
   "unresolved-drill": (facts, failures) => {
     check(failures, facts.hierarchy?.status === "状态：未解析", "未解析下钻状态不符");
     check(failures, facts.drill?.disabled === true, "未解析下钻按钮必须禁用");
-    check(failures, facts.hierarchy?.diagnostic?.includes("找不到"), "未解析下钻缺少诊断");
+    check(failures, facts.hierarchy?.diagnostic?.includes("缺少"), "未解析下钻缺少诊断");
   },
   "engine-unavailable": (facts, failures) => {
     check(failures, facts.engine.text?.includes("不可用"), `引擎不可用状态文案不符：${facts.engine.text}`);

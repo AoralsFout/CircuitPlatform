@@ -2,7 +2,7 @@
 
 ## 状态
 
-已接受
+部分继续适用。普通 Project 的路径身份、文件原子写入和整体替换事务继续有效；v1 文件结构与按路径保存 Subcircuit 引用由 [ADR 0027](0027-embedded-subcircuit-snapshots.md) 的严格 v2 内嵌定义格式取代。
 
 ## 背景
 

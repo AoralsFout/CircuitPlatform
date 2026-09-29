@@ -102,15 +102,14 @@ function onTabKeydown(event: KeyboardEvent, index: number): void {
           :class="{ 'document-tab--active': tab.key === activeDocumentKey }"
           role="tab"
           :aria-selected="tab.key === activeDocumentKey"
-          :aria-label="`${tab.displayName}${tab.isDirty ? '，有未保存改动' : ''}${tab.needsReload ? '，需重新加载子电路' : ''}`"
+          :aria-label="`${tab.displayName}${tab.kind === 'definition' ? '，只读定义' : ''}${tab.isDirty ? '，有未保存改动' : ''}`"
           :data-document-key="tab.key"
           :tabindex="tab.key === activeDocumentKey ? 0 : -1"
           @click="emit('activateTab', tab.key)"
           @keydown="onTabKeydown($event, index)"
         >
-          <span class="document-tab__label">{{ tab.displayName }}</span>
+          <span class="document-tab__label">{{ tab.kind === 'definition' ? '◇ ' : '' }}{{ tab.displayName }}</span>
           <span v-if="tab.isDirty" class="document-tab__dirty" aria-label="未保存" title="未保存">●</span>
-          <span v-if="tab.needsReload" class="document-tab__dirty" aria-label="需重新加载子电路" title="需重新加载子电路">↻</span>
           <span class="document-tab__active-indicator" aria-hidden="true"></span>
           <span class="document-tab__close-wrap">
             <button type="button" class="document-tab__close" :aria-label="`关闭 ${tab.displayName}`" @click.stop="closeTab(tab.key)">×</button>

@@ -23,6 +23,7 @@ type ComponentState = {
 class StatefulHierarchyEngine implements EngineAdapter {
   readonly files = new Map<string, string>();
   readonly resetCalls: number[] = [];
+  readonly openChoices: string[] = [];
   private nextComponentId = 1;
   private nextConnectionId = 1;
   private readonly components = new Map<number, ComponentState>();
@@ -148,6 +149,11 @@ class StatefulHierarchyEngine implements EngineAdapter {
       : { ok: true, content };
   }
 
+  async pickOpenPath() {
+    const path = this.openChoices.shift();
+    return path === undefined ? { ok: false as const, reason: "canceled" } : { ok: true as const, path };
+  }
+
   private propagate(): void {
     for (let iteration = 0; iteration < this.components.size + 2; iteration += 1) {
       for (const connection of this.connections.values()) {
@@ -188,7 +194,7 @@ const dffPorts = [
 
 function dffChildProject(): ProjectFileData {
   return {
-    version: 1,
+    version: 2,
     circuit: {
       components: [
         { id: "d", kind: "input", displayName: "d", position: { x: 0, y: 0 }, ports: inputPorts },
@@ -202,6 +208,8 @@ function dffChildProject(): ProjectFileData {
         { id: "ff-q", source: { component: "ff", port: "q" }, target: { component: "q", port: "in" } },
       ],
     },
+    definitions: {},
+    libraryRoots: [],
   };
 }
 
@@ -219,12 +227,12 @@ function parentProject(): ProjectFileData {
     data: { value: "0" },
   }));
   return {
-    version: 1,
+    version: 2,
     circuit: {
       components: [
         ...components,
-        { id: "u1", kind: "subcircuit", displayName: "register.circuit.json", position: { x: 240, y: 40 }, data: { reference: ".\\register.circuit.json", cachedPorts: subcircuitPorts } },
-        { id: "u2", kind: "subcircuit", displayName: "register.circuit.json", position: { x: 240, y: 240 }, data: { reference: ".\\register.circuit.json", cachedPorts: subcircuitPorts } },
+        { id: "u1", kind: "subcircuit", displayName: "register.circuit.json", position: { x: 240, y: 40 }, data: { definitionId: "register", cachedPorts: subcircuitPorts } },
+        { id: "u2", kind: "subcircuit", displayName: "register.circuit.json", position: { x: 240, y: 240 }, data: { definitionId: "register", cachedPorts: subcircuitPorts } },
         { id: "out-1", kind: "output", displayName: "Q 1", position: { x: 520, y: 40 }, ports: outputPorts },
         { id: "out-2", kind: "output", displayName: "Q 2", position: { x: 520, y: 240 }, ports: outputPorts },
       ],
@@ -237,6 +245,33 @@ function parentProject(): ProjectFileData {
         { id: "u2-q", source: { component: "u2", port: "q" }, target: { component: "out-2", port: "in" } },
       ],
     },
+    definitions: { register: { displayName: "register.circuit.json", circuit: dffChildProject().circuit } },
+    libraryRoots: ["register"],
+  };
+}
+
+function nestedSharedParentProject(): ProjectFileData {
+  const parent = parentProject();
+  const wrapper: ProjectFileData["circuit"] = {
+    components: [
+      { id: "d", kind: "input", displayName: "d", position: { x: 0, y: 0 }, ports: inputPorts },
+      { id: "clock", kind: "input", displayName: "clock", position: { x: 0, y: 80 }, ports: inputPorts },
+      { id: "inner", kind: "subcircuit", displayName: "register", position: { x: 160, y: 40 }, data: { definitionId: "register", cachedPorts: dffPorts } },
+      { id: "q", kind: "output", displayName: "q", position: { x: 320, y: 40 }, ports: outputPorts },
+    ],
+    connections: [
+      { id: "d-inner", source: { component: "d", port: "out" }, target: { component: "inner", port: "d" } },
+      { id: "clock-inner", source: { component: "clock", port: "out" }, target: { component: "inner", port: "clock" } },
+      { id: "inner-q", source: { component: "inner", port: "q" }, target: { component: "q", port: "in" } },
+    ],
+  };
+  return {
+    ...parent,
+    circuit: { ...parent.circuit, components: parent.circuit.components.map((component) => component.kind === "subcircuit"
+      ? { ...component, data: { definitionId: "wrapper", cachedPorts: dffPorts } }
+      : component) },
+    definitions: { ...parent.definitions, wrapper: { displayName: "wrapper.circuit.json", circuit: wrapper } },
+    libraryRoots: ["wrapper"],
   };
 }
 
@@ -262,9 +297,7 @@ function installWindow(engine: StatefulHierarchyEngine): () => void {
 test("hierarchy DFF occurrences retain independent state across unrelated component edits", async () => {
   const engine = new StatefulHierarchyEngine();
   const parentPath = "E:\\circuits\\parent.circuit.json";
-  const childPath = "e:\\circuits\\register.circuit.json";
   engine.files.set(parentPath.toLowerCase(), projectText(parentProject()));
-  engine.files.set(childPath.toLowerCase(), projectText(dffChildProject()));
   const restore = installWindow(engine);
 
   try {
@@ -311,6 +344,111 @@ test("hierarchy DFF occurrences retain independent state across unrelated compon
     assert.equal(binding.state.value.signals["u1:q"], "1");
     assert.equal(binding.state.value.signals["u2:q"], "0");
     assert.deepEqual(engine.resetCalls, [], "无关普通元件编辑不得调用 reset");
+  } finally {
+    restore();
+  }
+});
+
+test("two occurrences of a shared nested definition keep separate DFF state", async () => {
+  const engine = new StatefulHierarchyEngine();
+  const parentPath = "E:\\circuits\\nested-parent.circuit.json";
+  engine.files.set(parentPath.toLowerCase(), projectText(nestedSharedParentProject()));
+  const restore = installWindow(engine);
+  try {
+    const binding = useWorkspace();
+    await binding.bootstrap();
+    assert.equal(await binding.openProjectFromPath(parentPath), true, binding.openError.value ?? "");
+    assert.equal(binding.state.value.signals["u1:q"], "X");
+    assert.equal(binding.state.value.signals["u2:q"], "X");
+    await binding.step();
+    await binding.setInputBit("data-1", 0, "1");
+    await binding.setInputBit("clock-1", 0, "1");
+    await binding.step();
+    assert.equal(binding.state.value.signals["u1:q"], "1");
+    assert.equal(binding.state.value.signals["u2:q"], "X");
+    await binding.setInputBit("clock-1", 0, "0");
+    await binding.setInputBit("clock-2", 0, "1");
+    await binding.step();
+    assert.equal(binding.state.value.signals["u1:q"], "1");
+    assert.equal(binding.state.value.signals["u2:q"], "0");
+  } finally {
+    restore();
+  }
+});
+
+test("reimport resets both uses of a nested DFF definition without rewinding simulation time", async () => {
+  const engine = new StatefulHierarchyEngine();
+  const parentPath = "E:\\circuits\\nested-parent.circuit.json";
+  const replacementPath = "G:\\moved\\register.circuit.json";
+  engine.files.set(parentPath.toLowerCase(), projectText(nestedSharedParentProject()));
+  engine.files.set(replacementPath.toLowerCase(), projectText(dffChildProject()));
+  const restore = installWindow(engine);
+  try {
+    const binding = useWorkspace();
+    await binding.bootstrap();
+    assert.equal(await binding.openProjectFromPath(parentPath), true);
+    await binding.step();
+    await binding.setInputBit("data-1", 0, "1");
+    await binding.setInputBit("clock-1", 0, "1");
+    await binding.step();
+    await binding.setInputBit("clock-1", 0, "0");
+    await binding.setInputBit("clock-2", 0, "1");
+    await binding.step();
+    assert.deepEqual([binding.state.value.signals["u1:q"], binding.state.value.signals["u2:q"]], ["1", "0"]);
+    const step = binding.state.value.simulationStep;
+    engine.openChoices.push(replacementPath);
+    assert.equal(await binding.reimportEmbeddedDefinition("register"), true, binding.openError.value ?? "");
+    assert.deepEqual([binding.state.value.signals["u1:q"], binding.state.value.signals["u2:q"]], ["X", "X"]);
+    assert.equal(binding.state.value.simulationStep, step);
+    assert.deepEqual(engine.resetCalls, []);
+    await binding.step();
+    await binding.setInputBit("clock-1", 0, "1");
+    await binding.step();
+    assert.equal(binding.state.value.signals["u1:q"], "1");
+    assert.equal(await binding.renameImportedSubcircuit("register", "Renamed"), true);
+    await binding.undo();
+    assert.equal(binding.state.value.signals["u1:q"], "1", "普通改名撤销不应继承重导入的强制重建标记");
+    const afterRenameUndo = binding.state.value.simulationStep;
+    await binding.undo();
+    assert.equal(binding.state.value.simulationStep, afterRenameUndo);
+    assert.deepEqual([binding.state.value.signals["u1:q"], binding.state.value.signals["u2:q"]], ["X", "X"]);
+    await binding.dispose();
+  } finally {
+    restore();
+  }
+});
+
+test("reimport preserves a different definition's DFF state in the same parent", async () => {
+  const engine = new StatefulHierarchyEngine();
+  const parentPath = "E:\\circuits\\separate-parent.circuit.json";
+  const replacementPath = "G:\\moved\\register.circuit.json";
+  const parent = parentProject();
+  const separated: ProjectFileData = {
+    ...parent,
+    circuit: { ...parent.circuit, components: parent.circuit.components.map((component) => component.id === "u2" && component.data && "definitionId" in component.data
+      ? { ...component, data: { ...component.data, definitionId: "unaffected" } } : component) },
+    definitions: { ...parent.definitions, unaffected: { displayName: "Independent", circuit: dffChildProject().circuit } },
+    libraryRoots: ["register", "unaffected"],
+  };
+  engine.files.set(parentPath.toLowerCase(), projectText(separated));
+  engine.files.set(replacementPath.toLowerCase(), projectText(dffChildProject()));
+  const restore = installWindow(engine);
+  try {
+    const binding = useWorkspace();
+    await binding.bootstrap();
+    assert.equal(await binding.openProjectFromPath(parentPath), true);
+    await binding.step();
+    await binding.setInputBit("data-1", 0, "1");
+    await binding.setInputBit("clock-1", 0, "1");
+    await binding.step();
+    await binding.setInputBit("clock-1", 0, "0");
+    await binding.setInputBit("clock-2", 0, "1");
+    await binding.step();
+    assert.deepEqual([binding.state.value.signals["u1:q"], binding.state.value.signals["u2:q"]], ["1", "0"]);
+    engine.openChoices.push(replacementPath);
+    assert.equal(await binding.reimportEmbeddedDefinition("register"), true, binding.openError.value ?? "");
+    assert.deepEqual([binding.state.value.signals["u1:q"], binding.state.value.signals["u2:q"]], ["X", "0"]);
+    await binding.dispose();
   } finally {
     restore();
   }

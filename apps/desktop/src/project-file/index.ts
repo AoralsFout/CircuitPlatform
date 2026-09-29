@@ -1,14 +1,14 @@
 /**
- * 项目文件 v1（`.circuit.json`）的序列化与校验：编辑器文档与 v1 JSON 互相转换的纯实现。
+ * 项目文件 v2（`.circuit.json`）的序列化与校验：顶层文档和内嵌定义互相转换的纯实现。
  *
- * 这是 Phase 5 唯一新增的测试缝。校验规则只有这一份实现——渲染层负责序列化与校验，
+ * 校验规则只有这一份实现——渲染层负责序列化与校验，
  * 主进程只做对话框与文件读写，所以本模块不接 Vue、不接 Electron、不做任何 IO：
  * 调用方拿到普通对象，`JSON.stringify` / `JSON.parse` 与落盘都发生在调用方。
  *
- * v1 的既定取舍（规格 #34）：Editor ID 写入文件并作为文件内唯一身份，加载后沿用同一套
+ * Editor ID 写入文件并作为文件内唯一身份，加载后沿用同一套
  * 身份；Waypoint 以语义形式内联在连接记录上，渲染 Route 不进文件；端口清单只为数据驱动
- * 元件写入，且只是缓存——引擎回传的清单仍是权威；`data` 数据袋 v1 保存 Input 当前值或
- * Subcircuit 的引用与缓存接口；
+ * 元件写入，且只是缓存——引擎回传的清单仍是权威；`data` 数据袋保存 Input 当前值或
+ * Subcircuit 的工程内定义身份与缓存接口；
  * 视口、选中、撤销历史、波形历史与时序状态都是会话状态，不进文件。
  */
 
@@ -16,7 +16,6 @@ import type { ComponentKindName, PortSpec, Signal } from "@circuit-platform/prot
 import type { EditorComponentKind, EditorComponentData, SubcircuitComponentData } from "../editor/component.ts";
 import type { EditorComponent, EditorConnection, EditorDocument, Point } from "../editor/index.ts";
 import { isWireColorId, type WireColorId } from "../editor/wire-appearance.ts";
-import { relativeProjectReference, resolveProjectReference, type PathPlatform } from "./paths.ts";
 
 export {
   currentPathPlatform,
@@ -30,11 +29,11 @@ export {
   sameProjectPath,
 } from "./paths.ts";
 
-/** 当前实现支持的最高项目文件版本；版本规则由 `parseProjectFile` 执行。 */
-export const PROJECT_FILE_VERSION = 1;
+/** 当前唯一支持的项目文件版本；版本规则由 `parseProjectFile` 执行。 */
+export const PROJECT_FILE_VERSION = 2;
 
 /**
- * v1 文件里允许出现的元件类型；文件格式钉死这份清单，新元件类型属于新的文件版本。
+ * v2 文件里允许出现的元件类型；文件格式钉死这份清单，新元件类型属于新的文件版本。
  * 若 `ComponentKindName` 未来扩充，这里是必须被有意更新的一处。
  */
 const FILE_KINDS = [
@@ -63,13 +62,24 @@ const FILE_KINDS = [
  */
 const FILE_DATA_DRIVEN_KINDS: readonly ComponentKindName[] = ["input", "output", "splitter", "merger"];
 
-/** 项目文件 v1 的类型形状；只描述序列化结果，解析前的实际数据一律按 `unknown` 校验。 */
+/** 项目文件 v2 的类型形状；只描述序列化结果，解析前的实际数据一律按 `unknown` 校验。 */
 export interface ProjectFileData {
-  version: number;
-  circuit: {
-    components: readonly ProjectFileComponent[];
-    connections: readonly ProjectFileConnection[];
-  };
+  version: 2;
+  circuit: ProjectFileCircuit;
+  definitions: Readonly<Record<string, ProjectFileDefinition>>;
+  libraryRoots: readonly string[];
+}
+
+/** 一个可独立保存的电路；定义和顶层电路使用同一记录格式。 */
+export interface ProjectFileCircuit {
+  components: readonly ProjectFileComponent[];
+  connections: readonly ProjectFileConnection[];
+}
+
+/** 父工程拥有的只读子电路定义，身份由 definitions 的键提供。 */
+export interface ProjectFileDefinition {
+  displayName: string;
+  circuit: ProjectFileCircuit;
 }
 
 /** 文件里一个元件的记录。 */
@@ -80,14 +90,14 @@ export interface ProjectFileComponent {
   position: { x: number; y: number };
   /** 端口清单缓存，只在数据驱动元件上写入；引擎回传的清单仍是权威。 */
   ports?: readonly PortSpec[];
-  /** 按类型扩展的数据袋；v1 支持 Input 当前激励值与 Subcircuit 引用缓存。 */
+  /** 按类型扩展的数据袋；保存 Input 当前值或 Subcircuit 的定义身份与接口缓存。 */
   data?: ProjectFileComponentData;
 }
 
 /** 按元件类型扩展的项目文件数据袋；Subcircuit 的缓存接口随父文件保存。 */
 export type ProjectFileComponentData =
   | { value?: string }
-  | { reference: string; cachedPorts: readonly PortSpec[]; portOrder?: readonly string[] };
+  | { definitionId: string; cachedPorts: readonly PortSpec[]; portOrder?: readonly string[] };
 
 /** 文件里一条连接的记录；端点用元件的 Editor ID 引用。 */
 export interface ProjectFileConnection {
@@ -103,92 +113,15 @@ export interface ProjectFileConnection {
 /** `serializeProjectFile` 的输入。 */
 export interface ProjectSerializationInput {
   document: EditorDocument;
+  /** 当前父文档拥有的定义；省略表示空定义表。 */
+  definitions?: ProjectFileData["definitions"];
+  /** 直接导入的定义 ID；未放置的定义仍可作为树根保留。 */
+  libraryRoots?: readonly string[];
   /**
    * 每个 Input 元件保存时的当前值，键为元件 ID，值是逐位 `0`/`1`/`X` 文本。
    * 与工作区 `inputValues` 同键空间；省略的输入不写 `data`。
    */
   inputValues?: Readonly<Record<string, Signal>>;
-}
-
-/** Save As 重定位引用时返回的稳定错误；失败时原文件不会产生部分改写。 */
-export interface ProjectFileRebaseError {
-  code: "reference-rebase-cross-root";
-  message: string;
-  componentId: string;
-  target: string;
-}
-
-export type ProjectFileRebaseResult =
-  | { ok: true; value: ProjectFileData }
-  | { ok: false; error: ProjectFileRebaseError };
-
-/**
- * 将项目文件中顶层 Subcircuit 的引用从旧父路径重定位到新父路径。
- *
- * 每条引用先按旧父路径解析为目标身份，再按新父路径计算相对写法；所有目标都能
- * 相对化后才一次性返回新文件，因此跨盘符或跨根失败时不会留下半成品修改。
- * @param file 已通过 `parseProjectFile` 的规范化项目文件。
- * @param oldParentProject 原父 Project 路径。
- * @param newParentProject Save As 后的新父 Project 路径。
- * @param platform 路径语义平台。
- * @returns 全部引用重定位后的新文件，或稳定的跨根错误。
- */
-export function rebaseProjectFileReferences(
-  file: ProjectFileData,
-  oldParentProject: string,
-  newParentProject: string,
-  platform?: PathPlatform,
-): ProjectFileRebaseResult {
-  const references = file.circuit.components.flatMap((component) => {
-    if (component.kind !== "subcircuit" || component.data === undefined || !("reference" in component.data)) return [];
-    const target = resolveProjectReference(component.data.reference, oldParentProject, platform);
-    const reference = relativeProjectReference(target, newParentProject, platform);
-    return [{ component, target, reference }];
-  });
-  const failed = references.find((item) => item.reference === null);
-  if (failed !== undefined) {
-    return {
-      ok: false,
-      error: {
-        code: "reference-rebase-cross-root",
-        message: `Subcircuit「${failed.component.id}」的目标无法从新父路径计算相对引用：${failed.target}。`,
-        componentId: failed.component.id,
-        target: failed.target,
-      },
-    };
-  }
-  const rebased = new Map(references.map((item) => [item.component.id, item.reference!]));
-  return {
-    ok: true,
-    value: {
-      version: file.version,
-      circuit: {
-        components: file.circuit.components.map((component) => ({
-          ...component,
-          position: { ...component.position },
-          ...(component.ports !== undefined ? { ports: component.ports.map(cloneFilePort) } : {}),
-          ...(component.kind === "subcircuit" && component.data !== undefined && "reference" in component.data
-            ? {
-                data: {
-                  ...component.data,
-                  reference: rebased.get(component.id)!,
-                  cachedPorts: component.data.cachedPorts.map(cloneFilePort),
-                  ...(component.data.portOrder !== undefined ? { portOrder: [...component.data.portOrder] } : {}),
-                },
-              }
-            : component.data !== undefined
-              ? { data: { ...component.data } }
-              : {}),
-        })),
-        connections: file.circuit.connections.map((connection) => ({
-          ...connection,
-          source: { ...connection.source },
-          target: { ...connection.target },
-          ...(connection.waypoints !== undefined ? { waypoints: connection.waypoints.map((point) => ({ ...point })) } : {}),
-        })),
-      },
-    },
-  };
 }
 
 /** 一次校验失败的单一原因；`code` 供程序分支，`message` 可直接展示。 */
@@ -199,8 +132,8 @@ export interface ProjectFileError {
 
 /** 解析成功的结果：可直接交给编辑器文档结构的数据，外加 Input 的当前值。 */
 export interface ParsedProjectFile {
-  /** 文件声明的版本；只可能等于或低于 `PROJECT_FILE_VERSION`。 */
-  version: number;
+  /** 文件声明的版本，恒为 2。 */
+  version: 2;
   /**
    * 与编辑器文档同构的数据。
    *
@@ -220,10 +153,10 @@ export type ProjectFileParseResult =
   | { ok: false; errors: readonly ProjectFileError[] };
 
 /**
- * 把编辑器文档序列化为项目文件 v1 的数据。无校验、无 IO：文档里缺什么就少写什么，
+ * 把编辑器文档与内嵌定义序列化为项目文件 v2 的数据。无校验、无 IO：文档里缺什么就少写什么，
  * 端口清单与输入值的权威来源是调用方（引擎回传值与工作区状态）。
  * @param input 编辑器文档与可选的 Input 当前值。
- * @returns 可直接 `JSON.stringify` 落盘的 v1 文件数据。
+ * @returns 可直接 `JSON.stringify` 落盘的 v2 文件数据。
  */
 export function serializeProjectFile(input: ProjectSerializationInput): ProjectFileData {
   const activeComponentIds = new Set(
@@ -272,7 +205,12 @@ export function serializeProjectFile(input: ProjectSerializationInput): ProjectF
     });
   }
 
-  return { version: PROJECT_FILE_VERSION, circuit: { components, connections } };
+  return {
+    version: PROJECT_FILE_VERSION,
+    circuit: { components, connections },
+    definitions: input.definitions ?? {},
+    libraryRoots: input.libraryRoots ?? [],
+  };
 }
 
 /**
@@ -286,8 +224,7 @@ export function parseProjectFile(raw: unknown): ProjectFileParseResult {
     return { ok: false, errors: [{ code: "root-not-object", message: "项目文件的根必须是 JSON 对象。" }] };
   }
 
-  // 版本是挡在结构校验前面的闸门：缺失、非整数或高于支持版本都直接拒绝，
-  // 不再尝试解释更高版本的结构。等于或低于支持版本接受（当前只有 1）。
+  // 精确版本是结构校验前的闸门：旧格式不能被误解释为 v2。
   const version: unknown = raw.version;
   if (version === undefined) {
     return { ok: false, errors: [{ code: "version-missing", message: "项目文件缺少版本字段 version。" }] };
@@ -303,13 +240,13 @@ export function parseProjectFile(raw: unknown): ProjectFileParseResult {
       ],
     };
   }
-  if (version > PROJECT_FILE_VERSION) {
+  if (version !== PROJECT_FILE_VERSION) {
     return {
       ok: false,
       errors: [
         {
           code: "version-unsupported",
-          message: `项目文件由更新版本的应用保存（version ${version}），当前支持到 version ${PROJECT_FILE_VERSION}。`,
+          message: `不支持项目文件 version ${version}；当前只支持 version ${PROJECT_FILE_VERSION}。`,
         },
       ],
     };
@@ -356,7 +293,7 @@ export function parseProjectFile(raw: unknown): ProjectFileParseResult {
     if (!isNonEmptyString(kind) || !fileKindIs(kind)) {
       errors.push({
         code: "component-kind-unknown",
-        message: `${label}（${id}）的 kind ${describeValue(kind)} 不是 v1 支持的元件类型。`,
+        message: `${label}（${id}）的 kind ${describeValue(kind)} 不是 v2 支持的元件类型。`,
       });
       continue;
     }
@@ -409,7 +346,7 @@ export function parseProjectFile(raw: unknown): ProjectFileParseResult {
         valid = false;
         errors.push({
           code: "subcircuit-data-invalid",
-          message: `${label}（${id}）的 data 必须包含非空 reference 与合法 cachedPorts。`,
+          message: `${label}（${id}）的 data 必须包含非空 definitionId 与合法 cachedPorts。`,
         });
       }
     }
@@ -520,13 +457,52 @@ export function parseProjectFile(raw: unknown): ProjectFileParseResult {
   }
 
   if (errors.length > 0) return { ok: false, errors };
+  if (!isRecord(raw.definitions)) {
+    return { ok: false, errors: [{ code: "definitions-not-object", message: "definitions 必须是以定义 ID 为键的对象。" }] };
+  }
+  if (!Array.isArray(raw.libraryRoots) || !raw.libraryRoots.every(isNonEmptyString) || new Set(raw.libraryRoots).size !== raw.libraryRoots.length) {
+    return { ok: false, errors: [{ code: "library-roots-invalid", message: "libraryRoots 必须是无重复的定义 ID 列表。" }] };
+  }
+  const definitions: Record<string, ProjectFileDefinition> = Object.create(null) as Record<string, ProjectFileDefinition>;
+  for (const [definitionId, rawDefinition] of Object.entries(raw.definitions)) {
+    if (!isNonEmptyString(definitionId) || !isRecord(rawDefinition) || !isNonEmptyString(rawDefinition.displayName)) {
+      errors.push({ code: "definition-invalid", message: `定义「${definitionId}」必须含显示名称和 circuit。` });
+      continue;
+    }
+    const parsed = parseProjectFile({ version: PROJECT_FILE_VERSION, circuit: rawDefinition.circuit, definitions: {}, libraryRoots: [] });
+    if (!parsed.ok) {
+      errors.push(...parsed.errors.map((error) => ({ ...error, message: `定义「${definitionId}」：${error.message}` })));
+      continue;
+    }
+    definitions[definitionId] = { displayName: rawDefinition.displayName, circuit: parsed.value.file.circuit };
+  }
+  for (const rootId of raw.libraryRoots) {
+    if (!Object.hasOwn(definitions, rootId)) errors.push({ code: "library-root-missing", message: `子电路树根「${rootId}」没有对应定义。` });
+  }
+  const visitState = new Map<string, "visiting" | "visited">();
+  const visit = (id: string, chain: readonly string[]): void => {
+    if (!Object.hasOwn(definitions, id)) return; // 引用缺失是可保存的使用处状态。
+    const state = visitState.get(id);
+    if (state === "visiting") {
+      errors.push({ code: "definition-cycle", message: `检测到定义引用环：${[...chain, id].join(" → ")}。` });
+      return;
+    }
+    if (state === "visited") return;
+    visitState.set(id, "visiting");
+    for (const component of definitions[id]!.circuit.components) {
+      if (component.kind === "subcircuit" && component.data !== undefined && "definitionId" in component.data) visit(component.data.definitionId, [...chain, id]);
+    }
+    visitState.set(id, "visited");
+  };
+  for (const id of Object.keys(definitions)) visit(id, []);
+  if (errors.length > 0) return { ok: false, errors };
   const document: EditorDocument = { components, connections };
   return {
     ok: true,
     value: {
-      version,
+      version: PROJECT_FILE_VERSION,
       document,
-      file: serializeProjectFile({ document, inputValues }),
+      file: serializeProjectFile({ document, inputValues, definitions: Object.fromEntries(Object.entries(definitions)), libraryRoots: raw.libraryRoots }),
       inputValues,
     },
   };
@@ -546,7 +522,7 @@ function cloneFilePort(port: PortSpec): PortSpec {
   };
 }
 
-/** 检查元件类型是否在 v1 文件格式允许的清单内。 */
+/** 检查元件类型是否在 v2 文件格式允许的清单内。 */
 function fileKindIs(kind: string): kind is EditorComponentKind {
   return (FILE_KINDS as readonly string[]).includes(kind);
 }
@@ -558,21 +534,21 @@ function fileDataDrivenKindIs(kind: ComponentKindName): boolean {
 
 function serializeSubcircuitData(data: SubcircuitComponentData): ProjectFileComponentData {
   return {
-    reference: data.reference,
+    definitionId: data.definitionId ?? "",
     cachedPorts: data.cachedPorts.map(cloneFilePort),
     ...(data.portOrder !== undefined ? { portOrder: [...data.portOrder] } : {}),
   };
 }
 
 function parseSubcircuitData(value: unknown): SubcircuitComponentData | undefined {
-  if (!isRecord(value) || !isNonEmptyString(value.reference) || !isFilePortList(value.cachedPorts)) return undefined;
+  if (!isRecord(value) || !isNonEmptyString(value.definitionId) || !isFilePortList(value.cachedPorts)) return undefined;
   const cachedPorts = value.cachedPorts.map(cloneFilePort);
-  if (value.portOrder === undefined) return { reference: value.reference, cachedPorts };
+  if (value.portOrder === undefined) return { definitionId: value.definitionId, reference: "", cachedPorts };
   if (!Array.isArray(value.portOrder) || !value.portOrder.every(isNonEmptyString)) return undefined;
   const names = new Set(cachedPorts.map((port) => port.name));
   const order = value.portOrder;
   if (new Set(order).size !== order.length || order.length !== names.size || order.some((name) => !names.has(name))) return undefined;
-  return { reference: value.reference, cachedPorts, portOrder: [...order] };
+  return { definitionId: value.definitionId, reference: "", cachedPorts, portOrder: [...order] };
 }
 
 function parseEndpointShape(value: unknown): { component: string; port: string } | null {
